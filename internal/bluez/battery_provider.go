@@ -285,6 +285,35 @@ func (bp *BatteryProvider) UpdateBatteryPercentage(name string, percentage uint8
 	return nil
 }
 
+// RemoveBattery removes a battery device from the provider
+func (bp *BatteryProvider) RemoveBattery(name string) error {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	device, ok := bp.devices[name]
+	if !ok {
+		return fmt.Errorf("battery device %s not found", name)
+	}
+
+	batteryPath := device.path
+
+	// Emit InterfacesRemoved signal to notify BlueZ
+	interfaces := []string{batteryProviderIface}
+	if err := bp.conn.Emit(providerPath, "org.freedesktop.DBus.ObjectManager.InterfacesRemoved",
+		batteryPath, interfaces); err != nil {
+		return fmt.Errorf("failed to emit InterfacesRemoved signal: %w", err)
+	}
+
+	// Unexport the battery object from D-Bus
+	bp.conn.Export(nil, batteryPath, "org.freedesktop.DBus.Properties")
+	bp.conn.Export(nil, batteryPath, "org.freedesktop.DBus.Introspectable")
+
+	// Remove from internal map
+	delete(bp.devices, name)
+
+	return nil
+}
+
 // DiscoverAirPodsDevice searches for connected AirPods using provider's existing connection
 func (bp *BatteryProvider) DiscoverAirPodsDevice() (string, error) {
 	// Get all BlueZ managed objects
