@@ -10,9 +10,12 @@ import (
 
 // BatteryLevels holds the battery percentages for each component
 type BatteryLevels struct {
-	Left  uint8
-	Right uint8
-	Case  uint8
+	Left          *uint8 // nil if unknown
+	Right         *uint8 // nil if unknown
+	Case          *uint8 // nil if unknown
+	LeftCharging  bool
+	RightCharging bool
+	CaseCharging  bool
 }
 
 // NoiseMode represents the current noise control mode
@@ -41,11 +44,7 @@ type Indicator struct {
 // New creates and initializes a new system tray indicator
 func New(onShowWindow, onQuit func(), onNoiseModeChange func(NoiseMode)) *Indicator {
 	return &Indicator{
-		batteries: BatteryLevels{
-			Left:  36,
-			Right: 63,
-			Case:  69,
-		},
+		batteries:         BatteryLevels{},
 		noiseMode:         Transparency,
 		onShowWindow:      onShowWindow,
 		onQuit:            onQuit,
@@ -74,19 +73,19 @@ func (ind *Indicator) onReady() {
 	}
 
 	systray.SetTitle("LinuxPods")
-	systray.SetTooltip(fmt.Sprintf("AirPods Pro - %d%%", ind.batteries.Left))
+	systray.SetTooltip("Searching for AirPods...")
 
 	// Create battery level display items (non-clickable)
 	systray.AddMenuItem("Battery Levels", "Current battery status").Disable()
 	systray.AddSeparator()
 
-	ind.batteryItems[0] = systray.AddMenuItem(fmt.Sprintf("  Left:  %d%%", ind.batteries.Left), "Left AirPod battery")
+	ind.batteryItems[0] = systray.AddMenuItem("  Left:  --", "Left AirPod battery")
 	ind.batteryItems[0].Disable()
 
-	ind.batteryItems[1] = systray.AddMenuItem(fmt.Sprintf("  Right: %d%%", ind.batteries.Right), "Right AirPod battery")
+	ind.batteryItems[1] = systray.AddMenuItem("  Right: --", "Right AirPod battery")
 	ind.batteryItems[1].Disable()
 
-	ind.batteryItems[2] = systray.AddMenuItem(fmt.Sprintf("  Case:  %d%%", ind.batteries.Case), "Case battery")
+	ind.batteryItems[2] = systray.AddMenuItem("  Case:  --", "Case battery")
 	ind.batteryItems[2].Disable()
 
 	systray.AddSeparator()
@@ -155,31 +154,75 @@ func (ind *Indicator) setNoiseMode(mode NoiseMode) {
 }
 
 // UpdateBatteryLevels updates the displayed battery levels
-func (ind *Indicator) UpdateBatteryLevels(left, right, caseLevel uint8) {
+func (ind *Indicator) UpdateBatteryLevels(left, right, caseLevel *uint8, leftCharging, rightCharging, caseCharging bool) {
 	ind.batteries.Left = left
 	ind.batteries.Right = right
 	ind.batteries.Case = caseLevel
+	ind.batteries.LeftCharging = leftCharging
+	ind.batteries.RightCharging = rightCharging
+	ind.batteries.CaseCharging = caseCharging
 
-	// Update tooltip with the lowest battery
-	lowest := left
-	if right < lowest {
-		lowest = right
+	// Find lowest battery for tooltip
+	var lowest uint8 = 100
+	hasAnyBattery := false
+	if left != nil {
+		hasAnyBattery = true
+		if *left < lowest {
+			lowest = *left
+		}
 	}
-	if caseLevel < lowest {
-		lowest = caseLevel
+	if right != nil {
+		hasAnyBattery = true
+		if *right < lowest {
+			lowest = *right
+		}
+	}
+	if caseLevel != nil {
+		hasAnyBattery = true
+		if *caseLevel < lowest {
+			lowest = *caseLevel
+		}
 	}
 
-	systray.SetTooltip(fmt.Sprintf("AirPods Pro - %d%%", lowest))
+	if hasAnyBattery {
+		systray.SetTooltip(fmt.Sprintf("AirPods Pro - %d%%", lowest))
+	} else {
+		systray.SetTooltip("Searching for AirPods...")
+	}
 
-	// Update menu items
+	// Update menu items with charging indicators
 	if ind.batteryItems[0] != nil {
-		ind.batteryItems[0].SetTitle(fmt.Sprintf("  Left:  %d%%", left))
+		if left != nil {
+			charging := ""
+			if leftCharging {
+				charging = " ⚡"
+			}
+			ind.batteryItems[0].SetTitle(fmt.Sprintf("  Left:  %d%%%s", *left, charging))
+		} else {
+			ind.batteryItems[0].SetTitle("  Left:  --")
+		}
 	}
 	if ind.batteryItems[1] != nil {
-		ind.batteryItems[1].SetTitle(fmt.Sprintf("  Right: %d%%", right))
+		if right != nil {
+			charging := ""
+			if rightCharging {
+				charging = " ⚡"
+			}
+			ind.batteryItems[1].SetTitle(fmt.Sprintf("  Right: %d%%%s", *right, charging))
+		} else {
+			ind.batteryItems[1].SetTitle("  Right: --")
+		}
 	}
 	if ind.batteryItems[2] != nil {
-		ind.batteryItems[2].SetTitle(fmt.Sprintf("  Case:  %d%%", caseLevel))
+		if caseLevel != nil {
+			charging := ""
+			if caseCharging {
+				charging = " ⚡"
+			}
+			ind.batteryItems[2].SetTitle(fmt.Sprintf("  Case:  %d%%%s", *caseLevel, charging))
+		} else {
+			ind.batteryItems[2].SetTitle("  Case:  --")
+		}
 	}
 }
 

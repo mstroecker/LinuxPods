@@ -4,21 +4,44 @@ import (
 	"fmt"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+
+	"linuxpods/internal/battery"
+	"linuxpods/internal/ble"
 )
 
-func Activate(app *adw.Application) *adw.ApplicationWindow {
+// BatteryWidgets holds references to UI elements for updating battery display
+type BatteryWidgets struct {
+	LeftLevel   *gtk.LevelBar
+	RightLevel  *gtk.LevelBar
+	CaseLevel   *gtk.LevelBar
+	LeftLabel   *gtk.Label
+	RightLabel  *gtk.Label
+	CaseLabel   *gtk.Label
+	StatusLabel *gtk.Label // For connection status, charging, etc.
+}
+
+func Activate(app *adw.Application, batteryMgr *battery.Manager) *adw.ApplicationWindow {
 	win := adw.NewApplicationWindow(&app.Application)
 	win.SetTitle("LinuxPods")
 	win.SetDefaultSize(400, 500)
 
-	setupUI(win)
+	batteryWidgets := setupUI(win)
 	win.Present()
+
+	// Register callback with battery manager to update UI
+	batteryMgr.RegisterCallback(func(data *ble.ProximityData) {
+		// Update UI on GTK main thread
+		glib.IdleAdd(func() {
+			updateBatteryDisplay(batteryWidgets, data)
+		})
+	})
 
 	return win
 }
 
-func setupUI(win *adw.ApplicationWindow) {
+func setupUI(win *adw.ApplicationWindow) *BatteryWidgets {
 	// Create header bar with close button
 	headerBar := adw.NewHeaderBar()
 
@@ -32,7 +55,7 @@ func setupUI(win *adw.ApplicationWindow) {
 	headerBar.SetTitleWidget(viewSwitcher)
 
 	// Create the Control tab content
-	controlBox := createControlView()
+	controlBox, batteryWidgets := createControlView()
 	viewStack.AddTitledWithIcon(controlBox, "control", "Control", "audio-headphones-symbolic")
 
 	// Create the Settings tab content (placeholder for now)
@@ -46,15 +69,20 @@ func setupUI(win *adw.ApplicationWindow) {
 
 	// Set the toolbar view as the window's content
 	win.SetContent(toolbarView)
+
+	return batteryWidgets
 }
 
-func createControlView() *gtk.Box {
+func createControlView() (*gtk.Box, *BatteryWidgets) {
 	// Create main vertical box to hold all control elements
 	controlBox := gtk.NewBox(gtk.OrientationVertical, 20)
 	controlBox.SetMarginTop(20)
 	controlBox.SetMarginBottom(20)
 	controlBox.SetMarginStart(20)
 	controlBox.SetMarginEnd(20)
+
+	// Create battery widgets structure
+	widgets := &BatteryWidgets{}
 
 	// Create horizontal box for battery indicators
 	batteryBox := gtk.NewBox(gtk.OrientationHorizontal, 20)
@@ -68,8 +96,9 @@ func createControlView() *gtk.Box {
 		"assets/airpod_case.png",
 	}
 
-	// Battery percentages for left, right, and case
-	batteryPercentages := []float64{0.36, 0.63, 0.69} // 36%, 63%, 69%
+	// Create references for each battery component
+	levelBars := []*gtk.LevelBar{}
+	labels := []*gtk.Label{}
 
 	// Create three battery indicators with images
 	for i := 0; i < 3; i++ {
@@ -85,21 +114,38 @@ func createControlView() *gtk.Box {
 		// Add battery indicator (LevelBar)
 		batteryLevel := gtk.NewLevelBar()
 		batteryLevel.SetMode(gtk.LevelBarModeContinuous)
-		batteryLevel.SetValue(batteryPercentages[i])
+		batteryLevel.SetValue(0.0) // Start at 0, will be updated by scanner
 		batteryLevel.SetSizeRequest(100, 20)
 		columnBox.Append(batteryLevel)
+		levelBars = append(levelBars, batteryLevel)
 
 		// Add battery percentage label
-		percentLabel := gtk.NewLabel(fmt.Sprintf("%.0f%%", batteryPercentages[i]*100))
+		percentLabel := gtk.NewLabel("--")
 		percentLabel.AddCSSClass("dim-label")
 		columnBox.Append(percentLabel)
+		labels = append(labels, percentLabel)
 
 		// Add column to battery box
 		batteryBox.Append(columnBox)
 	}
 
+	// Store widget references
+	widgets.LeftLevel = levelBars[0]
+	widgets.RightLevel = levelBars[1]
+	widgets.CaseLevel = levelBars[2]
+	widgets.LeftLabel = labels[0]
+	widgets.RightLabel = labels[1]
+	widgets.CaseLabel = labels[2]
+
 	// Add battery indicators to control box
 	controlBox.Append(batteryBox)
+
+	// Add status label for connection state, charging, etc.
+	statusLabel := gtk.NewLabel("Searching for AirPods...")
+	statusLabel.AddCSSClass("dim-label")
+	statusLabel.SetMarginTop(10)
+	controlBox.Append(statusLabel)
+	widgets.StatusLabel = statusLabel
 
 	// Create Noise Control section using Adwaita PreferencesGroup
 	noiseControlGroup := adw.NewPreferencesGroup()
@@ -179,7 +225,7 @@ func createControlView() *gtk.Box {
 	// Add conversation awareness section to control box
 	controlBox.Append(conversationGroup)
 
-	return controlBox
+	return controlBox, widgets
 }
 
 func createSettingsView() *gtk.Box {
@@ -236,4 +282,63 @@ func createSettingsView() *gtk.Box {
 	settingsBox.Append(aboutGroup)
 
 	return settingsBox
+}
+
+// updateBatteryDisplay updates the UI with battery data from BLE scanner
+func updateBatteryDisplay(widgets *BatteryWidgets, data *ble.ProximityData) {
+	// Update left AirPod
+	if data.LeftBattery != nil {
+		widgets.LeftLevel.SetValue(float64(*data.LeftBattery) / 100.0)
+		charging := ""
+		if data.LeftCharging {
+			charging = " ⚡"
+		}
+		inEar := ""
+		if data.LeftInEar {
+			inEar = " 👂"
+		}
+		widgets.LeftLabel.SetText(fmt.Sprintf("%d%%%s%s", *data.LeftBattery, charging, inEar))
+	} else {
+		widgets.LeftLevel.SetValue(0.0)
+		widgets.LeftLabel.SetText("--")
+	}
+
+	// Update right AirPod
+	if data.RightBattery != nil {
+		widgets.RightLevel.SetValue(float64(*data.RightBattery) / 100.0)
+		charging := ""
+		if data.RightCharging {
+			charging = " ⚡"
+		}
+		inEar := ""
+		if data.RightInEar {
+			inEar = " 👂"
+		}
+		widgets.RightLabel.SetText(fmt.Sprintf("%d%%%s%s", *data.RightBattery, charging, inEar))
+	} else {
+		widgets.RightLevel.SetValue(0.0)
+		widgets.RightLabel.SetText("--")
+	}
+
+	// Update case
+	if data.CaseBattery != nil {
+		widgets.CaseLevel.SetValue(float64(*data.CaseBattery) / 100.0)
+		charging := ""
+		if data.CaseCharging {
+			charging = " ⚡"
+		}
+		widgets.CaseLabel.SetText(fmt.Sprintf("%d%%%s", *data.CaseBattery, charging))
+	} else {
+		widgets.CaseLevel.SetValue(0.0)
+		widgets.CaseLabel.SetText("--")
+	}
+
+	// Update status label with connection state and other info
+	statusText := fmt.Sprintf("Model: 0x%04X", data.DeviceModel)
+	if data.LidOpen {
+		statusText += " • Lid: Open"
+	} else {
+		statusText += " • Lid: Closed"
+	}
+	widgets.StatusLabel.SetText(statusText)
 }

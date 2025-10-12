@@ -29,7 +29,7 @@ func testFullIntegration() {
 	log.Println("=== Testing Full Integration (GUI Scenario) ===")
 
 	log.Println("\n1. Creating battery provider...")
-	provider, err := bluez.NewBatteryProvider()
+	provider, err := bluez.NewBluezBatteryProvider()
 	if err != nil {
 		log.Fatalf("Failed to create provider: %v", err)
 	}

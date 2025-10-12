@@ -9,7 +9,7 @@
 // # Critical Requirements
 //
 //  1. Single Connection Per Provider:
-//     The BatteryProvider maintains a persistent D-Bus system bus connection throughout
+//     The BluezBatteryProvider maintains a persistent D-Bus system bus connection throughout
 //     its lifetime. ALL operations related to the provider (device discovery, battery
 //     registration, signal monitoring) MUST use this same connection.
 //
@@ -21,7 +21,7 @@
 // # Correct Usage Pattern
 //
 //	// Create provider (opens persistent connection)
-//	provider, err := bluez.NewBatteryProvider()
+//	provider, err := bluez.NewBluezBatteryProvider()
 //	defer provider.Close()
 //
 //	// Use provider's methods which use its connection
@@ -60,21 +60,21 @@ type BatteryDevice struct {
 	source     string
 }
 
-// BatteryProvider manages battery information for BlueZ
-type BatteryProvider struct {
+// BluezBatteryProvider manages battery information for BlueZ
+type BluezBatteryProvider struct {
 	conn    *dbus.Conn
 	devices map[string]*BatteryDevice
 	mu      sync.RWMutex
 }
 
-// NewBatteryProvider creates and registers a new battery provider with BlueZ
-func NewBatteryProvider() (*BatteryProvider, error) {
+// NewBluezBatteryProvider creates and registers a new battery provider with BlueZ
+func NewBluezBatteryProvider() (*BluezBatteryProvider, error) {
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to system bus: %w", err)
 	}
 
-	bp := &BatteryProvider{
+	bp := &BluezBatteryProvider{
 		conn:    conn,
 		devices: make(map[string]*BatteryDevice),
 	}
@@ -95,7 +95,7 @@ func NewBatteryProvider() (*BatteryProvider, error) {
 }
 
 // exportProvider exports the battery provider on D-Bus
-func (bp *BatteryProvider) exportProvider() error {
+func (bp *BluezBatteryProvider) exportProvider() error {
 	// Export ObjectManager interface
 	if err := bp.conn.Export(bp, providerPath, "org.freedesktop.DBus.ObjectManager"); err != nil {
 		return err
@@ -129,7 +129,7 @@ func (bp *BatteryProvider) exportProvider() error {
 }
 
 // register registers this provider with BlueZ BatteryProviderManager
-func (bp *BatteryProvider) register() error {
+func (bp *BluezBatteryProvider) register() error {
 	obj := bp.conn.Object(bluezService, "/org/bluez/hci0")
 	call := obj.Call(batteryProviderManagerIface+".RegisterBatteryProvider", 0, dbus.ObjectPath(providerPath))
 	if call.Err != nil {
@@ -139,7 +139,7 @@ func (bp *BatteryProvider) register() error {
 }
 
 // AddBattery adds a new battery device to the provider
-func (bp *BatteryProvider) AddBattery(name string, percentage uint8, devicePath string) error {
+func (bp *BluezBatteryProvider) AddBattery(name string, percentage uint8, devicePath string) error {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
@@ -240,7 +240,7 @@ func (bd *BatteryDevice) Set(iface string, property string, value dbus.Variant) 
 }
 
 // GetManagedObjects implements org.freedesktop.DBus.ObjectManager
-func (bp *BatteryProvider) GetManagedObjects() (map[dbus.ObjectPath]map[string]map[string]dbus.Variant, *dbus.Error) {
+func (bp *BluezBatteryProvider) GetManagedObjects() (map[dbus.ObjectPath]map[string]map[string]dbus.Variant, *dbus.Error) {
 	bp.mu.RLock()
 	defer bp.mu.RUnlock()
 
@@ -260,7 +260,7 @@ func (bp *BatteryProvider) GetManagedObjects() (map[dbus.ObjectPath]map[string]m
 }
 
 // UpdateBatteryPercentage updates the battery percentage for a device
-func (bp *BatteryProvider) UpdateBatteryPercentage(name string, percentage uint8) error {
+func (bp *BluezBatteryProvider) UpdateBatteryPercentage(name string, percentage uint8) error {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
@@ -286,7 +286,7 @@ func (bp *BatteryProvider) UpdateBatteryPercentage(name string, percentage uint8
 }
 
 // RemoveBattery removes a battery device from the provider
-func (bp *BatteryProvider) RemoveBattery(name string) error {
+func (bp *BluezBatteryProvider) RemoveBattery(name string) error {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
@@ -315,7 +315,7 @@ func (bp *BatteryProvider) RemoveBattery(name string) error {
 }
 
 // DiscoverAirPodsDevice searches for connected AirPods using provider's existing connection
-func (bp *BatteryProvider) DiscoverAirPodsDevice() (string, error) {
+func (bp *BluezBatteryProvider) DiscoverAirPodsDevice() (string, error) {
 	// Get all BlueZ managed objects
 	obj := bp.conn.Object(bluezService, "/")
 	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
@@ -372,7 +372,7 @@ func findSubstring(s, substr string) bool {
 }
 
 // WatchForAirPods monitors for AirPods connections and automatically registers battery
-func (bp *BatteryProvider) WatchForAirPods() error {
+func (bp *BluezBatteryProvider) WatchForAirPods() error {
 	// First, check if AirPods are already connected (using provider's existing connection)
 	if device, err := bp.DiscoverAirPodsDevice(); err == nil {
 		if err := bp.AddBattery("airpods_battery", 36, device); err == nil {
@@ -437,7 +437,7 @@ func (bp *BatteryProvider) WatchForAirPods() error {
 }
 
 // getDeviceAlias retrieves the alias/name of a Bluetooth device
-func (bp *BatteryProvider) getDeviceAlias(devicePath string) string {
+func (bp *BluezBatteryProvider) getDeviceAlias(devicePath string) string {
 	obj := bp.conn.Object(bluezService, dbus.ObjectPath(devicePath))
 	variant, err := obj.GetProperty("org.bluez.Device1.Alias")
 	if err != nil {
@@ -450,7 +450,7 @@ func (bp *BatteryProvider) getDeviceAlias(devicePath string) string {
 }
 
 // Close unregisters the provider and closes the D-Bus connection
-func (bp *BatteryProvider) Close() error {
+func (bp *BluezBatteryProvider) Close() error {
 	obj := bp.conn.Object(bluezService, "/org/bluez/hci0")
 	call := obj.Call(batteryProviderManagerIface+".UnregisterBatteryProvider", 0, dbus.ObjectPath(providerPath))
 	if call.Err != nil {
