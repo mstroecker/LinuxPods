@@ -60,11 +60,15 @@ type BatteryDevice struct {
 	source     string
 }
 
+// AirPodsConnectionCallback is called when AirPods connect or disconnect
+type AirPodsConnectionCallback func(connected bool, devicePath string, macAddress string)
+
 // BluezBatteryProvider manages battery information for BlueZ
 type BluezBatteryProvider struct {
-	conn    *dbus.Conn
-	devices map[string]*BatteryDevice
-	mu      sync.RWMutex
+	conn               *dbus.Conn
+	devices            map[string]*BatteryDevice
+	mu                 sync.RWMutex
+	connectionCallback AirPodsConnectionCallback
 }
 
 // NewBluezBatteryProvider creates and registers a new battery provider with BlueZ
@@ -378,6 +382,16 @@ func (bp *BluezBatteryProvider) WatchForAirPods() error {
 		if err := bp.AddBattery("airpods_battery", 36, device); err == nil {
 			log.Printf("Battery provider registered for device: %s", device)
 			log.Println("Note: GNOME Settings shows one battery per device. Use LinuxPods app for all three batteries.")
+
+			// Notify connection callback
+			if macAddr, err := bp.GetDeviceAddress(device); err == nil {
+				bp.mu.RLock()
+				cb := bp.connectionCallback
+				bp.mu.RUnlock()
+				if cb != nil {
+					cb(true, device, macAddr)
+				}
+			}
 		}
 	}
 
@@ -414,17 +428,38 @@ func (bp *BluezBatteryProvider) WatchForAirPods() error {
 
 			// Check if Connected property changed
 			if connectedVar, ok := changes["Connected"]; ok {
-				if connected, ok := connectedVar.Value().(bool); ok && connected {
-					// Device connected, check if it's AirPods
-					devicePath := string(signal.Path)
+				devicePath := string(signal.Path)
+				if connected, ok := connectedVar.Value().(bool); ok {
+					// Check if it's AirPods
 					if alias := bp.getDeviceAlias(devicePath); contains(alias, "AirPods") {
-						bp.mu.Lock()
-						_, exists := bp.devices["airpods_battery"]
-						bp.mu.Unlock()
+						if connected {
+							// Device connected
+							bp.mu.Lock()
+							_, exists := bp.devices["airpods_battery"]
+							bp.mu.Unlock()
 
-						if !exists {
-							if err := bp.AddBattery("airpods_battery", 36, devicePath); err == nil {
-								log.Printf("Battery provider registered for newly connected device: %s", devicePath)
+							if !exists {
+								if err := bp.AddBattery("airpods_battery", 36, devicePath); err == nil {
+									log.Printf("Battery provider registered for newly connected device: %s", devicePath)
+								}
+							}
+
+							// Notify connection callback
+							if macAddr, err := bp.GetDeviceAddress(devicePath); err == nil {
+								bp.mu.RLock()
+								cb := bp.connectionCallback
+								bp.mu.RUnlock()
+								if cb != nil {
+									cb(true, devicePath, macAddr)
+								}
+							}
+						} else {
+							// Device disconnected
+							bp.mu.RLock()
+							cb := bp.connectionCallback
+							bp.mu.RUnlock()
+							if cb != nil {
+								cb(false, devicePath, "")
 							}
 						}
 					}
@@ -447,6 +482,26 @@ func (bp *BluezBatteryProvider) getDeviceAlias(devicePath string) string {
 		return alias
 	}
 	return ""
+}
+
+// GetDeviceAddress retrieves the MAC address of a Bluetooth device
+func (bp *BluezBatteryProvider) GetDeviceAddress(devicePath string) (string, error) {
+	obj := bp.conn.Object(bluezService, dbus.ObjectPath(devicePath))
+	variant, err := obj.GetProperty("org.bluez.Device1.Address")
+	if err != nil {
+		return "", fmt.Errorf("failed to get device address: %w", err)
+	}
+	if addr, ok := variant.Value().(string); ok {
+		return addr, nil
+	}
+	return "", fmt.Errorf("address property is not a string")
+}
+
+// SetConnectionCallback sets the callback for AirPods connection events
+func (bp *BluezBatteryProvider) SetConnectionCallback(callback AirPodsConnectionCallback) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	bp.connectionCallback = callback
 }
 
 // Close unregisters the provider and closes the D-Bus connection

@@ -7,8 +7,9 @@ A modern Linux desktop application for managing Apple AirPods with a native GNOM
 ### ✅ Implemented
 
 - **Real-Time Battery Monitoring**: View live battery levels for left AirPod, right AirPod, and charging case
-  - BLE scanning for passive monitoring (works while AirPods connected to other devices)
-  - AAP (Apple Accessory Protocol) client for accurate, real-time data
+  - **Automatic Source Selection**: AAP (accurate, 1%) when connected, BLE (approximate, 5-10%) otherwise
+  - **AAP Integration**: Apple Accessory Protocol over L2CAP for precise battery monitoring
+  - **BLE Scanning**: Passive monitoring works while AirPods connected to other devices
   - Charging status indicators (⚡) and in-ear detection (👂)
 - **System Tray Integration**: Battery levels and quick actions in system tray
 - **GNOME Settings Integration**: Battery information appears in GNOME Settings → Power panel (lowest battery level)
@@ -80,6 +81,15 @@ The application provides:
 - **Main Window**: View all three battery levels, charging status, and in-ear detection
 - **System Tray**: Quick access to battery info and app controls (right-click tray icon)
 - **GNOME Settings**: Battery appears in Settings → Power (shows lowest battery)
+- **Automatic Data Source**: Uses AAP (accurate) when connected, BLE (approximate) otherwise
+
+**How it works:**
+1. App starts with BLE scanning for passive battery monitoring
+2. When AirPods connect to your computer, app automatically:
+   - Detects the connection via BlueZ
+   - Establishes AAP connection for accurate battery data
+   - Switches to using AAP for all battery updates
+3. When AirPods disconnect, app falls back to BLE scanning
 
 ### CLI Tools (Development/Testing)
 
@@ -152,26 +162,30 @@ LinuxPods uses a centralized `BatteryManager` that coordinates all battery-relat
 
 ```
 BatteryManager (central state)
-    ├─ BLE Scanner ──────────> Scans for Apple Continuity advertisements
+    ├─ AAP Client ───────────> Active connection for accurate battery (when connected)
+    ├─ BLE Scanner ──────────> Passive scanning (fallback or when disconnected)
+    ├─ Automatic Switching ──> Prefers AAP, falls back to BLE
     ├─ Updates via callbacks:
     │   ├─ UI Window ────────> Updates battery widgets
     │   ├─ System Tray ──────> Updates tray menu
     │   └─ BlueZ Provider ───> Updates GNOME Settings
 ```
 
-**Two Battery Data Sources:**
+**Two Battery Data Sources (Automatically Selected):**
 
-1. **BLE Scanning** (Passive, ~5-10% accuracy)
+1. **AAP Client** (Active, 1% accuracy) - **Primary when connected**
+   - Apple Accessory Protocol over L2CAP (PSM 4097)
+   - Requires AirPods to be connected to Linux via Bluetooth
+   - Real-time updates (<1 second)
+   - Accurate battery percentages (1% precision)
+   - Automatically used when AirPods connect
+
+2. **BLE Scanning** (Passive, ~5-10% accuracy) - **Fallback**
    - Scans Apple Continuity proximity pairing advertisements
    - Works while AirPods are connected to other devices (e.g., iPhone)
    - No connection required, updates every 3-5 seconds
+   - Approximate battery levels (5-10% precision)
    - See `docs/ble-proximity-pairing.md` for protocol details
-
-2. **AAP Client** (Active, 1% accuracy)
-   - Apple Accessory Protocol over L2CAP (PSM 4097)
-   - Requires AirPods to be connected to Linux
-   - Real-time updates (<1 second)
-   - Currently used for testing, will be integrated later
 
 #### BlueZ Integration
 
@@ -218,6 +232,8 @@ See the [LICENSE](LICENSE) file for the full license text.
 - [x] Battery information in GNOME Settings (lowest battery)
 - [x] Real-time battery monitoring via BLE scanning
 - [x] Apple Accessory Protocol (AAP) client implementation
+- [x] **AAP integration into main app with automatic switching**
+- [x] **Accurate battery monitoring when AirPods connected**
 - [x] System tray icon with battery display
 - [x] Charging status indicators
 - [x] In-ear detection (via BLE)
@@ -228,9 +244,7 @@ See the [LICENSE](LICENSE) file for the full license text.
 
 - [ ] Functional noise control mode switching (UI ready, AAP commands TBD)
 - [ ] Functional conversation awareness toggle (UI ready, AAP commands TBD)
-- [ ] Integrate AAP client into main app (currently separate CLI tool)
 - [ ] Persist settings across sessions
 - [ ] Battery level notifications (low battery warnings)
 - [ ] Support for other Apple audio devices (AirPods Max, Beats, etc.)
-- [ ] Automatic reconnection handling
-- [ ] Connection status in UI
+- [ ] Connection status indicator in UI

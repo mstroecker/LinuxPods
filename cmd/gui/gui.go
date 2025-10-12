@@ -60,6 +60,20 @@ func createBluezBatteryProvider(batteryMgr *battery.Manager) *bluez.BluezBattery
 		return nil
 	}
 
+	// Set connection callback to manage AAP connection
+	bluezProvider.SetConnectionCallback(func(connected bool, devicePath string, macAddr string) {
+		if connected {
+			log.Printf("AirPods connected: %s (MAC: %s)", devicePath, macAddr)
+			if err := batteryMgr.ConnectAAP(macAddr); err != nil {
+				log.Printf("Warning: Failed to connect AAP: %v", err)
+				log.Println("Falling back to BLE for battery monitoring (approximate)")
+			}
+		} else {
+			log.Printf("AirPods disconnected: %s", devicePath)
+			batteryMgr.DisconnectAAP()
+		}
+	})
+
 	// Watch for AirPods connections
 	if err := bluezProvider.WatchForAirPods(); err != nil {
 		log.Printf("Warning: Failed to watch for AirPods: %v", err)
@@ -81,12 +95,6 @@ func createBluezBatteryProvider(batteryMgr *battery.Manager) *bluez.BluezBattery
 			hasAnyBattery = true
 			if *data.RightBattery < batteryLevel {
 				batteryLevel = *data.RightBattery
-			}
-		}
-		if data.CaseBattery != nil {
-			hasAnyBattery = true
-			if *data.CaseBattery < batteryLevel {
-				batteryLevel = *data.CaseBattery
 			}
 		}
 
