@@ -1,6 +1,7 @@
 package main
 
 import (
+	"linuxpods/internal/util"
 	"log"
 	"os"
 
@@ -34,15 +35,17 @@ func run() int {
 	}
 	defer batteryMgr.Close()
 
-	// Create components
+	// === Create Bluez Provider ===
 	bluezProvider := createBluezBatteryProvider(batteryMgr)
 	if bluezProvider != nil {
 		defer bluezProvider.Close()
 	}
 
+	// === Create Bluez Provider ===
 	tray := createTrayIndicator(batteryMgr)
 	defer tray.Stop()
 
+	// === Create GUI App ===
 	app = adw.NewApplication(appID, 0)
 	app.ConnectActivate(func() {
 		window = ui.Activate(app, batteryMgr)
@@ -79,31 +82,12 @@ func createBluezBatteryProvider(batteryMgr *battery.Manager) *bluez.BluezBattery
 		log.Printf("Warning: Failed to watch for AirPods: %v", err)
 	}
 
-	// Register callback to update BlueZ provider when battery data changes
+	// Register a callback to update BlueZ provider when battery data changes
 	batteryMgr.RegisterCallback(func(data *ble.ProximityData) {
-		// Use lowest battery for GNOME Settings (most useful for knowing when to charge)
-		var batteryLevel uint8 = 100
-		hasAnyBattery := false
-
-		if data.LeftBattery != nil {
-			hasAnyBattery = true
-			if *data.LeftBattery < batteryLevel {
-				batteryLevel = *data.LeftBattery
-			}
-		}
-		if data.RightBattery != nil {
-			hasAnyBattery = true
-			if *data.RightBattery < batteryLevel {
-				batteryLevel = *data.RightBattery
-			}
-		}
-
-		if !hasAnyBattery {
-			batteryLevel = 0
-		}
-
+		// Use the lowest battery for GNOME Settings (most useful for knowing when to charge)
+		var batteryLevel = util.MinOr(data.LeftBattery, data.RightBattery, 0)
 		if err := bluezProvider.UpdateBatteryPercentage("airpods_battery", batteryLevel); err != nil {
-			log.Printf("Failed to update BlueZ battery provider: %v", err)
+			log.Printf("Update BlueZ battery: %v", err)
 		}
 	})
 
@@ -121,7 +105,7 @@ func createTrayIndicator(batteryMgr *battery.Manager) *indicator.Indicator {
 	)
 	tray.Start()
 
-	// Register callback to update tray when battery data changes
+	// Register callback to update a tray when battery data changes
 	batteryMgr.RegisterCallback(func(data *ble.ProximityData) {
 		tray.UpdateBatteryLevels(
 			data.LeftBattery,

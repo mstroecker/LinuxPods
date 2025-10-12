@@ -270,7 +270,7 @@ func (bp *BluezBatteryProvider) UpdateBatteryPercentage(name string, percentage 
 
 	device, ok := bp.devices[name]
 	if !ok {
-		return fmt.Errorf("battery device %s not found", name)
+		return fmt.Errorf("battery device %s not connected", name)
 	}
 
 	device.percentage = percentage

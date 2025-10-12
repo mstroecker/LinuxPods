@@ -55,7 +55,7 @@ func NewManager() (*Manager, error) {
 		stopChan:  make(chan struct{}),
 	}
 
-	// Start battery update loop
+	// Start a battery update loop
 	go m.updateLoop()
 
 	return m, nil
@@ -93,7 +93,7 @@ func (m *Manager) updateLoop() {
 			m.mu.RUnlock()
 
 			if !aapActive {
-				// Scan for AirPods with 5 second timeout
+				// Scan for AirPods with 5-second timeout
 				data, err := m.scanner.ScanForAirPods(5 * time.Second)
 				if err == nil {
 					m.handleBatteryUpdate(data)
@@ -212,7 +212,7 @@ func (m *Manager) aapReadLoop() {
 				return
 			}
 
-			// Try to parse battery packet
+			// Try to parse the battery packet
 			batteryInfo, err := aap.ParseBatteryPacket(packet)
 			if err == nil {
 				// Convert AAP battery info to ProximityData format

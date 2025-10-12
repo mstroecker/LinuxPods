@@ -268,14 +268,9 @@ func parseProximityData(data []byte) (*ProximityData, error) {
 		RawData:     append([]byte(nil), payload...), // Copy payload for debugging
 	}
 
-	// Parse color from byte 8
-	if len(payload) > 8 {
-		pd.Color = payload[8]
-	}
-
-	// Parse connection state from byte 9
-	if len(payload) > 9 {
-		pd.ConnectionState = payload[9]
+	// Parse color from byte 7
+	if len(payload) > 7 {
+		pd.Color = payload[7]
 	}
 
 	// Determine primary pod and orientation
@@ -311,39 +306,47 @@ func parseProximityData(data []byte) (*ProximityData, error) {
 	pd.LeftBattery = decodeBattery(leftNibble)
 	pd.RightBattery = decodeBattery(rightNibble)
 
-	// Parse charging status from byte 5
-	// Bits may be swapped based on orientation
-	chargingByte := payload[5]
-	if isFlipped {
-		pd.LeftCharging = (chargingByte & 0x01) != 0
-		pd.RightCharging = (chargingByte & 0x02) != 0
-	} else {
-		pd.LeftCharging = (chargingByte & 0x02) != 0
-		pd.RightCharging = (chargingByte & 0x01) != 0
+	// Case battery from byte 5 - use simple decoding like AirPods batteries
+	if len(payload) > 5 {
+		caseBatteryRaw := payload[5]
+		pd.CaseBattery = decodeBattery(caseBatteryRaw & 0x0F)
 	}
-	pd.CaseCharging = (chargingByte & 0x04) != 0
+
+	// Parse charging status from byte 5
+	chargingByte := payload[5]
+
+	// | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+	// | ? | C | L | R | Case battery_ |
+	// Second, third and fourth byte from the left
+	pd.CaseCharging = ((chargingByte >> (8 - 2)) & 0x01) != 0
+	pd.RightCharging = ((chargingByte >> (8 - 3)) & 0x01) != 0
+	pd.LeftCharging = ((chargingByte >> (8 - 4)) & 0x01) != 0
+
+	// Bits are swapped based on primary pod status
+	if isFlipped {
+		pd.LeftCharging, pd.RightCharging = pd.RightCharging, pd.LeftCharging
+	}
 
 	// Parse ear detection from status byte (byte 3)
+	pd.LeftInEar = (statusByte & 0x08) != 0
+	pd.RightInEar = (statusByte & 0x02) != 0
 	// Bits may be swapped based on xorFactor
 	if xorFactor {
-		pd.LeftInEar = (statusByte & 0x02) != 0
-		pd.RightInEar = (statusByte & 0x08) != 0
-	} else {
-		pd.LeftInEar = (statusByte & 0x08) != 0
-		pd.RightInEar = (statusByte & 0x02) != 0
+		pd.LeftInEar, pd.RightInEar = pd.RightInEar, pd.LeftInEar
 	}
 
 	// Parse lid status from byte 8 (lid byte), bit 3
 	// Based on LibrePods: ((lid >> 3) & 0x01) == 0 means lid is open
+	// Encrypted?
 	if len(payload) > 8 {
 		lidByte := payload[8]
 		pd.LidOpen = ((lidByte >> 3) & 0x01) == 0
 	}
 
-	// Case battery from byte 6 - use simple decoding like AirPods batteries
-	if len(payload) > 6 {
-		caseBatteryRaw := payload[6]
-		pd.CaseBattery = decodeBattery(caseBatteryRaw)
+	// Parse connection state from byte 9
+	// Encrypted?
+	if len(payload) > 9 {
+		pd.ConnectionState = payload[9]
 	}
 
 	return pd, nil

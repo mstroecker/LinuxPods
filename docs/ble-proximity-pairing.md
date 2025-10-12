@@ -38,12 +38,11 @@ Byte    Description                     Example     Notes
 1-2     Device Model (Big-Endian)       0x2420      0x2420 = AirPods Pro
 3       Status Byte                     0x0b        See Status Byte section (ear detection)
 4       Battery Levels                  0x88        See Battery Levels section
-5       Charging Status                 0x07        See Charging Status section
-6       Case Battery                    0x08        See Case Battery section
-7       Unknown                         0x00        Purpose unclear
-8       Lid Status                      0x05        See Lid Status section
-9       Suffix                          0x??        Varies
-10-24   Encrypted Data                  ...         Encrypted payload (16 bytes)
+5       Charging Status + Case Battery  0x07        See Charging Status section
+6       Lid Open Counter                0x08        See Case Battery section
+7       Device Color                    0x00        Not tested
+8       Unknown, maybe encrypted        0x05        Not clear
+9-24    Encrypted Data                  ...         Encrypted payload (16 bytes)
 ```
 
 ## Byte-by-Byte Parsing
@@ -56,6 +55,24 @@ AirPods broadcast which pod is "primary" (left or right). When the right pod is 
 - Ear detection bits (uses XOR logic)
 
 Always parse **byte 3 (status byte) first** to determine orientation before parsing other fields.
+
+### Bytes 1-2: Device Model
+
+16-bit big-endian value identifying the AirPods model:
+
+```
+Model ID    Device
+--------    ------
+0x2420      AirPods Pro
+0x0e20      AirPods Pro (older)
+0x0220      AirPods (2nd gen)
+0x2420      AirPods Pro (2nd gen)
+```
+
+**Decoding:**
+```go
+deviceModel := uint16(payload[1])<<8 | uint16(payload[2])
+```
 
 ### Byte 3: Status Byte
 
@@ -79,9 +96,6 @@ Bit     Flag                    Example
 The AirPods broadcast which pod is "primary". This affects how battery levels, charging status, and ear detection should be interpreted:
 
 ```go
-statusByte := payload[3]
-primaryLeft := ((statusByte >> 5) & 0x01) == 1
-thisInCase := ((statusByte >> 6) & 0x01) == 1
 isFlipped := !primaryLeft
 xorFactor := primaryLeft != thisInCase  // XOR operation
 ```
@@ -89,82 +103,20 @@ xorFactor := primaryLeft != thisInCase  // XOR operation
 - **isFlipped**: When `true`, battery nibbles and charging bits are swapped
 - **xorFactor**: Used to determine correct ear detection bits
 
-**Ear Detection (depends on xorFactor):**
-```go
-if xorFactor {
-    leftInEar := (statusByte & 0x08) != 0
-    rightInEar := (statusByte & 0x02) != 0
-} else {
-    leftInEar := (statusByte & 0x02) != 0
-    rightInEar := (statusByte & 0x08) != 0
-}
-```
-
 **Note:** Ear detection may require calibration and may not work reliably in all scenarios.
 
 ### Byte 4: Battery Levels (Left/Right AirPods)
 
-Encodes both AirPod battery levels in a single byte using nibbles. **The nibbles may be swapped based on which pod is primary:**
-
+Battery levels for both AirPods are encoded using the same nibble system:
 ```
-Nibble      Battery (Normal)    Battery (Flipped)
-------      ----------------    -----------------
-Upper 4     Right               Left
-Lower 4     Left                Right
-```
-
-**Note:** Use the `isFlipped` flag from byte 3 (status byte) to determine orientation.
-
-**Nibble Decoding Table:**
-```
-Nibble Value    Battery Level
-------------    -------------
-0x0 - 0x9       0-90% (multiply by 10)
-0xA - 0xE       100%
-0xF             Unknown/Not Available
+Bit     Component (Normal) 
+---     ------------------------+
+0-4       Left AirPod Battery
+5-7       Right AirPod Battery
++-------------------------------+
 ```
 
-**Example:** `0x88`
-- Right: `(0x88 >> 4) = 0x8 = 8 → 80%`
-- Left: `(0x88 & 0x0F) = 0x8 = 8 → 80%`
-
-**Example:** `0xAF`
-- Right: `(0xAF >> 4) = 0xA → 100%`
-- Left: `(0xAF & 0x0F) = 0xF → Unknown`
-
-**Decoding:**
-```go
-func decodeBattery(nibble uint8) *uint8 {
-    switch {
-    case nibble <= 0x9:
-        val := nibble * 10
-        return &val
-    case nibble >= 0xA && nibble <= 0xE:
-        val := uint8(100)
-        return &val
-    case nibble == 0xF:
-        return nil  // Unknown
-    }
-}
-
-// Determine orientation from status byte
-statusByte := payload[3]
-primaryLeft := ((statusByte >> 5) & 0x01) == 1
-isFlipped := !primaryLeft
-
-batteryByte := payload[4]
-var leftNibble, rightNibble uint8
-if isFlipped {
-    leftNibble = (batteryByte >> 4) & 0x0F
-    rightNibble = batteryByte & 0x0F
-} else {
-    leftNibble = batteryByte & 0x0F
-    rightNibble = (batteryByte >> 4) & 0x0F
-}
-
-leftBattery := decodeBattery(leftNibble)
-rightBattery := decodeBattery(rightNibble)
-```
+Left and Right AirPods may be swapped based on the primary pod.
 
 **Important:** These values are **approximate** and may differ from actual battery levels by 5-10%. The BLE advertisements update slowly and do not reflect real-time battery drainage.
 
@@ -173,101 +125,33 @@ rightBattery := decodeBattery(rightNibble)
 Encodes charging state for all three components. **Bits 0 and 1 may be swapped based on orientation:**
 
 ```
-Bit     Component (Normal)    Component (Flipped)
----     ------------------    -------------------
-0       Left AirPod           Right AirPod
-1       Right AirPod          Left AirPod
-2       Case                  Case (always bit 2)
-3-7     Unknown               Unknown
+Bit     Component (Normal)
+---     ------------------
+0       Unknown
+1       Case Charging
+2       Right AirPod Charging
+3       Left AirPod Charging
+4-7     Battery Case (May be > 100)
 ```
 
-**Examples:**
-- `0x00` = `00000000` → No bits set → Nothing charging
-- `0x01` = `00000001` → Bit 0 set → Left charging (normal) / Right charging (flipped)
-- `0x04` = `00000100` → Bit 2 set → Case charging
-- `0x07` = `00000111` → Bits 0,1,2 set → All charging
+Left and Right AirPods may be swapped based on the primary pod.
 
-**Decoding:**
-```go
-chargingByte := payload[5]
+### Byte 6: Unknown (Lid Open Counter?)
 
-// Use isFlipped from status byte parsing
-if isFlipped {
-    leftCharging := (chargingByte & 0x02) != 0
-    rightCharging := (chargingByte & 0x01) != 0
-} else {
-    leftCharging := (chargingByte & 0x01) != 0
-    rightCharging := (chargingByte & 0x02) != 0
-}
-caseCharging := (chargingByte & 0x04) != 0  // Always bit 2
-```
+Todo
 
-**Note:** Based on LibrePods implementation, the charging bits are **NOT inverted** as originally documented.
+### Byte 7: Device Color
 
-### Byte 6: Case Battery
+not tested
 
-Case battery level encoded using the same nibble system as AirPods batteries:
+### Byte 8: Unknown (Lid Status?)
 
-```
-Value       Battery Level
------       -------------
-0x0 - 0x9   0-90% (multiply by 10)
-0xA - 0xE   100%
-0xF         Unknown/Not Available
-```
+Todo
 
-**Decoding:**
-```go
-caseBatteryRaw := payload[6]
-caseBattery := decodeBattery(caseBatteryRaw)  // Use same function as AirPods
-```
 
-**Important:** Case battery is also **approximate** and may be several percent off actual value.
+### Bytes 8-24: Encrypted Data
 
-**Note:** Earlier documentation suggested complex formulas based on charging state. LibrePods uses the simple nibble decoding instead.
-
-### Byte 8: Lid Status
-
-Encodes whether the AirPods case lid is open or closed:
-
-```
-Bit     Flag                Example
----     ----                -------
-3       Lid Status          0 = Lid Open, 1 = Lid Closed
-0-2     Unknown
-4-7     Unknown
-```
-
-**Decoding:**
-```go
-if len(payload) > 8 {
-    lidByte := payload[8]
-    lidOpen := ((lidByte >> 3) & 0x01) == 0  // Bit 3 inverted: 0 = open
-}
-```
-
-**Note:** Lid detection via BLE may not be as reliable as other status indicators. Test thoroughly with your specific AirPods model.
-
-### Bytes 1-2: Device Model
-
-16-bit big-endian value identifying the AirPods model:
-
-```
-Model ID    Device
---------    ------
-0x2420      AirPods Pro
-0x0e20      AirPods Pro (older)
-0x0220      AirPods (2nd gen)
-```
-
-**Decoding:**
-```go
-deviceModel := uint16(payload[1])<<8 | uint16(payload[2])
-```
-
-### Bytes 10-24: Encrypted Data
-
-The final 16 bytes are encrypted and contain additional device-specific information. The encryption key is derived from the pairing process and is not publicly documented.
+The final 18 bytes are encrypted and contain additional device-specific information. The encryption key is derived from the pairing process and is not publicly documented.
 
 ## Accuracy Limitations
 
@@ -297,7 +181,7 @@ Difference:         9% off
 - **Calibration:** May require device-specific calibration
 - **Use Cases:** Detecting when AirPods are in/out of ears
 
-### Lid Status
+### Lid Status (Encrypted?)
 
 - **Reliability:** Variable across different AirPods models
 - **Detection:** Uses byte 8, bit 3
