@@ -2,6 +2,9 @@
 
 A modern Linux desktop application for managing Apple AirPods with a native GNOME interface.
 
+> [!WARNING]
+> This project is in very early development. README and documentation may be inaccurate, and many features are not yet implemented.
+
 ## Features
 
 ### ✅ Implemented
