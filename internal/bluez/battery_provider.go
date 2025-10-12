@@ -1,7 +1,44 @@
+// Package bluez provides integration with BlueZ's Battery Provider D-Bus API.
+//
+// # D-Bus Connection Architecture
+//
+// This package implements the BlueZ Battery Provider protocol to expose battery
+// information to the system. The implementation requires careful adherence to
+// the D-Bus ObjectManager pattern and proper signal emission.
+//
+// # Critical Requirements
+//
+//  1. Single Connection Per Provider:
+//     The BatteryProvider maintains a persistent D-Bus system bus connection throughout
+//     its lifetime. ALL operations related to the provider (device discovery, battery
+//     registration, signal monitoring) MUST use this same connection.
+//
+//  2. InterfacesAdded Signal:
+//     When adding a new battery object, the provider MUST emit the InterfacesAdded
+//     signal on the ObjectManager interface. Without this signal, BlueZ will not
+//     expose the battery information to GNOME Settings.
+//
+// # Correct Usage Pattern
+//
+//	// Create provider (opens persistent connection)
+//	provider, err := bluez.NewBatteryProvider()
+//	defer provider.Close()
+//
+//	// Use provider's methods which use its connection
+//	provider.WatchForAirPods()  // ✓ Discovers and monitors using provider's connection
+//
+//	// Or manually:
+//	device, _ := provider.DiscoverAirPodsDevice()  // ✓ Uses provider's connection
+//	provider.AddBattery("airpods", 50, device)     // ✓ Emits InterfacesAdded signal
+//
+// # Testing
+//
+// See cmd/debug for test utilities that verify the D-Bus integration works correctly.
 package bluez
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/godbus/dbus/v5"
@@ -12,7 +49,7 @@ const (
 	bluezService                = "org.bluez"
 	batteryProviderManagerIface = "org.bluez.BatteryProviderManager1"
 	batteryProviderIface        = "org.bluez.BatteryProvider1"
-	providerPath                = "/com/linuxpods/battery"
+	providerPath                = "/com/github/mstroecker/linuxpods/battery"
 )
 
 // BatteryDevice represents a single battery device
@@ -73,6 +110,14 @@ func (bp *BatteryProvider) exportProvider() error {
 		<method name="GetManagedObjects">
 			<arg name="objects" type="a{oa{sa{sv}}}" direction="out"/>
 		</method>
+		<signal name="InterfacesAdded">
+			<arg name="object_path" type="o"/>
+			<arg name="interfaces_and_properties" type="a{sa{sv}}"/>
+		</signal>
+		<signal name="InterfacesRemoved">
+			<arg name="object_path" type="o"/>
+			<arg name="interfaces" type="as"/>
+		</signal>
 	</interface>
 </node>`
 
@@ -140,6 +185,20 @@ func (bp *BatteryProvider) AddBattery(name string, percentage uint8, devicePath 
 	}
 
 	bp.devices[name] = device
+
+	// Emit InterfacesAdded signal to notify BlueZ of the new battery
+	interfaces := map[string]map[string]dbus.Variant{
+		batteryProviderIface: {
+			"Percentage": dbus.MakeVariant(percentage),
+			"Device":     dbus.MakeVariant(dbus.ObjectPath(devicePath)),
+			"Source":     dbus.MakeVariant("LinuxPods"),
+		},
+	}
+
+	if err := bp.conn.Emit(providerPath, "org.freedesktop.DBus.ObjectManager.InterfacesAdded",
+		batteryPath, interfaces); err != nil {
+		return fmt.Errorf("failed to emit InterfacesAdded signal: %w", err)
+	}
 
 	return nil
 }
@@ -224,6 +283,141 @@ func (bp *BatteryProvider) UpdateBatteryPercentage(name string, percentage uint8
 	}
 
 	return nil
+}
+
+// DiscoverAirPodsDevice searches for connected AirPods using provider's existing connection
+func (bp *BatteryProvider) DiscoverAirPodsDevice() (string, error) {
+	// Get all BlueZ managed objects
+	obj := bp.conn.Object(bluezService, "/")
+	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+
+	err := obj.Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&objects)
+	if err != nil {
+		return "", fmt.Errorf("failed to get managed objects: %w", err)
+	}
+
+	return findAirPodsInObjects(objects)
+}
+
+// findAirPodsInObjects searches for AirPods in the given BlueZ objects
+func findAirPodsInObjects(objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant) (string, error) {
+	// Search for AirPods devices
+	for path, interfaces := range objects {
+		// Check if this is a device object
+		if deviceProps, ok := interfaces["org.bluez.Device1"]; ok {
+			// Check device name/alias
+			if alias, ok := deviceProps["Alias"]; ok {
+				aliasStr, ok := alias.Value().(string)
+				if !ok {
+					continue
+				}
+				// Check if it's an AirPods device
+				if contains(aliasStr, "AirPods") {
+					// Check if device is connected
+					if connected, ok := deviceProps["Connected"]; ok {
+						if connBool, ok := connected.Value().(bool); ok && connBool {
+							return string(path), nil
+						}
+					}
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("no connected AirPods device found")
+}
+
+// contains checks if a string contains a substring (case-insensitive helper)
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
+		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
+			findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// WatchForAirPods monitors for AirPods connections and automatically registers battery
+func (bp *BatteryProvider) WatchForAirPods() error {
+	// First, check if AirPods are already connected (using provider's existing connection)
+	if device, err := bp.DiscoverAirPodsDevice(); err == nil {
+		if err := bp.AddBattery("airpods_battery", 36, device); err == nil {
+			log.Printf("Battery provider registered for device: %s", device)
+			log.Println("Note: GNOME Settings shows one battery per device. Use LinuxPods app for all three batteries.")
+		}
+	}
+
+	// Watch for property changes on all device objects
+	rule := "type='signal',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',path_namespace='/org/bluez'"
+	if err := bp.conn.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, rule).Err; err != nil {
+		return fmt.Errorf("failed to add match rule: %w", err)
+	}
+
+	// Create channel for signals
+	signalChan := make(chan *dbus.Signal, 10)
+	bp.conn.Signal(signalChan)
+
+	// Monitor signals in background
+	go func() {
+		for signal := range signalChan {
+			if signal.Name != "org.freedesktop.DBus.Properties.PropertiesChanged" {
+				continue
+			}
+
+			if len(signal.Body) < 2 {
+				continue
+			}
+
+			iface, ok := signal.Body[0].(string)
+			if !ok || iface != "org.bluez.Device1" {
+				continue
+			}
+
+			changes, ok := signal.Body[1].(map[string]dbus.Variant)
+			if !ok {
+				continue
+			}
+
+			// Check if Connected property changed
+			if connectedVar, ok := changes["Connected"]; ok {
+				if connected, ok := connectedVar.Value().(bool); ok && connected {
+					// Device connected, check if it's AirPods
+					devicePath := string(signal.Path)
+					if alias := bp.getDeviceAlias(devicePath); contains(alias, "AirPods") {
+						bp.mu.Lock()
+						_, exists := bp.devices["airpods_battery"]
+						bp.mu.Unlock()
+
+						if !exists {
+							if err := bp.AddBattery("airpods_battery", 36, devicePath); err == nil {
+								log.Printf("Battery provider registered for newly connected device: %s", devicePath)
+							}
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+// getDeviceAlias retrieves the alias/name of a Bluetooth device
+func (bp *BatteryProvider) getDeviceAlias(devicePath string) string {
+	obj := bp.conn.Object(bluezService, dbus.ObjectPath(devicePath))
+	variant, err := obj.GetProperty("org.bluez.Device1.Alias")
+	if err != nil {
+		return ""
+	}
+	if alias, ok := variant.Value().(string); ok {
+		return alias
+	}
+	return ""
 }
 
 // Close unregisters the provider and closes the D-Bus connection

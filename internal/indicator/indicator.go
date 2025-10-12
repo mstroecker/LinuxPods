@@ -19,23 +19,23 @@ type BatteryLevels struct {
 type NoiseMode string
 
 const (
-	Transparency     NoiseMode = "transparency"
-	Adaptive         NoiseMode = "adaptive"
-	NoiseCancelling  NoiseMode = "noise_cancelling"
-	Off              NoiseMode = "off"
+	Transparency    NoiseMode = "transparency"
+	Adaptive        NoiseMode = "adaptive"
+	NoiseCancelling NoiseMode = "noise_cancelling"
+	Off             NoiseMode = "off"
 )
 
 // Indicator manages the system tray icon and menu
 type Indicator struct {
-	batteries        BatteryLevels
-	noiseMode        NoiseMode
-	onShowWindow     func()
-	onQuit           func()
+	batteries         BatteryLevels
+	noiseMode         NoiseMode
+	onShowWindow      func()
+	onQuit            func()
 	onNoiseModeChange func(NoiseMode)
 
 	// Menu items
-	batteryItems     [3]*systray.MenuItem
-	noiseModeItems   map[NoiseMode]*systray.MenuItem
+	batteryItems   [3]*systray.MenuItem
+	noiseModeItems map[NoiseMode]*systray.MenuItem
 }
 
 // New creates and initializes a new system tray indicator
@@ -66,11 +66,9 @@ func (ind *Indicator) Stop() {
 
 // onReady is called when systray is ready
 func (ind *Indicator) onReady() {
-	// Set icon from file
 	iconData, err := loadIcon("assets/tray_icon.png")
 	if err != nil {
 		log.Printf("Warning: Failed to load tray icon: %v", err)
-		// Continue without icon
 	} else {
 		systray.SetIcon(iconData)
 	}
@@ -93,7 +91,6 @@ func (ind *Indicator) onReady() {
 
 	systray.AddSeparator()
 
-	// Noise Control section
 	systray.AddMenuItem("Noise Control", "Noise control mode").Disable()
 
 	ind.noiseModeItems[Transparency] = systray.AddMenuItemCheckbox("Transparency", "Hear the world around you", true)
@@ -163,7 +160,7 @@ func (ind *Indicator) UpdateBatteryLevels(left, right, caseLevel uint8) {
 	ind.batteries.Right = right
 	ind.batteries.Case = caseLevel
 
-	// Update tooltip with lowest battery
+	// Update tooltip with the lowest battery
 	lowest := left
 	if right < lowest {
 		lowest = right
