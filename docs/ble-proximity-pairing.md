@@ -9,9 +9,8 @@ AirPods continuously broadcast BLE advertisements containing battery levels, cha
 ### Key Characteristics
 
 - **Passive Monitoring**: No connection required
-- **Approximate Data**: Battery levels may be 5-10% off actual values
-- **Slow Updates**: Advertisements update infrequently (30-60 seconds)
-- **Privacy Trade-off**: Broadcasts can be received by any nearby device
+- **Approximate Data**: Battery levels may be 5–10% off actual values (Encrypted data not yet supported)
+- **Slow Updates**: Advertisements update infrequently. Updates mainly take place when something happens.
 
 ### Use Cases
 
@@ -50,11 +49,12 @@ Byte    Description                     Example     Notes
 ### Important: Orientation Handling
 
 AirPods broadcast which pod is "primary" (left or right). When the right pod is primary, several data fields are **swapped**:
+- The primary is encoded in Byte 3 (Status)
 - Battery level nibbles (left ↔ right)
 - Charging status bits (left ↔ right)
 - Ear detection bits (uses XOR logic)
 
-Always parse **byte 3 (status byte) first** to determine orientation before parsing other fields.
+Parse **byte 3 (status byte)** to determine orientation.
 
 ### Bytes 1-2: Device Model
 
@@ -67,6 +67,7 @@ Model ID    Device
 0x0e20      AirPods Pro (older)
 0x0220      AirPods (2nd gen)
 0x2420      AirPods Pro (2nd gen)
+0x2720      AirPods Pro 3
 ```
 
 **Decoding:**
@@ -110,10 +111,10 @@ xorFactor := primaryLeft != thisInCase  // XOR operation
 Battery levels for both AirPods are encoded using the same nibble system:
 ```
 Bit     Component (Normal) 
----     ------------------------+
-0-4       Left AirPod Battery
-5-7       Right AirPod Battery
-+-------------------------------+
+---     ------------------
+0-4     Left AirPod Battery
+5-7     Right AirPod Battery
+---     ------------------
 ```
 
 Left and Right AirPods may be swapped based on the primary pod.
@@ -122,7 +123,7 @@ Left and Right AirPods may be swapped based on the primary pod.
 
 ### Byte 5: Charging Status
 
-Encodes charging state for all three components. **Bits 0 and 1 may be swapped based on orientation:**
+Encodes charging state for all three components. **Bits 2 and 3 are swapped based on orientation:**
 
 ```
 Bit     Component (Normal)
@@ -131,7 +132,7 @@ Bit     Component (Normal)
 1       Case Charging
 2       Right AirPod Charging
 3       Left AirPod Charging
-4-7     Battery Case (May be > 100)
+4-7     Battery Case (May be > 100) => Unknown Battery
 ```
 
 Left and Right AirPods may be swapped based on the primary pod.
@@ -151,14 +152,14 @@ Todo
 
 ### Bytes 8-24: Encrypted Data
 
-The final 18 bytes are encrypted and contain additional device-specific information. The encryption key is derived from the pairing process and is not publicly documented.
+The final 18 bytes are encrypted and contain additional device-specific information. The encryption key is derived from the pairing process.
 
 ## Accuracy Limitations
 
 ### Battery Levels (Left/Right AirPods)
 
 - **Advertised:** Rounded to nearest 10%
-- **Actual:** May differ by 5-10%
+- **Actual:** May differ by 1-10%
 - **Update Frequency:** 30-60 seconds (slow)
 - **Real-time:** No - values are cached/delayed
 
@@ -172,7 +173,7 @@ Difference:         9% off
 ### Case Battery
 
 - **Advertised:** Approximate value (nibble-encoded like AirPods)
-- **Actual:** May differ by 5-10%
+- **Actual:** May differ by 1-10%
 - **Accuracy:** Similar to AirPods battery
 
 ### Ear Detection
@@ -182,6 +183,8 @@ Difference:         9% off
 - **Use Cases:** Detecting when AirPods are in/out of ears
 
 ### Lid Status (Encrypted?)
+
+ToDo
 
 - **Reliability:** Variable across different AirPods models
 - **Detection:** Uses byte 8, bit 3
@@ -193,7 +196,7 @@ Difference:         9% off
 
 | Feature | Status |
 |---------|--------|
-| Accuracy | ±5-10% |
+| Accuracy | ±1-10% |
 | Update Rate | 30-60s |
 | Connection Required | No |
 | Works with iPhone connected | Yes |
@@ -214,20 +217,6 @@ Difference:         9% off
 **Recommendation:** Use AAP for accurate battery readings and control. Use BLE for passive monitoring when AirPods are connected to another device.
 
 ## Implementation Notes
-
-### Discovery Setup
-
-```go
-// BlueZ D-Bus setup
-obj := conn.Object("org.bluez", "/org/bluez/hci0")
-
-// Set discovery filter for BLE only
-filter := map[string]interface{}{
-    "Transport": "le",
-}
-obj.Call("org.bluez.Adapter1.SetDiscoveryFilter", 0, filter)
-obj.Call("org.bluez.Adapter1.StartDiscovery", 0)
-```
 
 ### Parsing ManufacturerData
 
@@ -262,15 +251,16 @@ if appleData, ok := mfgData[0x004C]; ok {
 BLE proximity pairing advertisements can be used to:
 - Track specific AirPods devices (unique encrypted data)
 - Estimate battery levels without pairing
-- Determine if lid is open/closed
 - Identify device model
+- Detect when AirPods are in/out of ears
+- Detect when AirPods are in/out of case
 
 These advertisements are broadcast continuously and can be received by any nearby device with a BLE scanner.
 
 ## References
 
-- [LibrePods](https://github.com/kavishdevar/librepods) - Open source AirPods client
-- [OpenPods](https://github.com/adolfintel/OpenPods) - Windows AirPods client
+- [LibrePods](https://github.com/kavishdevar/librepods) - Open source Android and Linux AirPods client
+- [OpenPods](https://github.com/adolfintel/OpenPods) - Open source Android AirPods client
 - [furiousMAC/continuity](https://github.com/furiousMAC/continuity) - Apple Continuity protocol documentation
 - BlueZ D-Bus API documentation
 
@@ -280,7 +270,7 @@ This documentation is based on extensive testing with **AirPods Pro (Model 0x242
 
 ### Test Scenarios Validated
 
-- ✅ Both AirPods in case, lid open/closed
+- ✅ Both AirPods in case
 - ✅ One AirPod in case charging
 - ✅ Both AirPods out of case
 - ✅ Case charging via USB-C
@@ -295,7 +285,9 @@ This documentation is based on extensive testing with **AirPods Pro (Model 0x242
 
 ---
 
-**Last Updated:** 2025-10-12
-**Protocol Version:** Proximity Pairing v1 (Type 0x07)
-**Tested With:** AirPods Pro (0x2420), Firmware 7A305
-**Based On:** [LibrePods](https://github.com/kavishdevar/librepods) BLEManager implementation
+- **Last Updated:** 2025-10-13
+- **Protocol Version:** Proximity Pairing v1 (Type 0x07)
+- **Tested With:**
+  - AirPods Pro (Gen 2) (0x2420), Firmware 7A305
+  - AirPods Pro 3 (0x2720), Firmware 8A353
+- **Based On:** [LibrePods](https://github.com/kavishdevar/librepods) BLEManager implementation
