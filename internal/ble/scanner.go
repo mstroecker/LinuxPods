@@ -20,6 +20,7 @@ package ble
 
 import (
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -115,7 +116,14 @@ func (s *Scanner) ScanForAirPods(timeout time.Duration) (*ProximityData, error) 
 		case <-timer.C:
 			return nil, fmt.Errorf("scan timeout")
 
-		case signal := <-s.signal:
+		case signal, ok := <-s.signal:
+
+			// Debugging message for an unexpected closed dbus channel
+			if !ok {
+				log.Println("Error: This should not happen. DBUS channel closed.")
+				continue
+			}
+
 			if signal.Name != "org.freedesktop.DBus.Properties.PropertiesChanged" {
 				continue
 			}
