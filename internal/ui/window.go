@@ -91,8 +91,8 @@ func createControlView() (*gtk.Box, *BatteryWidgets) {
 
 	// Define image paths for AirPods components
 	imagePaths := []string{
-		"assets/left_airpod.png",
-		"assets/right_airpod.png",
+		"assets/left_airpod_pro3.png",
+		"assets/right_airpod_pro3.png",
 		"assets/airpod_case.png",
 	}
 

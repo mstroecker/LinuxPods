@@ -65,7 +65,7 @@ func (ind *Indicator) Stop() {
 
 // onReady is called when systray is ready
 func (ind *Indicator) onReady() {
-	iconData, err := loadIcon("assets/tray_icon.png")
+	iconData, err := loadIcon("assets/tray_icon3.png")
 	if err != nil {
 		log.Printf("Warning: Failed to load tray icon: %v", err)
 	} else {
