@@ -297,28 +297,6 @@ func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte
 	return state
 }
 
-// aapToProximityData converts AAP battery info to BLE ProximityData format
-func (m *PodStateCoordinator) aapToProximityData(info *aap.BatteryInfo) *ble.ProximityData {
-	data := &ble.ProximityData{}
-
-	if info.Left != nil {
-		data.LeftBattery = &info.Left.Level
-		data.LeftCharging = info.Left.Status == aap.StatusCharging
-	}
-
-	if info.Right != nil {
-		data.RightBattery = &info.Right.Level
-		data.RightCharging = info.Right.Status == aap.StatusCharging
-	}
-
-	if info.Case != nil {
-		data.CaseBattery = &info.Case.Level
-		data.CaseCharging = info.Case.Status == aap.StatusCharging
-	}
-
-	return data
-}
-
 // Close stops the pod state manager and cleans up resources
 func (m *PodStateCoordinator) Close() error {
 	close(m.stopChan)
