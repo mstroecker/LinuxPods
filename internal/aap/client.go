@@ -177,6 +177,98 @@ func (c *Client) EnableSpecialFeatures() error {
 	return nil
 }
 
+// RequestProximityKeys sends the proximity key request packet.
+// This packet requests the encryption keys (IRK and ENC_KEY) used to decrypt
+// BLE proximity pairing advertisements.
+//
+// After calling this, use ReadProximityKeys() to wait for and parse the response.
+func (c *Client) RequestProximityKeys() error {
+	if !c.isOpen {
+		return fmt.Errorf("not connected")
+	}
+
+	// Key request packet (from LibrePods proximity_keys.py)
+	packet := []byte{0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00}
+
+	n, err := syscall.Write(c.fd, packet)
+	if err != nil {
+		return fmt.Errorf("failed to send key request: %w", err)
+	}
+	if n != len(packet) {
+		return fmt.Errorf("incomplete key request write: %d/%d bytes", n, len(packet))
+	}
+
+	return nil
+}
+
+// ReadProximityKeys reads packets from the AirPods until a key response is received.
+// The AirPods may send several non-key packets before the key packet arrives.
+//
+// This method will block until:
+//   - A key packet is received and successfully parsed (returns keys, nil)
+//   - maxAttempts packets have been read without finding keys (returns nil, error)
+//   - A read error occurs (returns nil, error)
+//
+// Typical usage:
+//
+//	client.Handshake()
+//	client.RequestProximityKeys()
+//	keys, err := client.ReadProximityKeys(100)
+func (c *Client) ReadProximityKeys(maxAttempts int) ([]ProximityKey, error) {
+	if !c.isOpen {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		packet, err := c.ReadPacket()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read packet (attempt %d/%d): %w", attempt, maxAttempts, err)
+		}
+
+		// Check if this packet contains keys
+		if !IsKeyPacket(packet) {
+			continue // Not a key packet, keep waiting
+		}
+
+		// Parse keys
+		keys, err := ParseProximityKeys(packet)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse key packet: %w", err)
+		}
+
+		return keys, nil
+	}
+
+	return nil, fmt.Errorf("no key packet received after %d attempts", maxAttempts)
+}
+
+// RetrieveProximityKeys is a convenience method that combines RequestProximityKeys()
+// and ReadProximityKeys() into a single call.
+//
+// This method:
+//  1. Sends the key request packet
+//  2. Waits for and parses the key response (up to maxAttempts packets)
+//  3. Returns the parsed keys
+//
+// The client must be connected and handshake must be completed before calling this.
+//
+// Example:
+//
+//	client.Connect()
+//	client.Handshake()
+//	keys, err := client.RetrieveProximityKeys(100)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	encKey := FindEncryptionKey(keys)
+func (c *Client) RetrieveProximityKeys(maxAttempts int) ([]ProximityKey, error) {
+	if err := c.RequestProximityKeys(); err != nil {
+		return nil, err
+	}
+
+	return c.ReadProximityKeys(maxAttempts)
+}
+
 // ReadPacket reads a single AAP packet from the AirPods
 func (c *Client) ReadPacket() ([]byte, error) {
 	if !c.isOpen {
