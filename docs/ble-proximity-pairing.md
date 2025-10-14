@@ -152,7 +152,16 @@ Todo
 
 ### Bytes 8-24: Encrypted Data
 
-The final 18 bytes are encrypted and contain additional device-specific information. The encryption key is derived from the pairing process.
+The final 16 bytes (last 16 bytes of the payload) are encrypted and contain additional device-specific information. The encryption key (IRK or ENC_KEY) is obtained via the AAP protocol.
+
+**Important:** The encrypted portion is always the **last 16 bytes** of the payload, not a fixed byte offset. The total payload length may vary between AirPods models and firmware versions.
+
+**Decryption:**
+- Algorithm: AES-128 ECB mode (no padding, no IV)
+- Key source: Retrieved via AAP connection (PSM 4097)
+- Key types: IRK (Identity Resolving Key) or ENC_KEY
+- See `cmd/debug_proximity_keys` for key retrieval
+- See `cmd/debug_ble_decrypt` for decryption example
 
 ## Accuracy Limitations
 
