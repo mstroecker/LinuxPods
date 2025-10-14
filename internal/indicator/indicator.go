@@ -10,9 +10,9 @@ import (
 
 // BatteryLevels holds the battery percentages for each component
 type BatteryLevels struct {
-	Left          *uint8 // nil if unknown
-	Right         *uint8 // nil if unknown
-	Case          *uint8 // nil if unknown
+	Left          *int // nil if unknown
+	Right         *int // nil if unknown
+	Case          *int // nil if unknown
 	LeftCharging  bool
 	RightCharging bool
 	CaseCharging  bool
@@ -154,7 +154,7 @@ func (ind *Indicator) setNoiseMode(mode NoiseMode) {
 }
 
 // UpdateBatteryLevels updates the displayed battery levels
-func (ind *Indicator) UpdateBatteryLevels(left, right, caseLevel *uint8, leftCharging, rightCharging, caseCharging bool) {
+func (ind *Indicator) UpdateBatteryLevels(left, right, caseLevel *int, leftCharging, rightCharging, caseCharging bool) {
 	ind.batteries.Left = left
 	ind.batteries.Right = right
 	ind.batteries.Case = caseLevel
@@ -163,7 +163,7 @@ func (ind *Indicator) UpdateBatteryLevels(left, right, caseLevel *uint8, leftCha
 	ind.batteries.CaseCharging = caseCharging
 
 	// Find lowest battery for tooltip
-	var lowest uint8 = 100
+	var lowest int = 100
 	hasAnyBattery := false
 	if left != nil {
 		hasAnyBattery = true

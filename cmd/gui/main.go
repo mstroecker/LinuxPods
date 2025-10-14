@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 
-	"linuxpods/internal/ble"
 	"linuxpods/internal/bluez"
 	"linuxpods/internal/indicator"
 	"linuxpods/internal/podstate"
@@ -83,10 +82,10 @@ func createBluezBatteryProvider(podCoord *podstate.PodStateCoordinator) *bluez.B
 	}
 
 	// Register a callback to update BlueZ provider when state data changes
-	podCoord.RegisterCallback(func(data *ble.ProximityData) {
+	podCoord.RegisterCallback(func(state *podstate.PodState) {
 		// Use the lowest battery for GNOME Settings (most useful for knowing when to charge)
-		var batteryLevel = util.MinOr(data.LeftBattery, data.RightBattery, 0)
-		if err := bluezProvider.UpdateBatteryPercentage("airpods_battery", batteryLevel); err != nil {
+		var batteryLevel = util.MinOr(state.LeftBattery, state.RightBattery, 0)
+		if err := bluezProvider.UpdateBatteryPercentage("airpods_battery", uint8(batteryLevel)); err != nil {
 			log.Printf("Update BlueZ battery: %v", err)
 		}
 	})
@@ -106,14 +105,14 @@ func createTrayIndicator(podCoord *podstate.PodStateCoordinator) *indicator.Indi
 	tray.Start()
 
 	// Register callback to update tray when state data changes
-	podCoord.RegisterCallback(func(data *ble.ProximityData) {
+	podCoord.RegisterCallback(func(state *podstate.PodState) {
 		tray.UpdateBatteryLevels(
-			data.LeftBattery,
-			data.RightBattery,
-			data.CaseBattery,
-			data.LeftCharging,
-			data.RightCharging,
-			data.CaseCharging,
+			state.LeftBattery,
+			state.RightBattery,
+			state.CaseBattery,
+			state.LeftCharging,
+			state.RightCharging,
+			state.CaseCharging,
 		)
 	})
 

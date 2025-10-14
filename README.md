@@ -10,7 +10,7 @@ A modern Linux desktop application for managing Apple AirPods with a native GNOM
 ### ✅ Implemented
 
 - **Real-Time Battery Monitoring**: View live battery levels for left AirPod, right AirPod, and charging case
-  - **Automatic Source Selection**: AAP (accurate, 1%) when connected, BLE (approximate, 5-10%) otherwise
+  - **Automatic Source Selection**: AAP (accurate, 1%) when connected, BLE (approximate, 1-10%) otherwise
   - **AAP Integration**: Apple Accessory Protocol over L2CAP for precise battery monitoring
   - **BLE Scanning**: Passive monitoring works while AirPods connected to other devices
   - Charging status indicators (⚡) and in-ear detection (👂)
@@ -196,11 +196,11 @@ PodStateCoordinator (central state)
    - Accurate battery percentages (1% precision)
    - Automatically used when AirPods connect
 
-2. **BLE Scanning** (Passive, ~5-10% accuracy) - **Fallback**
+2. **BLE Scanning** (Passive, ~1-10% accuracy) - **Fallback**
    - Scans Apple Continuity proximity pairing advertisements
    - Works while AirPods are connected to other devices (e.g., iPhone)
    - No connection required, updates every 3-5 seconds
-   - Approximate battery levels (5-10% precision)
+   - Approximate battery levels (1-10% precision)
    - See `docs/ble-proximity-pairing.md` for protocol details
 
 #### BlueZ Integration

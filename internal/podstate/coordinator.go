@@ -21,7 +21,7 @@ import (
 )
 
 // UpdateCallback is called when AirPods state data is updated
-type UpdateCallback func(*ble.ProximityData)
+type UpdateCallback func(*PodState)
 
 // PodStateCoordinator manages complete AirPods state and coordinates updates
 type PodStateCoordinator struct {
@@ -30,7 +30,7 @@ type PodStateCoordinator struct {
 
 	mu           sync.RWMutex
 	callbacks    []UpdateCallback
-	lastData     *ble.ProximityData
+	lastState    *PodState
 	aapConnected bool
 
 	stopChan chan struct{}
@@ -67,17 +67,17 @@ func (m *PodStateCoordinator) RegisterCallback(cb UpdateCallback) {
 	defer m.mu.Unlock()
 	m.callbacks = append(m.callbacks, cb)
 
-	// If we have cached data, immediately notify the new callback
-	if m.lastData != nil {
-		go cb(m.lastData)
+	// If we have cached state, immediately notify the new callback
+	if m.lastState != nil {
+		go cb(m.lastState)
 	}
 }
 
-// GetLastData returns the most recent state data, or nil if none available
-func (m *PodStateCoordinator) GetLastData() *ble.ProximityData {
+// GetLastState returns the most recent state data, or nil if none available
+func (m *PodStateCoordinator) GetLastState() *PodState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.lastData
+	return m.lastState
 }
 
 // updateLoop continuously scans for AirPods and updates battery data
@@ -96,7 +96,8 @@ func (m *PodStateCoordinator) updateLoop() {
 				// Scan for AirPods with 5-second timeout
 				data, err := m.scanner.ScanForAirPods(5 * time.Second)
 				if err == nil {
-					m.handleBatteryUpdate(data)
+					state := m.bleToState(data)
+					m.handleStateUpdate(state)
 				}
 			}
 
@@ -106,17 +107,17 @@ func (m *PodStateCoordinator) updateLoop() {
 	}
 }
 
-// handleBatteryUpdate processes new battery data and notifies all listeners
-func (m *PodStateCoordinator) handleBatteryUpdate(data *ble.ProximityData) {
+// handleStateUpdate processes new state data and notifies all listeners
+func (m *PodStateCoordinator) handleStateUpdate(state *PodState) {
 	m.mu.Lock()
-	m.lastData = data
+	m.lastState = state
 	callbacks := make([]UpdateCallback, len(m.callbacks))
 	copy(callbacks, m.callbacks)
 	m.mu.Unlock()
 
 	// Notify all registered callbacks
 	for _, cb := range callbacks {
-		cb(data)
+		cb(state)
 	}
 }
 
@@ -215,12 +216,85 @@ func (m *PodStateCoordinator) aapReadLoop() {
 			// Try to parse the battery packet
 			batteryInfo, err := aap.ParseBatteryPacket(packet)
 			if err == nil {
-				// Convert AAP battery info to ProximityData format
-				data := m.aapToProximityData(batteryInfo)
-				m.handleBatteryUpdate(data)
+				// Convert AAP battery info to PodState
+				state := m.aapToState(batteryInfo, packet)
+				m.handleStateUpdate(state)
 			}
 		}
 	}
+}
+
+// bleToState converts BLE ProximityData to PodState
+func (m *PodStateCoordinator) bleToState(data *ble.ProximityData) *PodState {
+	state := &PodState{
+		Source:        DataSourceBLE,
+		LeftCharging:  data.LeftCharging,
+		RightCharging: data.RightCharging,
+		CaseCharging:  data.CaseCharging,
+		LeftInEar:     data.LeftInEar,
+		RightInEar:    data.RightInEar,
+		LidOpen:       data.LidOpen,
+		DeviceModel:   data.DeviceModel,
+		Color:         data.Color,
+		RawData:       data.RawData,
+	}
+
+	// Convert battery levels from *uint8 to *int
+	if data.LeftBattery != nil {
+		level := int(*data.LeftBattery)
+		state.LeftBattery = &level
+	}
+	if data.RightBattery != nil {
+		level := int(*data.RightBattery)
+		state.RightBattery = &level
+	}
+	if data.CaseBattery != nil {
+		level := int(*data.CaseBattery)
+		state.CaseBattery = &level
+	}
+
+	// Convert IsFlipped to PrimaryPod
+	if data.IsFlipped {
+		state.PrimaryPod = PodSideRight
+	} else {
+		state.PrimaryPod = PodSideLeft
+	}
+
+	return state
+}
+
+// aapToState converts AAP battery info to PodState
+func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte) *PodState {
+	state := &PodState{
+		Source:  DataSourceAAP,
+		RawData: rawPacket,
+	}
+
+	// Convert Left battery
+	if info.Left != nil {
+		level := int(info.Left.Level)
+		state.LeftBattery = &level
+		state.LeftCharging = info.Left.Status == aap.StatusCharging
+	}
+
+	// Convert Right battery
+	if info.Right != nil {
+		level := int(info.Right.Level)
+		state.RightBattery = &level
+		state.RightCharging = info.Right.Status == aap.StatusCharging
+	}
+
+	// Convert Case battery
+	if info.Case != nil {
+		level := int(info.Case.Level)
+		state.CaseBattery = &level
+		state.CaseCharging = info.Case.Status == aap.StatusCharging
+	}
+
+	// AAP doesn't provide in-ear detection, lid state, device model, color, or primary pod
+	// These fields remain at their zero values
+
+	return state
 }
 
 // aapToProximityData converts AAP battery info to BLE ProximityData format

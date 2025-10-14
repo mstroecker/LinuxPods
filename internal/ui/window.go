@@ -7,7 +7,6 @@ import (
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
-	"linuxpods/internal/ble"
 	"linuxpods/internal/podstate"
 )
 
@@ -31,10 +30,10 @@ func Activate(app *adw.Application, podCoord *podstate.PodStateCoordinator) *adw
 	win.Present()
 
 	// Register callback with pod state coordinator to update UI
-	podCoord.RegisterCallback(func(data *ble.ProximityData) {
+	podCoord.RegisterCallback(func(state *podstate.PodState) {
 		// Update UI on GTK main thread
 		glib.IdleAdd(func() {
-			updateBatteryDisplay(batteryWidgets, data)
+			updateBatteryDisplay(batteryWidgets, state)
 		})
 	})
 
@@ -284,58 +283,58 @@ func createSettingsView() *gtk.Box {
 	return settingsBox
 }
 
-// updateBatteryDisplay updates the UI with battery data from BLE scanner
-func updateBatteryDisplay(widgets *BatteryWidgets, data *ble.ProximityData) {
+// updateBatteryDisplay updates the UI with battery data from PodState
+func updateBatteryDisplay(widgets *BatteryWidgets, state *podstate.PodState) {
 	// Update left AirPod
-	if data.LeftBattery != nil {
-		widgets.LeftLevel.SetValue(float64(*data.LeftBattery) / 100.0)
+	if state.LeftBattery != nil {
+		widgets.LeftLevel.SetValue(float64(*state.LeftBattery) / 100.0)
 		charging := ""
-		if data.LeftCharging {
+		if state.LeftCharging {
 			charging = " ⚡"
 		}
 		inEar := ""
-		if data.LeftInEar {
+		if state.LeftInEar {
 			inEar = " 👂"
 		}
-		widgets.LeftLabel.SetText(fmt.Sprintf("%d%%%s%s", *data.LeftBattery, charging, inEar))
+		widgets.LeftLabel.SetText(fmt.Sprintf("%d%%%s%s", *state.LeftBattery, charging, inEar))
 	} else {
 		widgets.LeftLevel.SetValue(0.0)
 		widgets.LeftLabel.SetText("--")
 	}
 
 	// Update right AirPod
-	if data.RightBattery != nil {
-		widgets.RightLevel.SetValue(float64(*data.RightBattery) / 100.0)
+	if state.RightBattery != nil {
+		widgets.RightLevel.SetValue(float64(*state.RightBattery) / 100.0)
 		charging := ""
-		if data.RightCharging {
+		if state.RightCharging {
 			charging = " ⚡"
 		}
 		inEar := ""
-		if data.RightInEar {
+		if state.RightInEar {
 			inEar = " 👂"
 		}
-		widgets.RightLabel.SetText(fmt.Sprintf("%d%%%s%s", *data.RightBattery, charging, inEar))
+		widgets.RightLabel.SetText(fmt.Sprintf("%d%%%s%s", *state.RightBattery, charging, inEar))
 	} else {
 		widgets.RightLevel.SetValue(0.0)
 		widgets.RightLabel.SetText("--")
 	}
 
 	// Update case
-	if data.CaseBattery != nil {
-		widgets.CaseLevel.SetValue(float64(*data.CaseBattery) / 100.0)
+	if state.CaseBattery != nil {
+		widgets.CaseLevel.SetValue(float64(*state.CaseBattery) / 100.0)
 		charging := ""
-		if data.CaseCharging {
+		if state.CaseCharging {
 			charging = " ⚡"
 		}
-		widgets.CaseLabel.SetText(fmt.Sprintf("%d%%%s", *data.CaseBattery, charging))
+		widgets.CaseLabel.SetText(fmt.Sprintf("%d%%%s", *state.CaseBattery, charging))
 	} else {
 		widgets.CaseLevel.SetValue(0.0)
 		widgets.CaseLabel.SetText("--")
 	}
 
 	// Update status label with connection state and other info
-	statusText := fmt.Sprintf("Model: 0x%04X", data.DeviceModel)
-	if data.LidOpen {
+	statusText := fmt.Sprintf("Model: 0x%04X", state.DeviceModel)
+	if state.LidOpen {
 		statusText += " • Lid: Open"
 	} else {
 		statusText += " • Lid: Closed"

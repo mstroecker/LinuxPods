@@ -93,7 +93,7 @@ The application uses a centralized `PodStateCoordinator` (internal/podstate/) th
    - Used when AirPods are connected to Linux device
    - Real-time updates with accurate battery levels
 
-2. **BLE Scanner** (internal/ble/) - Passive monitoring, 5-10% accuracy
+2. **BLE Scanner** (internal/ble/) - Passive monitoring, 1-10% accuracy
    - Scans Apple Continuity proximity pairing advertisements
    - Works when AirPods connected to other devices
    - Fallback when no active connection available

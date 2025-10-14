@@ -1,6 +1,6 @@
 package util
 
-func MinOr(a, b *uint8, defaultValue uint8) uint8 {
+func MinOr(a, b *int, defaultValue int) int {
 	if a == nil && b == nil {
 		return defaultValue
 	}
