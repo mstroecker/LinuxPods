@@ -1,3 +1,30 @@
+// debug_bluez_dbus_battery is a debugging tool for testing the BlueZ Battery Provider D-Bus integration.
+//
+// This tool tests the implementation of BlueZ's org.bluez.BatteryProvider1 D-Bus API,
+// which allows applications to register custom battery providers that appear in
+// GNOME Settings → Power panel.
+//
+// Usage:
+//
+//	go run ./cmd/debug_bluez_dbus_battery full
+//
+// Commands:
+//
+//	full    Run a complete integration test that:
+//	        - Creates a battery provider and registers it with BlueZ
+//	        - Discovers connected AirPods device
+//	        - Adds a battery at various percentages
+//	        - Updates the battery level multiple times
+//	        - Removes and re-adds the battery
+//
+// This tool is useful for:
+//   - Verifying D-Bus ObjectManager implementation
+//   - Testing battery add/update/remove operations
+//   - Checking if batteries appear correctly in GNOME Settings
+//   - Debugging D-Bus signal emissions (InterfacesAdded/Removed)
+//
+// The test includes interactive prompts to check GNOME Settings at each step.
+// Press Ctrl+C to stop.
 package main
 
 import (

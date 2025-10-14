@@ -1,3 +1,26 @@
+// debug_aap is a debugging tool for testing the Apple Accessory Protocol (AAP) implementation.
+//
+// This tool establishes a direct L2CAP connection to AirPods on PSM 4097 and communicates
+// using Apple's proprietary AAP protocol to retrieve accurate battery status (1% precision),
+// in-ear detection, and other device information.
+//
+// Usage:
+//
+//	go run ./cmd/debug_aap <MAC_ADDRESS>
+//
+// Example:
+//
+//	go run ./cmd/debug_aap 90:62:3F:59:00:2F
+//
+// Requirements:
+//   - AirPods must be paired and connected to this Linux device via Bluetooth
+//   - BlueZ Bluetooth stack must be running
+//
+// The tool performs a full AAP handshake, enables battery notifications, and continuously
+// reads packets from the AirPods, parsing and displaying battery information in real-time.
+// This is useful for debugging the AAP protocol implementation and understanding packet formats.
+//
+// Press Ctrl+C to stop and disconnect.
 package main
 
 import (
@@ -85,7 +108,8 @@ func main() {
 		batteryInfo, err := aap.ParseBatteryPacket(packet)
 		if err == nil {
 			log.Printf("\n✨ %s", batteryInfo.String())
+		} else {
+			log.Printf("Parse error: %v", err)
 		}
-		log.Printf("%s\n", err)
 	}
 }

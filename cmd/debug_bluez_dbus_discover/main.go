@@ -1,3 +1,30 @@
+// debug_bluez_dbus_discover is a debugging tool for discovering and inspecting AirPods devices via BlueZ D-Bus.
+//
+// This tool queries the BlueZ D-Bus API (org.freedesktop.DBus.ObjectManager) to discover
+// all paired Bluetooth devices and displays detailed information about any AirPods devices found.
+//
+// Usage:
+//
+//	go run ./cmd/debug_bluez_dbus_discover
+//
+// The tool displays:
+//   - Device name and D-Bus object path
+//   - Connection status
+//   - All device properties (MAC address, RSSI, etc.)
+//   - Available D-Bus interfaces (Device1, Battery1, etc.)
+//   - Battery information (if org.bluez.Battery1 interface is present)
+//   - Bluetooth service UUIDs (Audio Sink, Apple Continuity, etc.)
+//
+// This is useful for:
+//   - Understanding BlueZ D-Bus API structure
+//   - Debugging device discovery issues
+//   - Checking what properties and interfaces BlueZ exposes
+//   - Finding device object paths needed for AAP connections
+//   - Verifying battery provider integration
+//
+// Requirements:
+//   - AirPods must be paired with this Linux device
+//   - BlueZ Bluetooth stack must be running
 package main
 
 import (
@@ -111,16 +138,7 @@ func getStringArrayProp(props map[string]dbus.Variant, key string) []string {
 }
 
 func containsAirPods(s string) bool {
-	return len(s) >= 7 && findSubstring(s, "AirPods")
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, "AirPods")
 }
 
 func getServiceName(uuid string) string {

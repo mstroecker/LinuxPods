@@ -94,23 +94,34 @@ The application provides:
    - Switches to using AAP for all battery updates
 3. When AirPods disconnect, app falls back to BLE scanning
 
-### CLI Tools (Development/Testing)
+### Debugging Tools (Development/Testing)
 
-**BLE Scanner** - Test BLE advertisement parsing:
-```bash
-go run ./cmd/ble_scan
-```
+LinuxPods includes several debugging tools for testing different components:
 
-**AAP Client** - Test direct AirPods connection:
+**debug_ble** - BLE advertisement scanner:
 ```bash
-go run ./cmd/aap <bluetooth-device-path>
-# Example: go run ./cmd/aap /org/bluez/hci0/dev_90_62_3F_59_00_2F
+go run ./cmd/debug_ble
 ```
+Passively scans for AirPods BLE advertisements and parses Apple Continuity protocol. Works even when AirPods are connected to another device.
 
-**BlueZ Debug** - Test BlueZ D-Bus integration:
+**debug_aap** - AAP protocol client:
 ```bash
-go run ./cmd/debug
+go run ./cmd/debug_aap <MAC_ADDRESS>
+# Example: go run ./cmd/debug_aap 90:62:3F:59:00:2F
 ```
+Tests direct L2CAP connection to AirPods using Apple Accessory Protocol (AAP). Displays raw packets and parsed battery information.
+
+**debug_bluez_dbus_discover** - BlueZ device discovery:
+```bash
+go run ./cmd/debug_bluez_dbus_discover
+```
+Queries BlueZ D-Bus API to discover paired AirPods and display all device properties, interfaces, and services.
+
+**debug_bluez_dbus_battery** - Battery provider integration test:
+```bash
+go run ./cmd/debug_bluez_dbus_battery full
+```
+Tests BlueZ Battery Provider D-Bus API implementation. Verifies batteries appear correctly in GNOME Settings.
 
 ## Development
 
@@ -119,10 +130,11 @@ go run ./cmd/debug
 ```
 linuxpods/
 ├── cmd/
-│   ├── gui/          # Main GUI application
-│   ├── aap/          # AAP client CLI tool (testing)
-│   ├── ble_scan/     # BLE scanner CLI tool (testing)
-│   └── debug/        # BlueZ D-Bus debugging tools
+│   ├── gui/                        # Main GUI application
+│   ├── debug_ble/                  # BLE scanner debugging tool
+│   ├── debug_aap/                  # AAP client debugging tool
+│   ├── debug_bluez_dbus_discover/  # BlueZ device discovery tool
+│   └── debug_bluez_dbus_battery/   # BlueZ battery provider test tool
 ├── internal/
 │   ├── battery/      # Central battery state manager
 │   ├── ble/          # BLE scanner for Apple Continuity advertisements

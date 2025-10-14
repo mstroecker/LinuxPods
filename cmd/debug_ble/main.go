@@ -1,3 +1,18 @@
+// debug_ble is a debugging tool that scans for Apple AirPods BLE advertisements.
+//
+// This tool passively monitors Bluetooth Low Energy advertisements from AirPods,
+// parsing the Apple Continuity proximity pairing protocol to extract battery levels,
+// charging status, and in-ear detection without requiring an active connection.
+//
+// Usage:
+//
+//	go run ./cmd/debug_ble
+//
+// The scanner works even when AirPods are connected to another device (like an iPhone),
+// making it useful for testing BLE advertisement parsing and understanding the protocol.
+// Battery level accuracy is approximate (5-10% granularity).
+//
+// Press Ctrl+C to stop scanning.
 package main
 
 import (
