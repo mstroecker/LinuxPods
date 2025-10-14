@@ -7,8 +7,8 @@ import (
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
-	"linuxpods/internal/battery"
 	"linuxpods/internal/ble"
+	"linuxpods/internal/podstate"
 )
 
 // BatteryWidgets holds references to UI elements for updating battery display
@@ -22,7 +22,7 @@ type BatteryWidgets struct {
 	StatusLabel *gtk.Label // For connection status, charging, etc.
 }
 
-func Activate(app *adw.Application, batteryMgr *battery.Manager) *adw.ApplicationWindow {
+func Activate(app *adw.Application, podCoord *podstate.PodStateCoordinator) *adw.ApplicationWindow {
 	win := adw.NewApplicationWindow(&app.Application)
 	win.SetTitle("LinuxPods")
 	win.SetDefaultSize(400, 500)
@@ -30,8 +30,8 @@ func Activate(app *adw.Application, batteryMgr *battery.Manager) *adw.Applicatio
 	batteryWidgets := setupUI(win)
 	win.Present()
 
-	// Register callback with battery manager to update UI
-	batteryMgr.RegisterCallback(func(data *ble.ProximityData) {
+	// Register callback with pod state coordinator to update UI
+	podCoord.RegisterCallback(func(data *ble.ProximityData) {
 		// Update UI on GTK main thread
 		glib.IdleAdd(func() {
 			updateBatteryDisplay(batteryWidgets, data)

@@ -1,14 +1,14 @@
-// Package battery provides centralized battery state management.
+// Package podstate provides centralized AirPods state management.
 //
-// The Manager handles:
-//   - BLE scanning for AirPods battery data (approximate, 5-10% accuracy)
-//   - AAP client for accurate battery data (1% accuracy, requires connection)
-//   - Notifying UI and other components of battery updates via callbacks
+// PodStateCoordinator handles:
+//   - BLE scanning for AirPods data (battery, charging, in-ear detection)
+//   - AAP client for accurate data (1% accuracy, requires connection)
+//   - Notifying UI and other components of state updates via callbacks
 //
-// Battery Data Priority:
-//   - AAP (accurate) is used when AirPods are connected
-//   - BLE (approximate) is used when not connected or as fallback
-package battery
+// Data Source Priority:
+//   - AAP (accurate, 1%) is used when AirPods are connected
+//   - BLE (approximate, 5-10%) is used when not connected or as fallback
+package podstate
 
 import (
 	"fmt"
@@ -20,11 +20,11 @@ import (
 	"linuxpods/internal/ble"
 )
 
-// UpdateCallback is called when battery data is updated
+// UpdateCallback is called when AirPods state data is updated
 type UpdateCallback func(*ble.ProximityData)
 
-// Manager manages battery state and coordinates updates
-type Manager struct {
+// PodStateCoordinator manages complete AirPods state and coordinates updates
+type PodStateCoordinator struct {
 	scanner   *ble.Scanner
 	aapClient *aap.Client
 
@@ -36,8 +36,8 @@ type Manager struct {
 	stopChan chan struct{}
 }
 
-// NewManager creates a new battery manager
-func NewManager() (*Manager, error) {
+// NewPodStateCoordinator creates a new AirPods state manager
+func NewPodStateCoordinator() (*PodStateCoordinator, error) {
 	scanner, err := ble.NewScanner()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create BLE scanner: %w", err)
@@ -49,20 +49,20 @@ func NewManager() (*Manager, error) {
 		return nil, fmt.Errorf("failed to start BLE discovery: %w", err)
 	}
 
-	m := &Manager{
+	m := &PodStateCoordinator{
 		scanner:   scanner,
 		callbacks: make([]UpdateCallback, 0),
 		stopChan:  make(chan struct{}),
 	}
 
-	// Start a battery update loop
+	// Start state update loop
 	go m.updateLoop()
 
 	return m, nil
 }
 
-// RegisterCallback registers a callback to be notified of battery updates
-func (m *Manager) RegisterCallback(cb UpdateCallback) {
+// RegisterCallback registers a callback to be notified of state updates
+func (m *PodStateCoordinator) RegisterCallback(cb UpdateCallback) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.callbacks = append(m.callbacks, cb)
@@ -73,15 +73,15 @@ func (m *Manager) RegisterCallback(cb UpdateCallback) {
 	}
 }
 
-// GetLastData returns the most recent battery data, or nil if none available
-func (m *Manager) GetLastData() *ble.ProximityData {
+// GetLastData returns the most recent state data, or nil if none available
+func (m *PodStateCoordinator) GetLastData() *ble.ProximityData {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.lastData
 }
 
 // updateLoop continuously scans for AirPods and updates battery data
-func (m *Manager) updateLoop() {
+func (m *PodStateCoordinator) updateLoop() {
 	for {
 		select {
 		case <-m.stopChan:
@@ -107,7 +107,7 @@ func (m *Manager) updateLoop() {
 }
 
 // handleBatteryUpdate processes new battery data and notifies all listeners
-func (m *Manager) handleBatteryUpdate(data *ble.ProximityData) {
+func (m *PodStateCoordinator) handleBatteryUpdate(data *ble.ProximityData) {
 	m.mu.Lock()
 	m.lastData = data
 	callbacks := make([]UpdateCallback, len(m.callbacks))
@@ -121,7 +121,7 @@ func (m *Manager) handleBatteryUpdate(data *ble.ProximityData) {
 }
 
 // ConnectAAP connects to AirPods via AAP for accurate battery monitoring
-func (m *Manager) ConnectAAP(macAddr string) error {
+func (m *PodStateCoordinator) ConnectAAP(macAddr string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -177,7 +177,7 @@ func (m *Manager) ConnectAAP(macAddr string) error {
 }
 
 // DisconnectAAP disconnects the AAP client
-func (m *Manager) DisconnectAAP() {
+func (m *PodStateCoordinator) DisconnectAAP() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -190,7 +190,7 @@ func (m *Manager) DisconnectAAP() {
 }
 
 // aapReadLoop continuously reads AAP packets and updates battery data
-func (m *Manager) aapReadLoop() {
+func (m *PodStateCoordinator) aapReadLoop() {
 	for {
 		m.mu.RLock()
 		client := m.aapClient
@@ -224,7 +224,7 @@ func (m *Manager) aapReadLoop() {
 }
 
 // aapToProximityData converts AAP battery info to BLE ProximityData format
-func (m *Manager) aapToProximityData(info *aap.BatteryInfo) *ble.ProximityData {
+func (m *PodStateCoordinator) aapToProximityData(info *aap.BatteryInfo) *ble.ProximityData {
 	data := &ble.ProximityData{}
 
 	if info.Left != nil {
@@ -245,8 +245,8 @@ func (m *Manager) aapToProximityData(info *aap.BatteryInfo) *ble.ProximityData {
 	return data
 }
 
-// Close stops the battery manager and cleans up resources
-func (m *Manager) Close() error {
+// Close stops the pod state manager and cleans up resources
+func (m *PodStateCoordinator) Close() error {
 	close(m.stopChan)
 
 	// Close AAP client first

@@ -136,12 +136,13 @@ linuxpods/
 │   ├── debug_bluez_dbus_discover/  # BlueZ device discovery tool
 │   └── debug_bluez_dbus_battery/   # BlueZ battery provider test tool
 ├── internal/
-│   ├── battery/      # Central battery state manager
+│   ├── podstate/     # AirPods state coordinator
 │   ├── ble/          # BLE scanner for Apple Continuity advertisements
 │   ├── aap/          # Apple Accessory Protocol (L2CAP) client
 │   ├── bluez/        # BlueZ D-Bus battery provider
 │   ├── ui/           # GTK4/libadwaita UI components
-│   └── indicator/    # System tray indicator
+│   ├── indicator/    # System tray indicator
+│   └── util/         # Utility functions
 ├── docs/             # Protocol documentation
 │   └── ble-proximity-pairing.md  # BLE protocol reverse engineering
 └── assets/           # PNG images for UI
@@ -171,12 +172,12 @@ GTK_DEBUG=interactive ./linuxpods
 
 ### Architecture
 
-#### Battery Monitoring
+#### State Coordination
 
-LinuxPods uses a centralized `BatteryManager` that coordinates all battery-related functionality:
+LinuxPods uses a centralized `PodStateCoordinator` that coordinates all AirPods state data:
 
 ```
-BatteryManager (central state)
+PodStateCoordinator (central state)
     ├─ AAP Client ───────────> Active connection for accurate battery (when connected)
     ├─ BLE Scanner ──────────> Passive scanning (fallback or when disconnected)
     ├─ Automatic Switching ──> Prefers AAP, falls back to BLE
@@ -252,7 +253,7 @@ See the [LICENSE](LICENSE) file for the full license text.
 - [x] System tray icon with battery display
 - [x] Charging status indicators
 - [x] In-ear detection (via BLE)
-- [x] Centralized battery state management
+- [x] Centralized AirPods state coordination
 - [x] Comprehensive BLE protocol documentation
 
 ### 🚧 In Progress / Planned
