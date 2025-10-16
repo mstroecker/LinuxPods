@@ -25,6 +25,9 @@ tools:
 	go build -o bin/debug_aap ./cmd/debug_aap
 	go build -o bin/debug_bluez_dbus_battery ./cmd/debug_bluez_dbus_battery
 	go build -o bin/debug_bluez_dbus_discover ./cmd/debug_bluez_dbus_discover
+	go build -o bin/debug_aap_key_retrieval ./cmd/debug_aap_key_retrieval
+	go build -o bin/debug_ble_decrypt ./cmd/debug_ble_decrypt
+	go build -o bin/debug_decrypt_test ./cmd/debug_decrypt_test
 
 # Format code
 fmt:
