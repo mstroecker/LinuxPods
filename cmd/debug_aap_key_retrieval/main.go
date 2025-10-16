@@ -84,7 +84,7 @@ func main() {
 		fmt.Println()
 		fmt.Println("Test with:")
 		fmt.Printf("  ./bin/debug_decrypt_test %s\n", hex.EncodeToString(encKey))
-		fmt.Printf("  ./bin/debug_ble_decrypt %s\n", hex.EncodeToString(encKey))
+		fmt.Printf("  ./bin/debug_ble %s\n", hex.EncodeToString(encKey))
 	}
 
 	log.Println("✅ Keys successfully retrieved!")

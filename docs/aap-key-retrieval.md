@@ -276,7 +276,7 @@ Use the retrieved ENC_KEY to test decryption:
 go run ./cmd/debug_decrypt_test <ENC_KEY>
 
 # Live scanning with decryption
-go run ./cmd/debug_ble_decrypt <ENC_KEY>
+go run ./cmd/debug_ble <ENC_KEY>
 ```
 
 If decryption is working correctly, you should see:
