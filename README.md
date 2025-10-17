@@ -10,9 +10,12 @@ A modern Linux desktop application for managing Apple AirPods with a native GNOM
 ### ✅ Implemented
 
 - **Real-Time Battery Monitoring**: View live battery levels for left AirPod, right AirPod, and charging case
-  - **Automatic Source Selection**: AAP (accurate, 1%) when connected, BLE (approximate, 1-10%) otherwise
+  - **Automatic Source Selection**: AAP (accurate, 1%) when connected, BLE (1-10%) otherwise
   - **AAP Integration**: Apple Accessory Protocol over L2CAP for precise battery monitoring
-  - **BLE Scanning**: Passive monitoring works while AirPods connected to other devices
+  - **BLE Scanning with Optional Decryption**:
+    - Unencrypted: ~10% accuracy (no key required)
+    - Encrypted: 1% accuracy (requires one-time key retrieval via AAP)
+  - Passive monitoring works while AirPods connected to other devices
   - Charging status indicators (⚡) and in-ear detection (👂)
 - **System Tray Integration**: Battery levels and quick actions in system tray
 - **GNOME Settings Integration**: Battery information appears in GNOME Settings → Power panel (lowest battery level)
@@ -64,7 +67,15 @@ nix-shell -p gtk4 libadwaita go
 git clone https://github.com/mstroecker/LinuxPods.git
 cd linuxpods
 go mod download
+
+# Build (using Makefile - recommended)
+make build
+
+# Or build directly with go
 go build -o linuxpods ./cmd/gui
+
+# Build all debug tools
+make tools
 
 # Run
 ./linuxpods
@@ -98,11 +109,15 @@ The application provides:
 
 LinuxPods includes several debugging tools for testing different components:
 
-**debug_ble** - BLE advertisement scanner:
+**debug_ble** - BLE advertisement scanner with optional decryption:
 ```bash
+# Unencrypted only (~10% accuracy)
 go run ./cmd/debug_ble
+
+# With decryption (1% accuracy)
+go run ./cmd/debug_ble <ENCRYPTION_KEY>
 ```
-Passively scans for AirPods BLE advertisements and parses Apple Continuity protocol. Works even when AirPods are connected to another device.
+Passively scans for AirPods BLE advertisements and parses Apple Continuity protocol. Works even when AirPods are connected to another device. Supports optional decryption for accurate battery levels.
 
 **debug_aap** - AAP protocol client:
 ```bash
@@ -110,6 +125,23 @@ go run ./cmd/debug_aap <MAC_ADDRESS>
 # Example: go run ./cmd/debug_aap 90:62:3F:59:00:2F
 ```
 Tests direct L2CAP connection to AirPods using Apple Accessory Protocol (AAP). Displays raw packets and parsed battery information.
+
+**debug_aap_key_retrieval** - Retrieve encryption keys:
+```bash
+go run ./cmd/debug_aap_key_retrieval <MAC_ADDRESS>
+# Example: go run ./cmd/debug_aap_key_retrieval 90:62:3F:59:00:2F
+```
+Retrieves proximity pairing encryption keys (IRK and ENC_KEY) from AirPods via AAP connection. The ENC_KEY is used to decrypt BLE advertisements for 1% battery accuracy.
+
+**debug_decrypt_test** - Test BLE parsing and decryption:
+```bash
+# Unencrypted only
+go run ./cmd/debug_decrypt_test
+
+# With decryption
+go run ./cmd/debug_decrypt_test <ENCRYPTION_KEY>
+```
+Tests BLE advertisement parsing and decryption with a hardcoded payload. Useful for verifying encryption keys and understanding the protocol.
 
 **debug_bluez_dbus_discover** - BlueZ device discovery:
 ```bash
@@ -131,20 +163,23 @@ Tests BlueZ Battery Provider D-Bus API implementation. Verifies batteries appear
 linuxpods/
 ├── cmd/
 │   ├── gui/                        # Main GUI application
-│   ├── debug_ble/                  # BLE scanner debugging tool
+│   ├── debug_ble/                  # BLE scanner with optional decryption
 │   ├── debug_aap/                  # AAP client debugging tool
+│   ├── debug_aap_key_retrieval/    # Retrieve BLE encryption keys
+│   ├── debug_decrypt_test/         # Test BLE parsing/decryption
 │   ├── debug_bluez_dbus_discover/  # BlueZ device discovery tool
 │   └── debug_bluez_dbus_battery/   # BlueZ battery provider test tool
 ├── internal/
 │   ├── podstate/     # AirPods state coordinator
-│   ├── ble/          # BLE scanner for Apple Continuity advertisements
+│   ├── ble/          # BLE scanner and proximity pairing parser
 │   ├── aap/          # Apple Accessory Protocol (L2CAP) client
 │   ├── bluez/        # BlueZ D-Bus battery provider
 │   ├── ui/           # GTK4/libadwaita UI components
 │   ├── indicator/    # System tray indicator
 │   └── util/         # Utility functions
 ├── docs/             # Protocol documentation
-│   └── ble-proximity-pairing.md  # BLE protocol reverse engineering
+│   ├── ble-proximity-pairing.md  # BLE protocol and decryption
+│   └── aap-key-retrieval.md      # AAP key retrieval protocol
 └── assets/           # PNG images for UI
 ```
 
@@ -196,12 +231,14 @@ PodStateCoordinator (central state)
    - Accurate battery percentages (1% precision)
    - Automatically used when AirPods connect
 
-2. **BLE Scanning** (Passive, ~1-10% accuracy) - **Fallback**
+2. **BLE Scanning** (Passive, 1-10% accuracy) - **Fallback**
    - Scans Apple Continuity proximity pairing advertisements
    - Works while AirPods are connected to other devices (e.g., iPhone)
-   - No connection required, updates every 3-5 seconds
-   - Approximate battery levels (1-10% precision)
-   - See `docs/ble-proximity-pairing.md` for protocol details
+   - No connection required, updates every 30-60 seconds
+   - **Two-tier accuracy system**:
+     - **Unencrypted**: ~10% accuracy (no key required)
+     - **Encrypted**: 1% accuracy (requires one-time key retrieval via AAP)
+   - See `docs/ble-proximity-pairing.md` and `docs/aap-key-retrieval.md` for protocol details
 
 #### BlueZ Integration
 
@@ -247,6 +284,8 @@ See the [LICENSE](LICENSE) file for the full license text.
 - [x] BlueZ Battery Provider D-Bus integration
 - [x] Battery information in GNOME Settings (lowest battery)
 - [x] Real-time battery monitoring via BLE scanning
+- [x] **BLE advertisement decryption for 1% battery accuracy**
+- [x] **AAP-based encryption key retrieval**
 - [x] Apple Accessory Protocol (AAP) client implementation
 - [x] **AAP integration into main app with automatic switching**
 - [x] **Accurate battery monitoring when AirPods connected**
@@ -254,7 +293,7 @@ See the [LICENSE](LICENSE) file for the full license text.
 - [x] Charging status indicators
 - [x] In-ear detection (via BLE)
 - [x] Centralized AirPods state coordination
-- [x] Comprehensive BLE protocol documentation
+- [x] Comprehensive BLE protocol documentation (unencrypted + encrypted)
 
 ### 🚧 In Progress / Planned
 
