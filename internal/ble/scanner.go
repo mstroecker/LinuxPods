@@ -55,7 +55,7 @@ func NewScanner() (*Scanner, error) {
 func (s *Scanner) StartDiscovery() error {
 	obj := s.conn.Object(bluezService, adapterPath)
 
-	// Set discovery filter for LE only
+	// Set a discovery filter for LE only
 	filter := map[string]interface{}{
 		"Transport": "le",
 	}
@@ -179,6 +179,6 @@ func extractMacFromPath(path string) string {
 
 // Close closes the scanner
 func (s *Scanner) Close() error {
-	s.StopDiscovery()
+	_ = s.StopDiscovery()
 	return s.conn.Close()
 }

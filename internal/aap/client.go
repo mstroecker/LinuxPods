@@ -13,7 +13,7 @@
 //
 // Protocol Flow:
 //  1. Open L2CAP connection to AirPods (PSM 4097)
-//  2. Send handshake packet
+//  2. Send a handshake packet
 //  3. Request notifications for battery/status
 //  4. Parse incoming packets
 //
@@ -46,12 +46,26 @@ const (
 	BDADDR_LEN = 6
 )
 
+// AAP protocol packet constants
+var (
+	// packetHandshake is the initial handshake packet sent after connection
+	packetHandshake = [16]byte{0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+
+	// packetBatteryRequest requests battery status notification
+	packetBatteryRequest = [10]byte{0x04, 0x00, 0x04, 0x00, 0x0F, 0x00, 0xFF, 0xFF, 0xFF, 0xFF}
+
+	// packetEnableFeatures enables special features
+	packetEnableFeatures = [14]byte{0x04, 0x00, 0x04, 0x00, 0x4d, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+
+	// packetKeyRequest requests proximity pairing encryption keys
+	packetKeyRequest = [8]byte{0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00}
+)
+
 // Client represents an AAP client connected to AirPods
 type Client struct {
-	fd      int    // L2CAP socket file descriptor
-	addr    string // Bluetooth MAC address of AirPods
-	isOpen  bool
-	readBuf []byte
+	fd     int    // L2CAP socket file descriptor
+	addr   string // Bluetooth MAC address of AirPods
+	isOpen bool
 }
 
 // bdaddr_t represents a Bluetooth device address
@@ -69,8 +83,7 @@ type sockaddr_l2 struct {
 // NewClient creates a new AAP client for the given Bluetooth MAC address
 func NewClient(macAddr string) (*Client, error) {
 	return &Client{
-		addr:    macAddr,
-		readBuf: make([]byte, 1024),
+		addr: macAddr,
 	}, nil
 }
 
@@ -87,10 +100,9 @@ func (c *Client) Connect() error {
 	}
 	c.fd = fd
 
-	// Parse MAC address
-	bdaddr, err := parseMACAddress(c.addr)
+	bdAddr, err := parseMACAddress(c.addr)
 	if err != nil {
-		syscall.Close(fd)
+		_ = syscall.Close(fd)
 		return fmt.Errorf("invalid MAC address: %w", err)
 	}
 
@@ -98,7 +110,7 @@ func (c *Client) Connect() error {
 	addr := sockaddr_l2{
 		family:      AF_BLUETOOTH,
 		psm:         AAPPSM,
-		bdaddr:      bdaddr,
+		bdaddr:      bdAddr,
 		cid:         0,
 		bdaddr_type: 0, // BDADDR_BREDR (public address)
 	}
@@ -107,7 +119,7 @@ func (c *Client) Connect() error {
 	_, _, errno := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd),
 		uintptr(unsafe.Pointer(&addr)), unsafe.Sizeof(addr))
 	if errno != 0 {
-		syscall.Close(fd)
+		_ = syscall.Close(fd)
 		return fmt.Errorf("failed to connect to AirPods: %v", errno)
 	}
 
@@ -117,64 +129,17 @@ func (c *Client) Connect() error {
 
 // Handshake sends the initial handshake packet to enable AAP communication
 func (c *Client) Handshake() error {
-	if !c.isOpen {
-		return fmt.Errorf("not connected")
-	}
-
-	// Handshake packet from librepods documentation
-	handshake := []byte{0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-
-	n, err := syscall.Write(c.fd, handshake)
-	if err != nil {
-		return fmt.Errorf("failed to send handshake: %w", err)
-	}
-	if n != len(handshake) {
-		return fmt.Errorf("incomplete handshake write: %d/%d bytes", n, len(handshake))
-	}
-
-	return nil
+	return c.sendPacket(packetHandshake[:], "handshake")
 }
 
 // RequestBatteryStatus requests battery status notifications
 func (c *Client) RequestBatteryStatus() error {
-	if !c.isOpen {
-		return fmt.Errorf("not connected")
-	}
-
-	// Battery status notification request packet
-	// From librepods AAP Definitions (using 0xFF variant that works with AirPods Pro)
-	packet := []byte{0x04, 0x00, 0x04, 0x00, 0x0F, 0x00, 0xFF, 0xFF, 0xFF, 0xFF}
-
-	n, err := syscall.Write(c.fd, packet)
-	if err != nil {
-		return fmt.Errorf("failed to send battery request: %w", err)
-	}
-	if n != len(packet) {
-		return fmt.Errorf("incomplete battery request write: %d/%d bytes", n, len(packet))
-	}
-
-	return nil
+	return c.sendPacket(packetBatteryRequest[:], "battery request")
 }
 
 // EnableSpecialFeatures enables conversational awareness and adaptive transparency
 func (c *Client) EnableSpecialFeatures() error {
-	if !c.isOpen {
-		return fmt.Errorf("not connected")
-	}
-
-	// Special feature enabling packet
-	packet := []byte{0x04, 0x00, 0x04, 0x00, 0x4d, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-
-	n, err := syscall.Write(c.fd, packet)
-	if err != nil {
-		return fmt.Errorf("failed to send feature enable: %w", err)
-	}
-	if n != len(packet) {
-		return fmt.Errorf("incomplete feature enable write: %d/%d bytes", n, len(packet))
-	}
-
-	return nil
+	return c.sendPacket(packetEnableFeatures[:], "feature enable")
 }
 
 // RequestProximityKeys sends the proximity key request packet.
@@ -183,90 +148,25 @@ func (c *Client) EnableSpecialFeatures() error {
 //
 // After calling this, use ReadProximityKeys() to wait for and parse the response.
 func (c *Client) RequestProximityKeys() error {
+	return c.sendPacket(packetKeyRequest[:], "key request")
+}
+
+// sendPacket sends a packet to the AirPods and verifies it was fully written.
+// This is a common helper method used by all request methods.
+func (c *Client) sendPacket(packet []byte, packetType string) error {
 	if !c.isOpen {
 		return fmt.Errorf("not connected")
 	}
 
-	// Key request packet (from LibrePods proximity_keys.py)
-	packet := []byte{0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00}
-
 	n, err := syscall.Write(c.fd, packet)
 	if err != nil {
-		return fmt.Errorf("failed to send key request: %w", err)
+		return fmt.Errorf("failed to send %s: %w", packetType, err)
 	}
 	if n != len(packet) {
-		return fmt.Errorf("incomplete key request write: %d/%d bytes", n, len(packet))
+		return fmt.Errorf("incomplete %s write: %d/%d bytes", packetType, n, len(packet))
 	}
 
 	return nil
-}
-
-// ReadProximityKeys reads packets from the AirPods until a key response is received.
-// The AirPods may send several non-key packets before the key packet arrives.
-//
-// This method will block until:
-//   - A key packet is received and successfully parsed (returns keys, nil)
-//   - maxAttempts packets have been read without finding keys (returns nil, error)
-//   - A read error occurs (returns nil, error)
-//
-// Typical usage:
-//
-//	client.Handshake()
-//	client.RequestProximityKeys()
-//	keys, err := client.ReadProximityKeys(100)
-func (c *Client) ReadProximityKeys(maxAttempts int) ([]ProximityKey, error) {
-	if !c.isOpen {
-		return nil, fmt.Errorf("not connected")
-	}
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		packet, err := c.ReadPacket()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read packet (attempt %d/%d): %w", attempt, maxAttempts, err)
-		}
-
-		// Check if this packet contains keys
-		if !IsKeyPacket(packet) {
-			continue // Not a key packet, keep waiting
-		}
-
-		// Parse keys
-		keys, err := ParseProximityKeys(packet)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse key packet: %w", err)
-		}
-
-		return keys, nil
-	}
-
-	return nil, fmt.Errorf("no key packet received after %d attempts", maxAttempts)
-}
-
-// RetrieveProximityKeys is a convenience method that combines RequestProximityKeys()
-// and ReadProximityKeys() into a single call.
-//
-// This method:
-//  1. Sends the key request packet
-//  2. Waits for and parses the key response (up to maxAttempts packets)
-//  3. Returns the parsed keys
-//
-// The client must be connected and handshake must be completed before calling this.
-//
-// Example:
-//
-//	client.Connect()
-//	client.Handshake()
-//	keys, err := client.RetrieveProximityKeys(100)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	encKey := FindEncryptionKey(keys)
-func (c *Client) RetrieveProximityKeys(maxAttempts int) ([]ProximityKey, error) {
-	if err := c.RequestProximityKeys(); err != nil {
-		return nil, err
-	}
-
-	return c.ReadProximityKeys(maxAttempts)
 }
 
 // ReadPacket reads a single AAP packet from the AirPods
@@ -275,20 +175,13 @@ func (c *Client) ReadPacket() ([]byte, error) {
 		return nil, fmt.Errorf("not connected")
 	}
 
-	n, err := syscall.Read(c.fd, c.readBuf)
+	buf := make([]byte, 1024)
+	n, err := syscall.Read(c.fd, buf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read packet: %w", err)
 	}
 
-	// Return a copy of the data
-	packet := make([]byte, n)
-	copy(packet, c.readBuf[:n])
-	return packet, nil
-}
-
-// GetAddress returns the Bluetooth MAC address of the connected AirPods
-func (c *Client) GetAddress() string {
-	return c.addr
+	return buf[:n], nil
 }
 
 // Close closes the L2CAP connection
@@ -330,9 +223,4 @@ func parseMACAddress(addr string) (bdaddr_t, error) {
 	}
 
 	return bdaddr, nil
-}
-
-// DumpPacket returns a hex dump of a packet for debugging
-func DumpPacket(packet []byte) string {
-	return hex.EncodeToString(packet)
 }

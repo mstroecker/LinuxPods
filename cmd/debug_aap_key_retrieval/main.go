@@ -30,6 +30,52 @@ import (
 	"linuxpods/internal/aap"
 )
 
+// readProximityKeys reads packets from the AirPods until a key response is received.
+// The AirPods may send several non-key packets before the key packet arrives.
+//
+// This function will block until:
+//   - A key packet is received and successfully parsed (returns keys, nil)
+//   - maxAttempts packets have been read without finding keys (returns nil, error)
+//   - A read error occurs (returns nil, error)
+func readProximityKeys(client *aap.Client, maxAttempts int) ([]aap.ProximityKey, error) {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		packet, err := client.ReadPacket()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read packet (attempt %d/%d): %w", attempt, maxAttempts, err)
+		}
+
+		if !aap.IsKeyPacket(packet) {
+			continue // Not a key packet, keep waiting
+		}
+
+		keys, err := aap.ParseProximityKeys(packet)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse key packet: %w", err)
+		}
+
+		return keys, nil
+	}
+
+	return nil, fmt.Errorf("no key packet received after %d attempts", maxAttempts)
+}
+
+// retrieveProximityKeys is a convenience function that combines RequestProximityKeys()
+// and readProximityKeys() into a single call.
+//
+// This function:
+//  1. Sends the key request packet
+//  2. Waits for and parses the key response (up to maxAttempts packets)
+//  3. Returns the parsed keys
+//
+// The client must be connected, and handshake must be completed before calling this.
+func retrieveProximityKeys(client *aap.Client, maxAttempts int) ([]aap.ProximityKey, error) {
+	if err := client.RequestProximityKeys(); err != nil {
+		return nil, err
+	}
+
+	return readProximityKeys(client, maxAttempts)
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <MAC_ADDRESS>\n", os.Args[0])
@@ -61,7 +107,7 @@ func main() {
 
 	// Retrieve keys
 	log.Println("Requesting proximity keys...")
-	keys, err := client.RetrieveProximityKeys(100)
+	keys, err := retrieveProximityKeys(client, 100)
 	if err != nil {
 		log.Fatalf("Failed to retrieve keys: %v", err)
 	}

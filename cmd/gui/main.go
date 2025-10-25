@@ -26,18 +26,18 @@ func main() {
 }
 
 func run() int {
-	// Create centralized AirPods state coordinator
+	// Create a centralized AirPods state coordinator
 	// This coordinates BLE scanning, AAP connections, and notifies all components via callbacks
 	podCoord, err := podstate.NewPodStateCoordinator()
 	if err != nil {
 		log.Fatalf("Failed to create pod state coordinator: %v", err)
 	}
-	defer podCoord.Close()
+	defer func() { _ = podCoord.Close() }()
 
 	// === Create Bluez Provider ===
 	bluezProvider := createBluezBatteryProvider(podCoord)
 	if bluezProvider != nil {
-		defer bluezProvider.Close()
+		defer func() { _ = bluezProvider.Close() }()
 	}
 
 	// === Create System Tray ===
@@ -90,7 +90,7 @@ func createBluezBatteryProvider(podCoord *podstate.PodStateCoordinator) *bluez.B
 			if err := bluezProvider.UpdateBatteryPercentage("airpods_battery", uint8(batteryLevel)); err != nil {
 				log.Printf("Update BlueZ battery: %v", err)
 			}
-			break // Only use first device
+			break // Only use the first device
 		}
 	})
 
@@ -108,7 +108,7 @@ func createTrayIndicator(podCoord *podstate.PodStateCoordinator) *indicator.Indi
 	)
 	tray.Start()
 
-	// Register callback to update tray when state data changes
+	// Register callback to update the tray when state data changes
 	podCoord.RegisterCallback(func(states map[string]*podstate.PodState) {
 		// For now, just use the first device in the map
 		for _, state := range states {
@@ -120,7 +120,7 @@ func createTrayIndicator(podCoord *podstate.PodStateCoordinator) *indicator.Indi
 				state.RightCharging,
 				state.CaseCharging,
 			)
-			break // Only use first device
+			break // Only use the first device
 		}
 	})
 

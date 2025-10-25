@@ -34,5 +34,16 @@ func DecryptProximityPayload(encryptedData []byte, key []byte) ([]byte, error) {
 	decrypted := make([]byte, 16)
 	block.Decrypt(decrypted, encryptedData)
 
+	// Validate decrypted data using known magic bytes
+	// If wrong key is used, AES will "succeed" but produce garbage data
+	// These patterns help identify correct decryption:
+	//   - Byte 0, upper nibble (bits 4-7): Must be 0x0
+	//   - Byte 4: Must be 0x2D (magic/validation marker)
+	if len(decrypted) >= 5 {
+		if (decrypted[0]&0xF0) != 0 || decrypted[4] != 0x2D {
+			return nil, fmt.Errorf("decryption validation failed: incorrect encryption key")
+		}
+	}
+
 	return decrypted, nil
 }

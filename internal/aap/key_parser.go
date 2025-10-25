@@ -9,21 +9,9 @@ type ProximityKeyType uint8
 
 const (
 	KeyTypeUnknown ProximityKeyType = 0x00
-	KeyTypeIRK     ProximityKeyType = 0x01 // Identity Resolving Key
+	KeyTypeIRK     ProximityKeyType = 0x01 // Identity-Resolving Key
 	KeyTypeENCKEY  ProximityKeyType = 0x04 // Encryption Key
 )
-
-// String returns the human-readable name of the key type
-func (k ProximityKeyType) String() string {
-	switch k {
-	case KeyTypeIRK:
-		return "IRK (Identity Resolving Key)"
-	case KeyTypeENCKEY:
-		return "ENC_KEY (Encryption Key)"
-	default:
-		return fmt.Sprintf("UNKNOWN (0x%02X)", uint8(k))
-	}
-}
 
 // ProximityKey represents a single encryption key retrieved from AirPods
 type ProximityKey struct {
@@ -39,7 +27,7 @@ func IsKeyPacket(packet []byte) bool {
 	return len(packet) >= 7 && packet[4] == 0x31
 }
 
-// ParseProximityKeys parses encryption keys from an AAP key response packet
+// ParseProximityKeys parses encryption keys from an AAP key response packet.
 //
 // Packet format:
 //
@@ -81,7 +69,7 @@ func ParseProximityKeys(packet []byte) ([]ProximityKey, error) {
 	offset := 7
 
 	for i := 0; i < keyCount; i++ {
-		// Check if we have enough data for key header (4 bytes)
+		// Check if we have enough data for the key header (4 bytes)
 		if offset+3 >= len(packet) {
 			return nil, fmt.Errorf("packet too short for key %d header (offset=%d, len=%d)", i+1, offset, len(packet))
 		}
@@ -93,7 +81,7 @@ func ParseProximityKeys(packet []byte) ([]ProximityKey, error) {
 		// Skip 4-byte header
 		offset += 4
 
-		// Check if we have enough data for key
+		// Check if we have enough data for the key
 		if offset+keyLength > len(packet) {
 			return nil, fmt.Errorf("packet too short for key %d data (need %d bytes, have %d)", i+1, keyLength, len(packet)-offset)
 		}
@@ -135,4 +123,16 @@ func FindIRK(keys []ProximityKey) []byte {
 		}
 	}
 	return nil
+}
+
+// String returns the human-readable name of the key type
+func (k ProximityKeyType) String() string {
+	switch k {
+	case KeyTypeIRK:
+		return "IRK (Identity Resolving Key)"
+	case KeyTypeENCKEY:
+		return "ENC_KEY (Encryption Key)"
+	default:
+		return fmt.Sprintf("UNKNOWN (0x%02X)", uint8(k))
+	}
 }

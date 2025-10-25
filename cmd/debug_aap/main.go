@@ -24,6 +24,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -91,7 +92,7 @@ func main() {
 
 	// Read responses
 	log.Println("\n5. Reading packets from AirPods...")
-	log.Println("   (Press Ctrl+C to stop)\n")
+	log.Println("   (Press Ctrl+C to stop)")
 
 	packetCount := 0
 	for {
@@ -102,9 +103,9 @@ func main() {
 		}
 
 		packetCount++
-		log.Printf("Packet #%d (%d bytes): %s", packetCount, len(packet), aap.DumpPacket(packet))
+		log.Printf("Packet #%d (%d bytes): %s", packetCount, len(packet), hex.EncodeToString(packet))
 
-		// Try to parse battery packet
+		// Try to parse the battery packet
 		batteryInfo, err := aap.ParseBatteryPacket(packet)
 		if err == nil {
 			log.Printf("\n✨ %s", batteryInfo.String())

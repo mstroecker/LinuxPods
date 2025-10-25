@@ -60,8 +60,8 @@ func NewPodStateCoordinator() (*PodStateCoordinator, error) {
 		stopChan:       make(chan struct{}),
 	}
 
-	// Start state update loop
-	go m.updateLoop()
+	// Start the state update loop
+	go m.bleUpdateLoop()
 
 	return m, nil
 }
@@ -106,8 +106,8 @@ func (m *PodStateCoordinator) GetConnectedDeviceMac() string {
 	return ""
 }
 
-// updateLoop continuously scans for AirPods and updates battery data
-func (m *PodStateCoordinator) updateLoop() {
+// bleUpdateLoop continuously scans for AirPods and updates battery data
+func (m *PodStateCoordinator) bleUpdateLoop() {
 	for {
 		select {
 		case <-m.stopChan:
@@ -123,7 +123,7 @@ func (m *PodStateCoordinator) updateLoop() {
 				data, randomMac, err := m.scanner.ScanForAirPods(5 * time.Second)
 				if err == nil {
 					// Try to decrypt with all available keys to find the real device
-					// BLE advertisements use randomized MACs for privacy, so we need to
+					// BLE advertisements use randomized MAC addresses for privacy, so we need to
 					// try all keys to identify which device this advertisement is from
 					realMac := m.tryDecryptAndIdentify(data, randomMac)
 					state := m.bleToState(data, realMac, randomMac)
@@ -166,7 +166,7 @@ func (m *PodStateCoordinator) ConnectAAP(macAddr string) error {
 
 	// Close existing AAP connection if any
 	if m.aapClient != nil {
-		m.aapClient.Close()
+		_ = m.aapClient.Close()
 		m.aapClient = nil
 		m.aapConnected = false
 	}
@@ -184,7 +184,7 @@ func (m *PodStateCoordinator) ConnectAAP(macAddr string) error {
 
 	// Send handshake
 	if err := client.Handshake(); err != nil {
-		client.Close()
+		_ = client.Close()
 		return fmt.Errorf("failed to send handshake: %w", err)
 	}
 
@@ -193,13 +193,13 @@ func (m *PodStateCoordinator) ConnectAAP(macAddr string) error {
 
 	// Request battery status
 	if err := client.RequestBatteryStatus(); err != nil {
-		client.Close()
+		_ = client.Close()
 		return fmt.Errorf("failed to request battery: %w", err)
 	}
 
 	// Enable special features
 	if err := client.EnableSpecialFeatures(); err != nil {
-		client.Close()
+		_ = client.Close()
 		return fmt.Errorf("failed to enable features: %w", err)
 	}
 
@@ -222,7 +222,7 @@ func (m *PodStateCoordinator) DisconnectAAP() {
 	defer m.mu.Unlock()
 
 	if m.aapClient != nil {
-		m.aapClient.Close()
+		_ = m.aapClient.Close()
 		m.aapClient = nil
 		m.aapConnected = false
 		m.aapMacAddr = ""
@@ -315,7 +315,7 @@ func (m *PodStateCoordinator) bleToState(data *ble.ProximityData, realMac string
 		RightInEar:    data.RightInEar,
 		LidOpen:       data.LidOpen,
 		DeviceModel:   data.DeviceModel,
-		ModelName:     ble.GetModelName(data.DeviceModel),
+		ModelName:     ble.DecodeModelName(data.DeviceModel),
 		Color:         data.Color,
 		RealMac:       realMac,
 		CurrentBLEMac: bleMac,
@@ -343,7 +343,7 @@ func (m *PodStateCoordinator) bleToState(data *ble.ProximityData, realMac string
 		state.PrimaryPod = PodSideLeft
 	}
 
-	// Look up encryption key for this device using the real MAC
+	// Look up the encryption key for this device using the real MAC address
 	m.mu.RLock()
 	if encKey, ok := m.encryptionKeys[realMac]; ok {
 		// Make a copy of the key
@@ -355,6 +355,16 @@ func (m *PodStateCoordinator) bleToState(data *ble.ProximityData, realMac string
 	return state
 }
 
+// getBatteryFromAAP is a helper function that converts AAP Battery data to PodState fields.
+// It returns the battery level (or nil if unavailable) and charging status.
+func getBatteryFromAAP(battery *aap.Battery) (*int, bool) {
+	if battery != nil {
+		level := int(battery.Level)
+		return &level, battery.Status == aap.StatusCharging
+	}
+	return nil, false
+}
+
 // aapToState converts AAP battery info to PodState
 func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte, macAddr string) *PodState {
 	state := &PodState{
@@ -364,31 +374,15 @@ func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte
 		RawData: rawPacket,
 	}
 
-	// Convert Left battery
-	if info.Left != nil {
-		level := int(info.Left.Level)
-		state.LeftBattery = &level
-		state.LeftCharging = info.Left.Status == aap.StatusCharging
-	}
-
-	// Convert Right battery
-	if info.Right != nil {
-		level := int(info.Right.Level)
-		state.RightBattery = &level
-		state.RightCharging = info.Right.Status == aap.StatusCharging
-	}
-
-	// Convert Case battery
-	if info.Case != nil {
-		level := int(info.Case.Level)
-		state.CaseBattery = &level
-		state.CaseCharging = info.Case.Status == aap.StatusCharging
-	}
+	// Convert battery information from AAP to PodState
+	state.LeftBattery, state.LeftCharging = getBatteryFromAAP(info.Left)
+	state.RightBattery, state.RightCharging = getBatteryFromAAP(info.Right)
+	state.CaseBattery, state.CaseCharging = getBatteryFromAAP(info.Case)
 
 	// AAP doesn't provide in-ear detection, lid state, device model, color, or primary pod
 	// These fields remain at their zero values
 
-	// Look up encryption key for this device
+	// Look up the encryption key for this device
 	m.mu.RLock()
 	if encKey, ok := m.encryptionKeys[macAddr]; ok {
 		// Make a copy of the key
@@ -454,7 +448,7 @@ func (m *PodStateCoordinator) GetAllEncryptionKeys() map[string][]byte {
 // BLE advertisements use randomized MAC addresses for privacy. By trying all encryption keys,
 // we can identify which device the advertisement is from based on which key successfully decrypts it.
 //
-// Returns the real MAC address (from the key that worked), or the random MAC if no key worked.
+// Returns the real MAC address (from the key that worked), or the random MAC address if no key worked.
 func (m *PodStateCoordinator) tryDecryptAndIdentify(data *ble.ProximityData, randomMac string) string {
 	// Extract encrypted portion (bytes 9-24 of the payload)
 	if len(data.RawData) < 25 {
@@ -478,28 +472,19 @@ func (m *PodStateCoordinator) tryDecryptAndIdentify(data *ble.ProximityData, ran
 	for realMac, key := range keysCopy {
 		decrypted, err := ble.DecryptProximityPayload(encryptedPortion, key)
 		if err != nil {
+			// Decryption failed (wrong key or validation failed)
 			continue
 		}
 
-		// Validate decrypted data by checking known byte patterns
-		// Decryption with the wrong key produces garbage, but AES always "succeeds"
-		// The first 4 bits (upper nibble) of byte 0 should be 0x0
-		// Byte 4 should be 0x2D
-		if len(decrypted) >= 5 {
-			if (decrypted[0]&0xF0) == 0 && decrypted[4] == 0x2D {
-				// This looks like valid data - use this key
-				err = data.AddDecryptedData(decrypted)
-				if err == nil {
-					log.Printf("BLE: Identified device %s (random MAC: %s) via encryption key", realMac, randomMac)
-					return realMac
-				}
-			} else {
-				log.Printf("Byte 0: %08b Byte 4: %08b Byte 11: %08b", decrypted[0], decrypted[4], decrypted[11])
-			}
+		// Decryption succeeded, and validation passed - use this key
+		err = data.AddDecryptedData(decrypted)
+		if err == nil {
+			log.Printf("BLE: Identified device %s (random MAC: %s) via encryption key", realMac, randomMac)
+			return realMac
 		}
 	}
 
-	// No key worked - return random MAC and log it
+	// No key worked - return the random MAC address and log it
 	if len(keysCopy) > 0 {
 		log.Printf("BLE: Could not decrypt advertisement from %s with any stored key", randomMac)
 	}
@@ -512,7 +497,7 @@ func (m *PodStateCoordinator) Close() error {
 
 	// Close AAP client first
 	if m.aapClient != nil {
-		m.aapClient.Close()
+		_ = m.aapClient.Close()
 	}
 
 	if m.scanner != nil {

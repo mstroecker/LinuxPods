@@ -85,13 +85,13 @@ func NewBluezBatteryProvider() (*BluezBatteryProvider, error) {
 
 	// Export the provider object
 	if err := bp.exportProvider(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to export provider: %w", err)
 	}
 
 	// Register with BlueZ
 	if err := bp.register(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to register provider: %w", err)
 	}
 
@@ -309,8 +309,8 @@ func (bp *BluezBatteryProvider) RemoveBattery(name string) error {
 	}
 
 	// Unexport the battery object from D-Bus
-	bp.conn.Export(nil, batteryPath, "org.freedesktop.DBus.Properties")
-	bp.conn.Export(nil, batteryPath, "org.freedesktop.DBus.Introspectable")
+	_ = bp.conn.Export(nil, batteryPath, "org.freedesktop.DBus.Properties")
+	_ = bp.conn.Export(nil, batteryPath, "org.freedesktop.DBus.Introspectable")
 
 	// Remove from internal map
 	delete(bp.devices, name)
@@ -511,6 +511,6 @@ func (bp *BluezBatteryProvider) Close() error {
 	if call.Err != nil {
 		return call.Err
 	}
-	bp.conn.Close()
+	_ = bp.conn.Close()
 	return nil
 }

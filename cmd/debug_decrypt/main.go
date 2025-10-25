@@ -56,9 +56,9 @@ var testPayloadGood = []byte{ // Bad
 
 func main() {
 	if len(os.Args) > 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s [ENCRYPTION_KEY]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Example: %s a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "\nIf no encryption key is provided, only unencrypted data will be shown.\n")
+		_, _ = fmt.Fprintf(os.Stderr, "Usage: %s [ENCRYPTION_KEY]\n", os.Args[0])
+		_, _ = fmt.Fprintf(os.Stderr, "Example: %s a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6\n", os.Args[0])
+		_, _ = fmt.Fprintf(os.Stderr, "\nIf no encryption key is provided, only unencrypted data will be shown.\n")
 		os.Exit(1)
 	}
 

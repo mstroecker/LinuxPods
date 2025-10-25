@@ -130,7 +130,7 @@ func main() {
 
 			// Display the data (will show "Decrypted" accuracy if decryption succeeded)
 			fmt.Println()
-			fmt.Println("━━━━━━━━━━ %s ━━━━━━━━━━━━", tempMacAdress)
+			fmt.Printf("━━━━━━━━━━ %s ━━━━━━━━━━━━\n", tempMacAdress)
 			fmt.Println(data.String())
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			fmt.Println()

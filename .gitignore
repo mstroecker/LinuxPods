@@ -20,6 +20,7 @@ go.work
 # Build directories
 build/
 dist/
+bin/
 
 # IDE specific files
 .vscode/
