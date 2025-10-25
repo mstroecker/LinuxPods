@@ -105,7 +105,7 @@ func main() {
 		case <-ticker.C:
 			// Try to scan for AirPods
 			log.Println("Scanning...")
-			data, err := scanner.ScanForAirPods(5 * time.Second)
+			data, tempMacAdress, err := scanner.ScanForAirPods(5 * time.Second)
 			if err != nil {
 				log.Printf("  No AirPods found in this scan window")
 				continue
@@ -130,10 +130,29 @@ func main() {
 
 			// Display the data (will show "Decrypted" accuracy if decryption succeeded)
 			fmt.Println()
-			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			fmt.Println("━━━━━━━━━━ %s ━━━━━━━━━━━━", tempMacAdress)
 			fmt.Println(data.String())
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			fmt.Println()
+
+			if data.HasDecrypted {
+				// Full breakdown of all decrypted bytes
+				fmt.Println("=== All 16 Decrypted Bytes ===")
+				for i, b := range data.RawDecrypted {
+					fmt.Printf("Byte %2d: 0x%02X (%3d) %08b", i, b, b, b)
+
+					// Add annotations
+					switch i {
+					case 1:
+						fmt.Printf("  ← First pod battery")
+					case 2:
+						fmt.Printf("  ← Second pod battery")
+					case 3:
+						fmt.Printf("  ← Case battery")
+					}
+					fmt.Println()
+				}
+			}
 		}
 	}
 }

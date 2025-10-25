@@ -26,21 +26,25 @@ func Activate(app *adw.Application, podCoord *podstate.PodStateCoordinator) *adw
 	win.SetTitle("LinuxPods")
 	win.SetDefaultSize(400, 500)
 
-	batteryWidgets := setupUI(win)
+	batteryWidgets := setupUI(win, podCoord)
 	win.Present()
 
 	// Register callback with pod state coordinator to update UI
-	podCoord.RegisterCallback(func(state *podstate.PodState) {
+	podCoord.RegisterCallback(func(states map[string]*podstate.PodState) {
 		// Update UI on GTK main thread
 		glib.IdleAdd(func() {
-			updateBatteryDisplay(batteryWidgets, state)
+			// For now, just use the first device in the map
+			for _, state := range states {
+				updateBatteryDisplay(batteryWidgets, state)
+				break // Only use first device
+			}
 		})
 	})
 
 	return win
 }
 
-func setupUI(win *adw.ApplicationWindow) *BatteryWidgets {
+func setupUI(win *adw.ApplicationWindow, podCoord *podstate.PodStateCoordinator) *BatteryWidgets {
 	// Create header bar with close button
 	headerBar := adw.NewHeaderBar()
 
@@ -58,7 +62,7 @@ func setupUI(win *adw.ApplicationWindow) *BatteryWidgets {
 	viewStack.AddTitledWithIcon(controlBox, "control", "Control", "audio-headphones-symbolic")
 
 	// Create the Settings tab content (placeholder for now)
-	settingsBox := createSettingsView()
+	settingsBox := createSettingsView(podCoord)
 	viewStack.AddTitledWithIcon(settingsBox, "settings", "Settings", "preferences-system-symbolic")
 
 	// Use ToolbarView for seamless GNOME design (no visual separation)
@@ -227,7 +231,7 @@ func createControlView() (*gtk.Box, *BatteryWidgets) {
 	return controlBox, widgets
 }
 
-func createSettingsView() *gtk.Box {
+func createSettingsView(podCoord *podstate.PodStateCoordinator) *gtk.Box {
 	// Create main vertical box for settings
 	settingsBox := gtk.NewBox(gtk.OrientationVertical, 20)
 	settingsBox.SetMarginTop(20)
@@ -267,6 +271,127 @@ func createSettingsView() *gtk.Box {
 	settingsGroup.Add(notificationsRow)
 
 	settingsBox.Append(settingsGroup)
+
+	// Create Development section
+	devGroup := adw.NewPreferencesGroup()
+	devGroup.SetTitle("Development")
+	devGroup.SetDescription("Encryption keys for decrypting BLE advertisements")
+
+	// Keep track of device rows and their components
+	type DeviceRow struct {
+		row           *adw.ActionRow
+		keyLabel      *gtk.Label
+		requestButton *gtk.Button
+	}
+	deviceRows := make(map[string]*DeviceRow)
+
+	// Register callback to update device list when states change
+	podCoord.RegisterCallback(func(states map[string]*podstate.PodState) {
+		glib.IdleAdd(func() {
+			// Get connected device MAC address
+			connectedMac := podCoord.GetConnectedDeviceMac()
+
+			// Update or create rows for each device
+			for macAddr, state := range states {
+				devRow, exists := deviceRows[macAddr]
+
+				if !exists {
+					// Create new row for this device
+					row := adw.NewActionRow()
+					row.SetTitle(macAddr)
+					if state.ModelName != "" {
+						row.SetSubtitle(state.ModelName)
+					}
+
+					// Create key status label
+					keyLabel := gtk.NewLabel("Not present")
+					keyLabel.AddCSSClass("dim-label")
+					keyLabel.SetVAlign(gtk.AlignCenter)
+					keyLabel.SetMarginEnd(8)
+					row.AddSuffix(keyLabel)
+
+					// Create request button
+					requestButton := gtk.NewButton()
+					requestButton.SetLabel("Request Keys")
+					requestButton.SetVAlign(gtk.AlignCenter)
+					requestButton.AddCSSClass("flat")
+					requestButton.SetSensitive(false) // Disabled by default
+					row.AddSuffix(requestButton)
+
+					// Button click handler (captures macAddr)
+					requestButton.Connect("clicked", func() {
+						requestButton.SetSensitive(false)
+						requestButton.SetLabel("Requesting...")
+
+						// Request keys in a goroutine to avoid blocking UI
+						go func() {
+							err := podCoord.RequestEncryptionKeys()
+
+							// Update UI on the main thread
+							glib.IdleAdd(func() {
+								if err != nil {
+									requestButton.SetLabel("Error - Retry")
+								} else {
+									requestButton.SetLabel("Request Keys")
+								}
+								// Re-enable if still connected
+								if podCoord.GetConnectedDeviceMac() == macAddr {
+									requestButton.SetSensitive(true)
+								}
+							})
+						}()
+					})
+
+					devRow = &DeviceRow{
+						row:           row,
+						keyLabel:      keyLabel,
+						requestButton: requestButton,
+					}
+					deviceRows[macAddr] = devRow
+					devGroup.Add(row)
+				}
+
+				// Update title with connection indicator or BLE MAC
+				title := macAddr
+				if macAddr == connectedMac {
+					title = macAddr + " • Connected"
+				} else if state.CurrentBLEMac != "" && state.CurrentBLEMac != macAddr {
+					// Show current BLE MAC if it's different from real MAC
+					title = macAddr + " • BLE: " + state.CurrentBLEMac
+				}
+				devRow.row.SetTitle(title)
+
+				// Update subtitle with model name
+				if state.ModelName != "" {
+					devRow.row.SetSubtitle(state.ModelName)
+				}
+
+				// Update key status
+				if state.EncryptionKey != nil && len(state.EncryptionKey) > 0 {
+					devRow.keyLabel.SetText("Present")
+					devRow.keyLabel.RemoveCSSClass("dim-label")
+					devRow.keyLabel.AddCSSClass("success")
+				} else {
+					devRow.keyLabel.SetText("Not present")
+					devRow.keyLabel.RemoveCSSClass("success")
+					devRow.keyLabel.AddCSSClass("dim-label")
+				}
+
+				// Enable/disable request button based on connection status
+				devRow.requestButton.SetSensitive(macAddr == connectedMac)
+			}
+
+			// Remove rows for devices that are no longer in the state
+			for macAddr, devRow := range deviceRows {
+				if _, exists := states[macAddr]; !exists {
+					devGroup.Remove(devRow.row)
+					delete(deviceRows, macAddr)
+				}
+			}
+		})
+	})
+
+	settingsBox.Append(devGroup)
 
 	// Add About section
 	aboutGroup := adw.NewPreferencesGroup()

@@ -30,19 +30,19 @@ import (
 )
 
 const (
-	// L2CAP Protocol/Service Multiplexer for AAP
+	// AAPPSM L2CAP Protocol/Service Multiplexer for AAP
 	AAPPSM = 0x1001 // 4097 in decimal
 
-	// Bluetooth address family
+	// AF_BLUETOOTH Bluetooth address family
 	AF_BLUETOOTH = 31
 
-	// Socket type for L2CAP
+	// SOCK_SEQPACKET Socket type for L2CAP
 	SOCK_SEQPACKET = 5
 
-	// Bluetooth protocol for L2CAP
+	// BTPROTO_L2CAP Bluetooth protocol for L2CAP
 	BTPROTO_L2CAP = 0
 
-	// L2CAP socket address structure size
+	// BDADDR_LEN L2CAP socket address structure size
 	BDADDR_LEN = 6
 )
 
@@ -284,6 +284,11 @@ func (c *Client) ReadPacket() ([]byte, error) {
 	packet := make([]byte, n)
 	copy(packet, c.readBuf[:n])
 	return packet, nil
+}
+
+// GetAddress returns the Bluetooth MAC address of the connected AirPods
+func (c *Client) GetAddress() string {
+	return c.addr
 }
 
 // Close closes the L2CAP connection

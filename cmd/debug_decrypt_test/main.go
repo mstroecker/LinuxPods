@@ -27,13 +27,31 @@ import (
 )
 
 // Test payload - full Apple Continuity proximity pairing advertisement
-var testPayload = []byte{
+var testPayloadGood2 = []byte{
 	// Type and length header
 	0x07, 0x19,
 	// Unencrypted portion (9 bytes) + encrypted portion (16 bytes)
 	0x01, 0x27, 0x20, 0x0b, 0x99, 0x8f, 0x11, 0x00, 0x05,
 	0x63, 0xfc, 0xfb, 0xb4, 0x39, 0x01, 0x1c, 0x61, 0xe7,
 	0xe4, 0xaa, 0x95, 0x83, 0x2c, 0x5b, 0x57,
+}
+
+var testPayloadGood3 = []byte{
+	// Type and length header
+	0x07, 0x19,
+	// Unencrypted portion (9 bytes) + encrypted portion (16 bytes)
+	0x01, 0x27, 0x20, 0x55, 0xaa, 0xb0, 0x39, 0x00, 0x00,
+	0x44, 0x34, 0xe2, 0xff, 0xf0, 0xd9, 0x1b, 0xc4, 0x48,
+	0xad, 0xab, 0x2f, 0x38, 0x2c, 0x5a, 0x39,
+}
+
+var testPayloadGood = []byte{ // Bad
+	// Type and length header
+	0x07, 0x19,
+	// Unencrypted portion (9 bytes) + encrypted portion (16 bytes)
+	0x01, 0x24, 0x20, 0x55, 0xaa, 0xb4, 0x39, 0x00, 0x04,
+	0xa7, 0x4f, 0xba, 0xd3, 0xc6, 0xfa, 0xd2, 0x67, 0xba,
+	0xa6, 0x62, 0x49, 0xc4, 0x13, 0x84, 0x8f,
 }
 
 func main() {
@@ -70,12 +88,12 @@ func main() {
 	fmt.Println()
 
 	// Show full test payload
-	fmt.Printf("Full payload (%d bytes): %s\n", len(testPayload), hex.EncodeToString(testPayload))
+	fmt.Printf("Full payload (%d bytes): %s\n", len(testPayloadGood), hex.EncodeToString(testPayloadGood))
 	fmt.Println()
 
 	// Parse the unencrypted portion using the parser
 	fmt.Println("=== Parsing Unencrypted BLE Advertisement ===")
-	data, err := ble.ParseProximityData(testPayload)
+	data, err := ble.ParseProximityData(testPayloadGood)
 	if err != nil {
 		log.Fatalf("Failed to parse payload: %v", err)
 	}
@@ -100,12 +118,12 @@ func main() {
 	}
 
 	// Extract and decrypt encrypted portion
-	if len(testPayload) < 18 { // 0x07, 0x19 + 16 bytes encrypted minimum
+	if len(testPayloadGood) < 18 { // 0x07, 0x19 + 16 bytes encrypted minimum
 		log.Fatalf("Payload too short for encrypted data")
 	}
 
 	// Last 16 bytes are encrypted
-	encryptedData := testPayload[len(testPayload)-16:]
+	encryptedData := testPayloadGood[len(testPayloadGood)-16:]
 	fmt.Println("=== Encrypted Payload (last 16 bytes) ===")
 	fmt.Printf("Encrypted: %s\n", hex.EncodeToString(encryptedData))
 	fmt.Println()

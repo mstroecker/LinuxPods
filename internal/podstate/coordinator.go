@@ -21,17 +21,20 @@ import (
 )
 
 // UpdateCallback is called when AirPods state data is updated
-type UpdateCallback func(*PodState)
+// The map key is the device MAC address
+type UpdateCallback func(map[string]*PodState)
 
 // PodStateCoordinator manages complete AirPods state and coordinates updates
 type PodStateCoordinator struct {
 	scanner   *ble.Scanner
 	aapClient *aap.Client
 
-	mu           sync.RWMutex
-	callbacks    []UpdateCallback
-	lastState    *PodState
-	aapConnected bool
+	mu             sync.RWMutex
+	callbacks      []UpdateCallback
+	deviceStates   map[string]*PodState // MAC address -> PodState
+	aapConnected   bool
+	aapMacAddr     string            // MAC address of currently connected AAP device
+	encryptionKeys map[string][]byte // MAC address -> ENC_KEY for decrypting BLE advertisements
 
 	stopChan chan struct{}
 }
@@ -50,9 +53,11 @@ func NewPodStateCoordinator() (*PodStateCoordinator, error) {
 	}
 
 	m := &PodStateCoordinator{
-		scanner:   scanner,
-		callbacks: make([]UpdateCallback, 0),
-		stopChan:  make(chan struct{}),
+		scanner:        scanner,
+		callbacks:      make([]UpdateCallback, 0),
+		deviceStates:   make(map[string]*PodState),
+		encryptionKeys: make(map[string][]byte),
+		stopChan:       make(chan struct{}),
 	}
 
 	// Start state update loop
@@ -67,17 +72,38 @@ func (m *PodStateCoordinator) RegisterCallback(cb UpdateCallback) {
 	defer m.mu.Unlock()
 	m.callbacks = append(m.callbacks, cb)
 
-	// If we have cached state, immediately notify the new callback
-	if m.lastState != nil {
-		go cb(m.lastState)
+	// If we have cached states, immediately notify the new callback
+	if len(m.deviceStates) > 0 {
+		// Create a copy of the states map
+		statesCopy := make(map[string]*PodState, len(m.deviceStates))
+		for addr, state := range m.deviceStates {
+			statesCopy[addr] = state
+		}
+		go cb(statesCopy)
 	}
 }
 
-// GetLastState returns the most recent state data, or nil if none available
-func (m *PodStateCoordinator) GetLastState() *PodState {
+// GetDeviceStates returns a copy of all device states
+func (m *PodStateCoordinator) GetDeviceStates() map[string]*PodState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.lastState
+
+	statesCopy := make(map[string]*PodState, len(m.deviceStates))
+	for addr, state := range m.deviceStates {
+		statesCopy[addr] = state
+	}
+	return statesCopy
+}
+
+// GetConnectedDeviceMac returns the MAC address of the currently connected AAP device
+// Returns empty string if no AAP connection is active
+func (m *PodStateCoordinator) GetConnectedDeviceMac() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.aapConnected {
+		return m.aapMacAddr
+	}
+	return ""
 }
 
 // updateLoop continuously scans for AirPods and updates battery data
@@ -94,10 +120,14 @@ func (m *PodStateCoordinator) updateLoop() {
 
 			if !aapActive {
 				// Scan for AirPods with 5-second timeout
-				data, err := m.scanner.ScanForAirPods(5 * time.Second)
+				data, randomMac, err := m.scanner.ScanForAirPods(5 * time.Second)
 				if err == nil {
-					state := m.bleToState(data)
-					m.handleStateUpdate(state)
+					// Try to decrypt with all available keys to find the real device
+					// BLE advertisements use randomized MACs for privacy, so we need to
+					// try all keys to identify which device this advertisement is from
+					realMac := m.tryDecryptAndIdentify(data, randomMac)
+					state := m.bleToState(data, realMac, randomMac)
+					m.handleStateUpdate(realMac, state)
 				}
 			}
 
@@ -108,16 +138,24 @@ func (m *PodStateCoordinator) updateLoop() {
 }
 
 // handleStateUpdate processes new state data and notifies all listeners
-func (m *PodStateCoordinator) handleStateUpdate(state *PodState) {
+// macAddr is the MAC address of the device this state is for
+func (m *PodStateCoordinator) handleStateUpdate(macAddr string, state *PodState) {
 	m.mu.Lock()
-	m.lastState = state
+	m.deviceStates[macAddr] = state
+
+	// Create a copy of states to send to callbacks
+	statesCopy := make(map[string]*PodState, len(m.deviceStates))
+	for addr, s := range m.deviceStates {
+		statesCopy[addr] = s
+	}
+
 	callbacks := make([]UpdateCallback, len(m.callbacks))
 	copy(callbacks, m.callbacks)
 	m.mu.Unlock()
 
 	// Notify all registered callbacks
 	for _, cb := range callbacks {
-		cb(state)
+		cb(statesCopy)
 	}
 }
 
@@ -167,6 +205,7 @@ func (m *PodStateCoordinator) ConnectAAP(macAddr string) error {
 
 	m.aapClient = client
 	m.aapConnected = true
+	m.aapMacAddr = macAddr
 
 	log.Printf("AAP connected successfully to %s - using accurate battery data (1%% precision)", macAddr)
 	log.Println("BLE scanning paused while AAP is active")
@@ -186,6 +225,7 @@ func (m *PodStateCoordinator) DisconnectAAP() {
 		m.aapClient.Close()
 		m.aapClient = nil
 		m.aapConnected = false
+		m.aapMacAddr = ""
 		log.Println("AAP disconnected - resuming BLE scanning for battery data")
 	}
 }
@@ -196,6 +236,7 @@ func (m *PodStateCoordinator) aapReadLoop() {
 		m.mu.RLock()
 		client := m.aapClient
 		connected := m.aapConnected
+		macAddr := m.aapMacAddr
 		m.mu.RUnlock()
 
 		if !connected || client == nil {
@@ -214,18 +255,57 @@ func (m *PodStateCoordinator) aapReadLoop() {
 			}
 
 			// Try to parse the battery packet
-			batteryInfo, err := aap.ParseBatteryPacket(packet)
-			if err == nil {
+			if aap.IsBatteryPacket(packet) {
+				batteryInfo, err := aap.ParseBatteryPacket(packet)
+				if err != nil {
+					log.Printf("AAP battery parse error: %v", err)
+				}
 				// Convert AAP battery info to PodState
-				state := m.aapToState(batteryInfo, packet)
-				m.handleStateUpdate(state)
+				state := m.aapToState(batteryInfo, packet, macAddr)
+				m.handleStateUpdate(macAddr, state)
+			}
+
+			// Try to parse the proximity keys
+			if aap.IsKeyPacket(packet) {
+				proximityKeys, err := aap.ParseProximityKeys(packet)
+				if err == nil {
+					// Extract and store the ENC_KEY
+					encKey := aap.FindEncryptionKey(proximityKeys)
+					if encKey != nil {
+						m.mu.Lock()
+						m.encryptionKeys[macAddr] = encKey
+
+						// Update the existing state to include the encryption key
+						if existingState, ok := m.deviceStates[macAddr]; ok {
+							existingState.EncryptionKey = make([]byte, len(encKey))
+							copy(existingState.EncryptionKey, encKey)
+						}
+						m.mu.Unlock()
+
+						log.Printf("Stored encryption key for device %s (%d bytes)", macAddr, len(encKey))
+
+						// Notify callbacks of the updated state
+						m.mu.RLock()
+						statesCopy := make(map[string]*PodState, len(m.deviceStates))
+						for addr, s := range m.deviceStates {
+							statesCopy[addr] = s
+						}
+						callbacks := make([]UpdateCallback, len(m.callbacks))
+						copy(callbacks, m.callbacks)
+						m.mu.RUnlock()
+
+						for _, cb := range callbacks {
+							cb(statesCopy)
+						}
+					}
+				}
 			}
 		}
 	}
 }
 
 // bleToState converts BLE ProximityData to PodState
-func (m *PodStateCoordinator) bleToState(data *ble.ProximityData) *PodState {
+func (m *PodStateCoordinator) bleToState(data *ble.ProximityData, realMac string, bleMac string) *PodState {
 	state := &PodState{
 		Source:        DataSourceBLE,
 		LeftCharging:  data.LeftCharging,
@@ -235,7 +315,10 @@ func (m *PodStateCoordinator) bleToState(data *ble.ProximityData) *PodState {
 		RightInEar:    data.RightInEar,
 		LidOpen:       data.LidOpen,
 		DeviceModel:   data.DeviceModel,
+		ModelName:     ble.GetModelName(data.DeviceModel),
 		Color:         data.Color,
+		RealMac:       realMac,
+		CurrentBLEMac: bleMac,
 		RawData:       data.RawData,
 	}
 
@@ -260,13 +343,24 @@ func (m *PodStateCoordinator) bleToState(data *ble.ProximityData) *PodState {
 		state.PrimaryPod = PodSideLeft
 	}
 
+	// Look up encryption key for this device using the real MAC
+	m.mu.RLock()
+	if encKey, ok := m.encryptionKeys[realMac]; ok {
+		// Make a copy of the key
+		state.EncryptionKey = make([]byte, len(encKey))
+		copy(state.EncryptionKey, encKey)
+	}
+	m.mu.RUnlock()
+
 	return state
 }
 
 // aapToState converts AAP battery info to PodState
-func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte) *PodState {
+func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte, macAddr string) *PodState {
 	state := &PodState{
 		Source:  DataSourceAAP,
+		RealMac: macAddr, // AAP uses the real (permanent) MAC address
+		// CurrentBLEMac is empty for AAP connections (no BLE randomization)
 		RawData: rawPacket,
 	}
 
@@ -294,7 +388,122 @@ func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte
 	// AAP doesn't provide in-ear detection, lid state, device model, color, or primary pod
 	// These fields remain at their zero values
 
+	// Look up encryption key for this device
+	m.mu.RLock()
+	if encKey, ok := m.encryptionKeys[macAddr]; ok {
+		// Make a copy of the key
+		state.EncryptionKey = make([]byte, len(encKey))
+		copy(state.EncryptionKey, encKey)
+	}
+	m.mu.RUnlock()
+
 	return state
+}
+
+// RequestEncryptionKeys requests encryption keys from connected AirPods via AAP.
+// This requires an active AAP connection to work.
+// Returns an error if no AAP connection is active or if the request fails.
+func (m *PodStateCoordinator) RequestEncryptionKeys() error {
+	m.mu.RLock()
+	client := m.aapClient
+	connected := m.aapConnected
+	m.mu.RUnlock()
+
+	if !connected || client == nil {
+		return fmt.Errorf("no active AAP connection - connect to AirPods first")
+	}
+
+	// Request the keys - they will be automatically stored when received in aapReadLoop
+	if err := client.RequestProximityKeys(); err != nil {
+		return fmt.Errorf("failed to request encryption keys: %w", err)
+	}
+
+	log.Println("Encryption key request sent - keys will be stored when received")
+	return nil
+}
+
+// HasEncryptionKeys checks if any encryption keys have been stored
+func (m *PodStateCoordinator) HasEncryptionKeys() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.encryptionKeys) > 0
+}
+
+// GetEncryptionKey retrieves the encryption key for a specific device
+func (m *PodStateCoordinator) GetEncryptionKey(macAddr string) []byte {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.encryptionKeys[macAddr]
+}
+
+// GetAllEncryptionKeys returns a copy of all stored encryption keys
+func (m *PodStateCoordinator) GetAllEncryptionKeys() map[string][]byte {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	keys := make(map[string][]byte, len(m.encryptionKeys))
+	for addr, key := range m.encryptionKeys {
+		keyCopy := make([]byte, len(key))
+		copy(keyCopy, key)
+		keys[addr] = keyCopy
+	}
+	return keys
+}
+
+// tryDecryptAndIdentify attempts to decrypt BLE data with all stored keys to identify the real device.
+// BLE advertisements use randomized MAC addresses for privacy. By trying all encryption keys,
+// we can identify which device the advertisement is from based on which key successfully decrypts it.
+//
+// Returns the real MAC address (from the key that worked), or the random MAC if no key worked.
+func (m *PodStateCoordinator) tryDecryptAndIdentify(data *ble.ProximityData, randomMac string) string {
+	// Extract encrypted portion (bytes 9-24 of the payload)
+	if len(data.RawData) < 25 {
+		// No encrypted data or payload too short
+		return randomMac
+	}
+
+	encryptedPortion := data.RawData[9:25]
+
+	// Try all stored encryption keys
+	m.mu.RLock()
+	keysCopy := make(map[string][]byte, len(m.encryptionKeys))
+	for mac, key := range m.encryptionKeys {
+		keyCopy := make([]byte, len(key))
+		copy(keyCopy, key)
+		keysCopy[mac] = keyCopy
+	}
+	m.mu.RUnlock()
+
+	// Try each key
+	for realMac, key := range keysCopy {
+		decrypted, err := ble.DecryptProximityPayload(encryptedPortion, key)
+		if err != nil {
+			continue
+		}
+
+		// Validate decrypted data by checking known byte patterns
+		// Decryption with the wrong key produces garbage, but AES always "succeeds"
+		// The first 4 bits (upper nibble) of byte 0 should be 0x0
+		// Byte 4 should be 0x2D
+		if len(decrypted) >= 5 {
+			if (decrypted[0]&0xF0) == 0 && decrypted[4] == 0x2D {
+				// This looks like valid data - use this key
+				err = data.AddDecryptedData(decrypted)
+				if err == nil {
+					log.Printf("BLE: Identified device %s (random MAC: %s) via encryption key", realMac, randomMac)
+					return realMac
+				}
+			} else {
+				log.Printf("Byte 0: %08b Byte 4: %08b Byte 11: %08b", decrypted[0], decrypted[4], decrypted[11])
+			}
+		}
+	}
+
+	// No key worked - return random MAC and log it
+	if len(keysCopy) > 0 {
+		log.Printf("BLE: Could not decrypt advertisement from %s with any stored key", randomMac)
+	}
+	return randomMac
 }
 
 // Close stops the pod state manager and cleans up resources

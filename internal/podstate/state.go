@@ -65,8 +65,18 @@ type PodState struct {
 
 	// Device information
 	DeviceModel uint16
+	ModelName   string  // Human-readable model name (from BLE only, empty for AAP)
 	Color       uint8   // AirPods color code
 	PrimaryPod  PodSide // Which pod is the primary (determines left/right orientation)
+
+	// MAC addresses
+	RealMac       string // Real (permanent) MAC address from AAP connection
+	CurrentBLEMac string // Current randomized BLE MAC address (changes periodically for privacy)
+
+	// Encryption key for decrypting BLE advertisements (ENC_KEY from proximity pairing)
+	// This is the 16-byte key retrieved via AAP that allows decrypting encrypted portions
+	// of BLE proximity pairing advertisements for accurate battery levels
+	EncryptionKey []byte
 
 	// Raw data from source (for debugging/future use)
 	RawData []byte

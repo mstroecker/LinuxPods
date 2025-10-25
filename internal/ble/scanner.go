@@ -86,15 +86,15 @@ func (s *Scanner) StopDiscovery() error {
 	return obj.Call("org.bluez.Adapter1.StopDiscovery", 0).Err
 }
 
-// ScanForAirPods scans for AirPods advertisements and returns proximity data
-func (s *Scanner) ScanForAirPods(timeout time.Duration) (*ProximityData, error) {
+// ScanForAirPods scans for AirPods advertisements and returns proximity data and device address
+func (s *Scanner) ScanForAirPods(timeout time.Duration) (*ProximityData, string, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	for {
 		select {
 		case <-timer.C:
-			return nil, fmt.Errorf("scan timeout")
+			return nil, "", fmt.Errorf("scan timeout")
 
 		case signal, ok := <-s.signal:
 
@@ -138,12 +138,43 @@ func (s *Scanner) ScanForAirPods(timeout time.Duration) (*ProximityData, error) 
 
 					// Parse proximity pairing data
 					if data, err := ParseProximityData(appleData); err == nil {
-						return data, nil
+						// Extract MAC address from D-Bus path
+						// Path format: /org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX
+						macAddr := extractMacFromPath(string(signal.Path))
+						return data, macAddr, nil
 					}
 				}
 			}
 		}
 	}
+}
+
+// extractMacFromPath extracts MAC address from BlueZ D-Bus device path
+// Example: /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF -> AA:BB:CC:DD:EE:FF
+func extractMacFromPath(path string) string {
+	// Find the "dev_" prefix
+	devPrefix := "dev_"
+	idx := len(path) - 17 // MAC address with underscores is 17 chars
+	if idx < 0 || idx+len(devPrefix) > len(path) {
+		return "unknown"
+	}
+
+	macPart := path[len(path)-17:]
+	if len(macPart) != 17 {
+		return "unknown"
+	}
+
+	// Replace underscores with colons
+	mac := ""
+	for _, c := range macPart {
+		if c == '_' {
+			mac += ":"
+		} else {
+			mac += string(c)
+		}
+	}
+
+	return mac
 }
 
 // Close closes the scanner

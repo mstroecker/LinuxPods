@@ -385,3 +385,19 @@ func DecodeConnectionState(state uint8) string {
 		return fmt.Sprintf("Unknown (0x%02X)", state)
 	}
 }
+
+// GetModelName returns the human-readable model name for a device model code
+func GetModelName(deviceModel uint16) string {
+	switch deviceModel {
+	case 0x0220:
+		return "AirPods (2nd gen)"
+	case 0x0e20:
+		return "AirPods Pro"
+	case 0x2420:
+		return "AirPods Pro (2nd gen)"
+	case 0x2720:
+		return "AirPods Pro 3"
+	default:
+		return fmt.Sprintf("Unknown (0x%04X)", deviceModel)
+	}
+}

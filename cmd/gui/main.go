@@ -82,11 +82,15 @@ func createBluezBatteryProvider(podCoord *podstate.PodStateCoordinator) *bluez.B
 	}
 
 	// Register a callback to update BlueZ provider when state data changes
-	podCoord.RegisterCallback(func(state *podstate.PodState) {
-		// Use the lowest battery for GNOME Settings (most useful for knowing when to charge)
-		var batteryLevel = util.MinOr(state.LeftBattery, state.RightBattery, 0)
-		if err := bluezProvider.UpdateBatteryPercentage("airpods_battery", uint8(batteryLevel)); err != nil {
-			log.Printf("Update BlueZ battery: %v", err)
+	podCoord.RegisterCallback(func(states map[string]*podstate.PodState) {
+		// For now, just use the first device in the map
+		for _, state := range states {
+			// Use the lowest battery for GNOME Settings (most useful for knowing when to charge)
+			var batteryLevel = util.MinOr(state.LeftBattery, state.RightBattery, 0)
+			if err := bluezProvider.UpdateBatteryPercentage("airpods_battery", uint8(batteryLevel)); err != nil {
+				log.Printf("Update BlueZ battery: %v", err)
+			}
+			break // Only use first device
 		}
 	})
 
@@ -105,15 +109,19 @@ func createTrayIndicator(podCoord *podstate.PodStateCoordinator) *indicator.Indi
 	tray.Start()
 
 	// Register callback to update tray when state data changes
-	podCoord.RegisterCallback(func(state *podstate.PodState) {
-		tray.UpdateBatteryLevels(
-			state.LeftBattery,
-			state.RightBattery,
-			state.CaseBattery,
-			state.LeftCharging,
-			state.RightCharging,
-			state.CaseCharging,
-		)
+	podCoord.RegisterCallback(func(states map[string]*podstate.PodState) {
+		// For now, just use the first device in the map
+		for _, state := range states {
+			tray.UpdateBatteryLevels(
+				state.LeftBattery,
+				state.RightBattery,
+				state.CaseBattery,
+				state.LeftCharging,
+				state.RightCharging,
+				state.CaseCharging,
+			)
+			break // Only use first device
+		}
 	})
 
 	return tray

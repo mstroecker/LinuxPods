@@ -67,15 +67,7 @@ type BatteryInfo struct {
 // ParseBatteryPacket parses a battery status packet
 // Format: 04 00 04 00 04 00 [count] ([component] 01 [level] [status] 01)...
 func ParseBatteryPacket(packet []byte) (*BatteryInfo, error) {
-	// Check minimum length and header
-	if len(packet) < 7 {
-		return nil, fmt.Errorf("packet too short")
-	}
-
-	// Check for battery packet header: 04 00 04 00 04 00
-	if packet[0] != 0x04 || packet[1] != 0x00 ||
-		packet[2] != 0x04 || packet[3] != 0x00 ||
-		packet[4] != 0x04 || packet[5] != 0x00 {
+	if !IsBatteryPacket(packet) {
 		return nil, fmt.Errorf("not a battery packet")
 	}
 
@@ -114,6 +106,14 @@ func ParseBatteryPacket(packet []byte) (*BatteryInfo, error) {
 	}
 
 	return info, nil
+}
+
+// IsBatteryPacket checks if a packet contains battery data
+func IsBatteryPacket(packet []byte) bool {
+	return len(packet) >= 7 &&
+		packet[0] == 0x04 && packet[1] == 0x00 &&
+		packet[2] == 0x04 && packet[3] == 0x00 &&
+		packet[4] == 0x04 && packet[5] == 0x00
 }
 
 func (bi *BatteryInfo) String() string {

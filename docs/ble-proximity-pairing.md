@@ -46,7 +46,7 @@ Byte    Description                     Example     Status      Notes
 9-24    Encrypted Battery Data          ...         ✅ Working   AES-128 ECB, 1% accuracy (if key available)
 ```
 
-**Working Features** (unencrypted): All batteries (~10%), In Ear detection, Orientation (IsFlipped), Model, Color
+**Working Features** (unencrypted): All batteries (~10%), In Ear detection, Orientation (IsFlipped), Model, Color<br>
 **Not Working** (encrypted/unknown format): Lid status, Connection state
 
 ## Byte-by-Byte Parsing
@@ -189,12 +189,19 @@ Left and Right AirPods may be swapped based on the primary pod.
 ```
 Byte    Description                     Status      Notes
 ----    -----------                     ------      -----
-0       Unknown                         ❓          Purpose unclear
+0       Header/Magic                    ✅ Working   Upper nibble (bits 4-7) is always 0x0 (maybe?)
 1       First Pod Battery + Charging    ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
 2       Second Pod Battery + Charging   ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
 3       Case Battery + Charging         ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
-4-15    Unknown                         ❓          Purpose unclear
+4       Magic Byte                      ✅ Working   Always 0x2D (validation marker maybe?)
+5-15    Unknown                         ❓          Purpose unclear
 ```
+
+**Decryption Validation:**
+- Byte 0 upper nibble must be `0x0` (check: `(byte0 & 0xF0) == 0`)
+- Byte 4 must be `0x2D` (magic/validation marker)
+- These checks help identify correct decryption when trying multiple keys
+- Not 100% verified, might differ with different devices
 
 **Orientation Handling:**
 - If NOT flipped (left pod primary): Byte 1=left, Byte 2=right
@@ -271,6 +278,65 @@ Byte    Description                     Status      Notes
 - Use **BLE (unencrypted)** for quick approximate monitoring when connected to other devices
 - Use **BLE (encrypted)** for accurate passive monitoring (requires one-time key retrieval via AAP)
 
+## MAC Address Randomization and Device Identification
+
+### BLE Privacy Feature
+
+AirPods use **Bluetooth LE Privacy** (MAC address randomization) in their BLE advertisements:
+
+- **BLE Advertisements**: Use randomized MAC addresses that change periodically
+- **AAP Connections**: Use the real (permanent) MAC address
+- **Privacy Goal**: Prevent tracking of AirPods via BLE advertisements
+
+### Device Identification Challenge
+
+When monitoring multiple AirPods devices:
+1. Each device has a real MAC address (from AAP connection)
+2. Each device's BLE advertisements use a different randomized MAC
+3. The randomized MAC changes periodically (every few minutes to hours)
+4. **Problem**: Cannot directly match BLE advertisements to stored encryption keys
+
+### Solution: Decryption-Based Identification
+
+To identify which device a BLE advertisement belongs to:
+
+1. **Store encryption keys by real MAC**: When retrieving keys via AAP, store them with the AAP connection's MAC address
+2. **Try all keys on BLE data**: When receiving a BLE advertisement, attempt decryption with all stored keys
+3. **Validate decryption**: Check if decrypted data matches expected format
+4. **Identify device**: The key that successfully decrypts identifies the real device
+
+### Decryption Validation
+
+To verify correct decryption (wrong keys produce garbage but AES always "succeeds"):
+
+**Known byte patterns in decrypted data:**
+- **Byte 0, upper nibble (bits 4-7)**: Must be `0x0`
+- **Byte 4**: Must be `0x2D`
+
+**Validation code example:**
+```go
+if len(decrypted) >= 5 {
+    if (decrypted[0] & 0xF0) == 0 && decrypted[4] == 0x2D {
+        // Valid decryption - correct key found
+    }
+}
+```
+
+### Multi-Device Workflow
+
+```
+Device A (Real MAC: 11:22:33:44:55:66)
+  └─> Store encryption key: 11:22:33:44:55:66 -> [16-byte key]
+
+Device B (Real MAC: AA:BB:CC:DD:EE:FF)
+  └─> Store encryption key: AA:BB:CC:DD:EE:FF -> [16-byte key]
+
+BLE Advertisement received (Random MAC: 77:88:99:00:11:22)
+  ├─> Try decrypt with key from 11:22:33:44:55:66 -> ❌ Validation fails
+  └─> Try decrypt with key from AA:BB:CC:DD:EE:FF -> ✅ Validation passes
+      └─> Device identified as AA:BB:CC:DD:EE:FF
+```
+
 ## Implementation Notes
 
 ### Error Handling
@@ -296,7 +362,7 @@ Byte    Description                     Status      Notes
 
 ---
 
-**Last Updated:** 2025-10-16<br>
+**Last Updated:** 2025-10-25<br>
 **Tested With:**
  - AirPods Pro (Gen 2) (0x2420), Firmware 7A305
  - AirPods Pro 3 (0x2720), Firmware 8A353
