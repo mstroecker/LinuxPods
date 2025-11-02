@@ -73,6 +73,7 @@ linuxpods/
 │   ├── ble/          # BLE scanner for Apple Continuity advertisements
 │   ├── aap/          # Apple Accessory Protocol (L2CAP) client
 │   ├── bluez/        # BlueZ D-Bus battery provider
+│   ├── keystore/     # Persistent encryption key storage (XDG Base Directory)
 │   ├── ui/           # GTK4/libadwaita UI components
 │   ├── indicator/    # System tray indicator
 │   └── util/         # Utility functions
@@ -102,6 +103,15 @@ The application uses a centralized `PodStateCoordinator` (internal/podstate/) th
 - UI window (internal/ui/) - Updates battery widgets
 - System tray (internal/indicator/) - Updates tray menu
 - BlueZ provider (internal/bluez/) - Updates GNOME Settings
+
+### Encryption Key Storage
+- **internal/keystore/**: Persistent storage for BLE encryption keys
+  - Follows XDG Base Directory specification: `~/.local/share/linuxpods/keys.json`
+  - Keys stored as JSON with base64 encoding, indexed by MAC address
+  - Automatically loaded on startup and saved when new keys are received
+  - In-memory cache with explicit Load/Save operations
+  - File permissions: 0600 (owner read/write only)
+  - Keys enable 1% accuracy BLE monitoring even when AirPods connected to other devices
 
 ### BlueZ Integration
 - **internal/bluez/battery_provider.go**: Implements org.bluez.BatteryProvider1 D-Bus API
@@ -157,6 +167,7 @@ All debugging tools are in cmd/debug_* directories and include comprehensive doc
   - UI code in internal/ui/
   - State coordination in internal/podstate/
   - Protocol implementations in internal/aap/, internal/ble/, internal/bluez/
+  - Persistent storage in internal/keystore/
   - System integration in internal/indicator/, internal/util/
 - **cmd/**: Command entry points - all main packages
   - cmd/gui/ is the main application
@@ -170,3 +181,82 @@ When working on specific components, use the corresponding debug tool:
 - Testing AAP connection? Use `go run ./cmd/debug_aap <MAC_ADDRESS>`
 - Debugging D-Bus integration? Use `go run ./cmd/debug_bluez_dbus_battery full`
 - Finding device paths? Use `go run ./cmd/debug_bluez_dbus_discover`
+- Retrieving encryption keys? Use `go run ./cmd/debug_aap_key_retrieval <MAC_ADDRESS>`
+
+## Code Patterns and Best Practices
+
+### Helper Functions
+- Extract repetitive code into helper functions with clear names
+- Use multiple return values instead of pointer parameters: `func helper() (*int, bool)` not `func helper(out **int, flag *bool)`
+- Example: `getBatteryFromAAP()` in coordinator.go, `updateBatteryMenuItem()` in indicator.go
+
+### Constants and Immutability
+- Use **arrays** for fixed-size data constants (e.g., protocol packets): `var packet = [16]byte{...}`
+- Arrays are better than slices for constants: fixed size, stack-allocatable, clearer intent
+- Slice arrays when passing to functions that expect `[]byte`: `sendPacket(packet[:], "name")`
+- Go doesn't support `const` for composite types; arrays are as close as we can get
+
+### Protocol Validation
+- **BLE Decryption**: `DecryptProximityPayload()` validates decrypted data using magic bytes:
+  - Byte 0 upper nibble must be `0x0`
+  - Byte 4 must be `0x2D`
+  - This helps identify correct decryption (wrong keys produce garbage but AES always "succeeds")
+- Always validate protocol data before use; return errors for invalid data
+
+### File Organization
+- Group related functionality (e.g., `stringer.go` for String() methods separate from core parsing)
+- Keep debug-only functions in debug tools, not in production packages
+- Example: Key retrieval helpers moved from `internal/aap/client.go` to `cmd/debug_aap_key_retrieval/main.go`
+
+### Error Handling
+- Use errors to signal validation failures (e.g., decryption with wrong key)
+- Let callers handle errors; don't silently ignore invalid data
+- Log significant events (device identification, connection state changes) but not routine operations
+
+### Multi-Device Support
+- State is managed per device using MAC address as key: `map[string]*PodState`
+- BLE advertisements use randomized MAC addresses (privacy feature)
+- Identify devices by trying all stored encryption keys until validation succeeds
+- Store encryption keys by real MAC address (from AAP connection), not BLE MAC
+
+### Encryption Key Persistence (Implemented)
+The keystore package (`internal/keystore/`) provides persistent storage for BLE encryption keys:
+
+**Implementation:**
+- **Storage location**: `~/.local/share/linuxpods/keys.json` (XDG Base Directory spec)
+- **Format**: JSON with base64-encoded keys, indexed by MAC address
+- **Permissions**: File created with 0600 (owner read/write only)
+- **API Pattern**: Separate Load/Save operations with in-memory cache
+  ```go
+  ks, _ := keystore.New()           // Create keystore
+  keys, _ := ks.Load()              // Load from disk
+  ks.Set(macAddr, key)              // Update in memory
+  ks.Save()                         // Persist to disk
+  key, exists := ks.Get(macAddr)    // Retrieve from cache
+  ```
+
+**Integration with PodStateCoordinator:**
+- Keys loaded on startup and populate the `encryptionKeys` map
+- When AAP receives encryption keys, they're automatically saved to disk
+- Enables BLE decryption (1% accuracy) immediately on subsequent app launches
+- No re-connection via AAP needed to decrypt BLE advertisements
+
+**Storage format example:**
+```json
+{
+  "version": 1,
+  "keys": {
+    "AA:BB:CC:DD:EE:FF": "AQIDBAUGBwgJCgsMDQ4PEA=="
+  }
+}
+```
+
+### Future: Additional Configuration Storage
+When implementing UI preferences and app settings:
+- Use **XDG Base Directory** specification:
+  - `~/.config/linuxpods/` for user configuration files (TOML/JSON)
+  - `~/.local/share/linuxpods/` for application data (already used for encryption keys)
+  - `~/.cache/linuxpods/` for temporary/cache data
+- Consider **GNOME Keyring** for future sensitive data if needed:
+  - Library: `github.com/zalando/go-keyring`
+  - Encryption keys currently use filesystem storage with restrictive permissions (0600)

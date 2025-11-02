@@ -18,6 +18,7 @@ import (
 
 	"linuxpods/internal/aap"
 	"linuxpods/internal/ble"
+	"linuxpods/internal/keystore"
 )
 
 // UpdateCallback is called when AirPods state data is updated
@@ -28,6 +29,7 @@ type UpdateCallback func(map[string]*PodState)
 type PodStateCoordinator struct {
 	scanner   *ble.Scanner
 	aapClient *aap.Client
+	keyStore  *keystore.Keystore
 
 	mu             sync.RWMutex
 	callbacks      []UpdateCallback
@@ -48,15 +50,34 @@ func NewPodStateCoordinator() (*PodStateCoordinator, error) {
 
 	// Start BLE discovery
 	if err := scanner.StartDiscovery(); err != nil {
-		scanner.Close()
+		_ = scanner.Close()
 		return nil, fmt.Errorf("failed to start BLE discovery: %w", err)
+	}
+
+	// Create keystore for persistent encryption key storage
+	ks, err := keystore.New()
+	if err != nil {
+		_ = scanner.Close()
+		return nil, fmt.Errorf("failed to create keystore: %w", err)
+	}
+
+	// Load existing encryption keys from disk
+	loadedKeys, err := ks.Load()
+	if err != nil {
+		_ = scanner.Close()
+		log.Printf("Warning: failed to load encryption keys from disk: %v", err)
+		// Continue with empty keys - not a fatal error
+		loadedKeys = make(map[string][]byte)
+	} else if len(loadedKeys) > 0 {
+		log.Printf("Loaded %d encryption key(s) from disk", len(loadedKeys))
 	}
 
 	m := &PodStateCoordinator{
 		scanner:        scanner,
+		keyStore:       ks,
 		callbacks:      make([]UpdateCallback, 0),
 		deviceStates:   make(map[string]*PodState),
-		encryptionKeys: make(map[string][]byte),
+		encryptionKeys: loadedKeys,
 		stopChan:       make(chan struct{}),
 	}
 
@@ -279,6 +300,13 @@ func (m *PodStateCoordinator) aapReadLoop() {
 						if existingState, ok := m.deviceStates[macAddr]; ok {
 							existingState.EncryptionKey = make([]byte, len(encKey))
 							copy(existingState.EncryptionKey, encKey)
+						}
+
+						// Persist the key to disk
+						if err := m.keyStore.Set(macAddr, encKey); err != nil {
+							log.Printf("Warning: failed to cache encryption key: %v", err)
+						} else if err := m.keyStore.Save(); err != nil {
+							log.Printf("Warning: failed to save encryption key to disk: %v", err)
 						}
 						m.mu.Unlock()
 
