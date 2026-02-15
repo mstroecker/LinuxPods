@@ -27,6 +27,7 @@ tools:
 	go build -o bin/debug_bluez_dbus_discover ./cmd/debug_bluez_dbus_discover
 	go build -o bin/debug_aap_key_retrieval ./cmd/debug_aap_key_retrieval
 	go build -o bin/debug_decrypt ./cmd/debug_decrypt
+	go build -o bin/debug_aap_noise_control ./cmd/debug_aap_noise_control
 
 # Format code
 fmt:

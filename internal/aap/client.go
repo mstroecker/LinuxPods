@@ -59,6 +59,11 @@ var (
 
 	// packetKeyRequest requests proximity pairing encryption keys
 	packetKeyRequest = [8]byte{0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00}
+
+	// packetNoiseControlBase is the base packet for setting noise control mode.
+	// Byte 7 is the mode: 0x01=Off, 0x02=ANC, 0x03=Transparency, 0x04=Adaptive.
+	// Source: LibrePods reverse engineering (unverified — use debug tool to confirm)
+	packetNoiseControlBase = [11]byte{0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x0D, 0x00, 0x00, 0x00, 0x00}
 )
 
 // Client represents an AAP client connected to AirPods
@@ -149,6 +154,20 @@ func (c *Client) EnableSpecialFeatures() error {
 // After calling this, use ReadProximityKeys() to wait for and parse the response.
 func (c *Client) RequestProximityKeys() error {
 	return c.sendPacket(packetKeyRequest[:], "key request")
+}
+
+// SetNoiseControl sends a noise control mode change command.
+// Mode values: 0x01=Off, 0x02=ANC, 0x03=Transparency, 0x04=Adaptive.
+func (c *Client) SetNoiseControl(mode byte) error {
+	packet := packetNoiseControlBase
+	packet[7] = mode
+	return c.sendPacket(packet[:], "noise control")
+}
+
+// IsNoiseControlPacket checks if a packet is a noise control response.
+// Noise control packets have command byte 0x09 at position 4.
+func IsNoiseControlPacket(packet []byte) bool {
+	return len(packet) >= 8 && packet[4] == 0x09
 }
 
 // sendPacket sends a packet to the AirPods and verifies it was fully written.
