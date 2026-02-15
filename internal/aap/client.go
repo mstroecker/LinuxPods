@@ -165,9 +165,10 @@ func (c *Client) SetNoiseControl(mode byte) error {
 }
 
 // IsNoiseControlPacket checks if a packet is a noise control response.
-// Noise control packets have command byte 0x09 at position 4.
+// Deprecated: Use IsNoiseControlModePacket from noise_parser.go instead.
+// This remains for backward compatibility with the debug tool.
 func IsNoiseControlPacket(packet []byte) bool {
-	return len(packet) >= 8 && packet[4] == 0x09
+	return IsNoiseControlModePacket(packet)
 }
 
 // sendPacket sends a packet to the AirPods and verifies it was fully written.

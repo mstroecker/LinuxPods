@@ -2,11 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
+	"linuxpods/internal/aap"
 	"linuxpods/internal/podstate"
 )
 
@@ -19,6 +21,9 @@ type BatteryWidgets struct {
 	RightLabel  *gtk.Label
 	CaseLabel   *gtk.Label
 	StatusLabel *gtk.Label // For connection status, charging, etc.
+
+	// Noise control radio buttons keyed by aap.NoiseMode
+	NoiseButtons map[aap.NoiseMode]*gtk.CheckButton
 }
 
 func Activate(app *adw.Application, podCoord *podstate.PodStateCoordinator) *adw.ApplicationWindow {
@@ -58,7 +63,7 @@ func setupUI(win *adw.ApplicationWindow, podCoord *podstate.PodStateCoordinator)
 	headerBar.SetTitleWidget(viewSwitcher)
 
 	// Create the Control tab content
-	controlBox, batteryWidgets := createControlView()
+	controlBox, batteryWidgets := createControlView(podCoord)
 	viewStack.AddTitledWithIcon(controlBox, "control", "Control", "audio-headphones-symbolic")
 
 	// Create the Settings tab content (placeholder for now)
@@ -76,7 +81,7 @@ func setupUI(win *adw.ApplicationWindow, podCoord *podstate.PodStateCoordinator)
 	return batteryWidgets
 }
 
-func createControlView() (*gtk.Box, *BatteryWidgets) {
+func createControlView(podCoord *podstate.PodStateCoordinator) (*gtk.Box, *BatteryWidgets) {
 	// Create main vertical box to hold all control elements
 	controlBox := gtk.NewBox(gtk.OrientationVertical, 20)
 	controlBox.SetMarginTop(20)
@@ -154,48 +159,50 @@ func createControlView() (*gtk.Box, *BatteryWidgets) {
 	noiseControlGroup := adw.NewPreferencesGroup()
 	noiseControlGroup.SetTitle("Noise Control")
 
-	// Define noise control options
-	options := []struct {
-		id    string
+	// Define noise control options mapped to AAP mode values
+	noiseOptions := []struct {
+		mode  aap.NoiseMode
 		title string
 		desc  string
 	}{
-		{"transparency", "Transparency", "Hear the world around you"},
-		{"adaptive", "Adaptive", "Automatically adjusts to your environment"},
-		{"noise_cancelling", "Noise Cancelling", "Block out background noise"},
-		{"off", "Off", "Noise control disabled"},
+		{aap.NoiseModeTransparency, "Transparency", "Hear the world around you"},
+		{aap.NoiseModeAdaptive, "Adaptive", "Automatically adjusts to your environment"},
+		{aap.NoiseModeANC, "Noise Cancelling", "Block out background noise"},
+		{aap.NoiseModeOff, "Off", "Noise control disabled"},
 	}
 
+	widgets.NoiseButtons = make(map[aap.NoiseMode]*gtk.CheckButton)
 	var firstButton *gtk.CheckButton
-	for i, opt := range options {
-		// Create action row
+	for i, opt := range noiseOptions {
 		row := adw.NewActionRow()
 		row.SetTitle(opt.title)
 		row.SetSubtitle(opt.desc)
 
-		// Create radio button
-		var radioButton *gtk.CheckButton
+		radioButton := gtk.NewCheckButton()
 		if i == 0 {
-			radioButton = gtk.NewCheckButton()
-			radioButton.SetActive(true) // Set first option as default
+			radioButton.SetActive(true)
 			firstButton = radioButton
 		} else {
-			radioButton = gtk.NewCheckButton()
 			radioButton.SetGroup(firstButton)
 		}
 
-		// Connect signal handler
+		// Capture mode for closure
+		mode := opt.mode
 		radioButton.Connect("toggled", func() {
 			if radioButton.Active() {
-				println("Noise Control changed to:", opt.title, "("+opt.id+")")
-				// Add your logic here to actually change the noise control setting
+				go func() {
+					if err := podCoord.SetNoiseControl(mode); err != nil {
+						log.Printf("Failed to set noise control: %v", err)
+					}
+				}()
 			}
 		})
 
 		row.AddPrefix(radioButton)
 		row.SetActivatableWidget(radioButton)
-
 		noiseControlGroup.Add(row)
+
+		widgets.NoiseButtons[opt.mode] = radioButton
 	}
 
 	// Add noise control section to control box
@@ -455,6 +462,14 @@ func updateBatteryDisplay(widgets *BatteryWidgets, state *podstate.PodState) {
 	} else {
 		widgets.CaseLevel.SetValue(0.0)
 		widgets.CaseLabel.SetText("--")
+	}
+
+	// Sync noise control radio buttons from device state
+	if state.NoiseMode != 0 {
+		mode := aap.NoiseMode(state.NoiseMode)
+		if btn, ok := widgets.NoiseButtons[mode]; ok {
+			btn.SetActive(true)
+		}
 	}
 
 	// Update status label with connection state and other info

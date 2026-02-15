@@ -154,6 +154,39 @@ func (ind *Indicator) setNoiseMode(mode NoiseMode) {
 	log.Printf("Noise mode changed to: %s", mode)
 }
 
+// UpdateNoiseMode syncs the tray checkboxes to match the device's current noise mode.
+// Called when the mode changes from an external source (device report, UI change).
+func (ind *Indicator) UpdateNoiseMode(mode NoiseMode) {
+	if mode == ind.noiseMode {
+		return
+	}
+
+	// Uncheck all, check the new mode
+	for _, item := range ind.noiseModeItems {
+		item.Uncheck()
+	}
+	if item, ok := ind.noiseModeItems[mode]; ok {
+		item.Check()
+	}
+	ind.noiseMode = mode
+}
+
+// NoiseModeFromByte converts an AAP noise mode byte to the indicator's NoiseMode string.
+func NoiseModeFromByte(mode byte) NoiseMode {
+	switch mode {
+	case 0x01:
+		return Off
+	case 0x02:
+		return NoiseCancelling
+	case 0x03:
+		return Transparency
+	case 0x04:
+		return Adaptive
+	default:
+		return Off
+	}
+}
+
 // UpdateBatteryLevels updates the displayed battery levels
 func (ind *Indicator) UpdateBatteryLevels(left, right, caseLevel *int, leftCharging, rightCharging, caseCharging bool) {
 	ind.batteries.Left = left

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"linuxpods/internal/aap"
 	"linuxpods/internal/util"
 	"log"
 	"os"
@@ -99,11 +100,23 @@ func createBluezBatteryProvider(podCoord *podstate.PodStateCoordinator) *bluez.B
 
 // createTrayIndicator creates and configures the system tray indicator
 func createTrayIndicator(podCoord *podstate.PodStateCoordinator) *indicator.Indicator {
+	// Map tray NoiseMode strings to AAP mode bytes
+	trayToAAP := map[indicator.NoiseMode]aap.NoiseMode{
+		indicator.Off:             aap.NoiseModeOff,
+		indicator.NoiseCancelling: aap.NoiseModeANC,
+		indicator.Transparency:    aap.NoiseModeTransparency,
+		indicator.Adaptive:        aap.NoiseModeAdaptive,
+	}
+
 	tray := indicator.New(
 		showWindow,
 		quitApp,
 		func(mode indicator.NoiseMode) {
-			log.Printf("Noise mode changed from tray: %s", mode)
+			if aapMode, ok := trayToAAP[mode]; ok {
+				if err := podCoord.SetNoiseControl(aapMode); err != nil {
+					log.Printf("Failed to set noise control from tray: %v", err)
+				}
+			}
 		},
 	)
 	tray.Start()
@@ -120,6 +133,10 @@ func createTrayIndicator(podCoord *podstate.PodStateCoordinator) *indicator.Indi
 				state.RightCharging,
 				state.CaseCharging,
 			)
+			// Sync noise mode from device state
+			if state.NoiseMode != 0 {
+				tray.UpdateNoiseMode(indicator.NoiseModeFromByte(state.NoiseMode))
+			}
 			break // Only use the first device
 		}
 	})
