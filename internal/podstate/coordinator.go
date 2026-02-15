@@ -286,6 +286,19 @@ func (m *PodStateCoordinator) aapReadLoop() {
 				m.handleStateUpdate(macAddr, state)
 			}
 
+			// Parse noise control mode reports (from startup dump or unsolicited changes)
+			if aap.IsNoiseControlModePacket(packet) {
+				mode, err := aap.ParseNoiseControlPacket(packet)
+				if err == nil {
+					m.mu.Lock()
+					if existingState, ok := m.deviceStates[macAddr]; ok {
+						existingState.NoiseMode = byte(mode)
+					}
+					m.mu.Unlock()
+					log.Printf("Noise control mode report: %s", mode)
+				}
+			}
+
 			// Try to parse the proximity keys
 			if aap.IsKeyPacket(packet) {
 				proximityKeys, err := aap.ParseProximityKeys(packet)
@@ -410,8 +423,13 @@ func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte
 	// AAP doesn't provide in-ear detection, lid state, device model, color, or primary pod
 	// These fields remain at their zero values
 
-	// Look up the encryption key for this device
+	// Preserve noise control mode from existing state (battery updates shouldn't clear it)
 	m.mu.RLock()
+	if existingState, ok := m.deviceStates[macAddr]; ok {
+		state.NoiseMode = existingState.NoiseMode
+	}
+
+	// Look up the encryption key for this device
 	if encKey, ok := m.encryptionKeys[macAddr]; ok {
 		// Make a copy of the key
 		state.EncryptionKey = make([]byte, len(encKey))
@@ -420,6 +438,56 @@ func (m *PodStateCoordinator) aapToState(info *aap.BatteryInfo, rawPacket []byte
 	m.mu.RUnlock()
 
 	return state
+}
+
+// SetNoiseControl sends a noise control mode change to the connected AirPods.
+// State is updated optimistically — the AirPods do not reliably send a confirmation packet.
+func (m *PodStateCoordinator) SetNoiseControl(mode aap.NoiseMode) error {
+	m.mu.RLock()
+	client := m.aapClient
+	connected := m.aapConnected
+	macAddr := m.aapMacAddr
+	m.mu.RUnlock()
+
+	if !connected || client == nil {
+		return fmt.Errorf("no active AAP connection - connect to AirPods first")
+	}
+
+	if err := client.SetNoiseControl(byte(mode)); err != nil {
+		return fmt.Errorf("failed to set noise control: %w", err)
+	}
+
+	// Update state optimistically (AirPods don't reliably echo a confirmation)
+	m.mu.Lock()
+	if existingState, ok := m.deviceStates[macAddr]; ok {
+		existingState.NoiseMode = byte(mode)
+	}
+	m.mu.Unlock()
+
+	log.Printf("Noise control set to: %s", mode)
+
+	// Notify callbacks of the updated state
+	m.mu.RLock()
+	statesCopy := make(map[string]*PodState, len(m.deviceStates))
+	for addr, s := range m.deviceStates {
+		statesCopy[addr] = s
+	}
+	callbacks := make([]UpdateCallback, len(m.callbacks))
+	copy(callbacks, m.callbacks)
+	m.mu.RUnlock()
+
+	for _, cb := range callbacks {
+		cb(statesCopy)
+	}
+
+	return nil
+}
+
+// IsAAPConnected returns whether an AAP connection is active
+func (m *PodStateCoordinator) IsAAPConnected() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.aapConnected
 }
 
 // RequestEncryptionKeys requests encryption keys from connected AirPods via AAP.

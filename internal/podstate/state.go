@@ -73,6 +73,9 @@ type PodState struct {
 	RealMac       string // Real (permanent) MAC address from AAP connection
 	CurrentBLEMac string // Current randomized BLE MAC address (changes periodically for privacy)
 
+	// Noise control mode (only available via AAP)
+	NoiseMode byte // 0x01=Off, 0x02=ANC, 0x03=Transparency, 0x04=Adaptive
+
 	// Encryption key for decrypting BLE advertisements (ENC_KEY from proximity pairing)
 	// This is the 16-byte key retrieved via AAP that allows decrypting encrypted portions
 	// of BLE proximity pairing advertisements for accurate battery levels
