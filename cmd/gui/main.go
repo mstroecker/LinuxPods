@@ -18,8 +18,9 @@ import (
 const appID = "com.linuxpods.app"
 
 var (
-	app    *adw.Application
-	window *adw.ApplicationWindow
+	app       *adw.Application
+	window    *adw.ApplicationWindow
+	minimized bool
 )
 
 func main() {
@@ -27,6 +28,16 @@ func main() {
 }
 
 func run() int {
+	// Strip --minimized flag before passing args to GTK (which rejects unknown flags)
+	var gtkArgs []string
+	for _, arg := range os.Args {
+		if arg == "--minimized" {
+			minimized = true
+		} else {
+			gtkArgs = append(gtkArgs, arg)
+		}
+	}
+
 	// Create a centralized AirPods state coordinator
 	// This coordinates BLE scanning, AAP connections, and notifies all components via callbacks
 	podCoord, err := podstate.NewPodStateCoordinator()
@@ -49,9 +60,13 @@ func run() int {
 	app = adw.NewApplication(appID, 0)
 	app.ConnectActivate(func() {
 		window = ui.Activate(app, podCoord)
+		if minimized {
+			return // Tray only — user opens window from tray icon
+		}
+		window.Present()
 	})
 
-	return app.Run(os.Args)
+	return app.Run(gtkArgs)
 }
 
 // createBluezBatteryProvider creates and configures the BlueZ battery provider

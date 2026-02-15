@@ -32,7 +32,6 @@ func Activate(app *adw.Application, podCoord *podstate.PodStateCoordinator) *adw
 	win.SetDefaultSize(400, 500)
 
 	batteryWidgets := setupUI(win, podCoord)
-	win.Present()
 
 	// Register callback with pod state coordinator to update UI
 	podCoord.RegisterCallback(func(states map[string]*podstate.PodState) {
