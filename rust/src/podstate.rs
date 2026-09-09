@@ -21,7 +21,8 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::aap;
 use crate::ble::parser::{PodSide, ProximityData};
-use crate::ble::{decrypt_proximity_payload, decode_model_name};
+use crate::ble::decode_model_name;
+use crate::ble::decrypt::decrypt_for_device;
 use crate::keystore::Keystore;
 
 /// How long a device may go unseen before its state is dropped. Bounds the map
@@ -234,7 +235,7 @@ impl Coordinator {
         let keys = self.inner.read().await.encryption_keys.clone();
 
         for (real_mac, key) in &keys {
-            let Ok(decrypted) = decrypt_proximity_payload(&encrypted, key) else {
+            let Ok(decrypted) = decrypt_for_device(&encrypted, key, real_mac) else {
                 continue;
             };
             if data.add_decrypted_data(&decrypted).is_ok() {
