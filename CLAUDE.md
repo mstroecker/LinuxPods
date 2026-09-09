@@ -197,10 +197,14 @@ When working on specific components, use the corresponding debug tool:
 - Go doesn't support `const` for composite types; arrays are as close as we can get
 
 ### Protocol Validation
-- **BLE Decryption**: `DecryptProximityPayload()` validates decrypted data using magic bytes:
-  - Byte 0 upper nibble must be `0x0`
-  - Byte 4 must be `0x2D`
-  - This helps identify correct decryption (wrong keys produce garbage but AES always "succeeds")
+- **BLE Decryption**: validate a decrypted proximity payload by **MAC suffix**, not magic bytes:
+  - Bytes 7-9 of the decrypted payload hold the last 3 bytes of the device's real MAC
+  - Compare them against the MAC the candidate key is stored under; a match both
+    validates the decryption and identifies the device behind a randomized BLE MAC
+  - Wrong keys produce garbage but AES always "succeeds", so an explicit check is required
+  - ⚠️ The older magic-byte check (byte 0 upper nibble `0x0`, byte 4 `0x2D`) does **not**
+    hold on AirPods Pro 3 (0x2720) or Pro Gen 2 (0x2420) - both report byte 4 = `0x1D` -
+    and rejects correct decryptions. See `docs/ble-proximity-pairing.md`
 - Always validate protocol data before use; return errors for invalid data
 
 ### File Organization
