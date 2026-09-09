@@ -1,8 +1,11 @@
 //! Centralized AirPods state coordination.
 //!
 //! Port of internal/podstate. Coordinates two data sources and notifies consumers:
-//!   - AAP (accurate, 1%) while an L2CAP connection is up
-//!   - BLE advertisements (approximate, 10%) otherwise, or 1% when decryptable
+//!   - AAP (exact) for the device an L2CAP connection is up to
+//!   - BLE advertisements for every other device (10% steps, or exact once decrypted)
+//!
+//! The choice is per device, not global: an AAP connection to one pair of AirPods
+//! must not stop a second pair from being tracked over BLE.
 //!
 //! # Difference from the Go original
 //!
@@ -74,6 +77,11 @@ pub struct PodState {
     pub current_ble_mac: String,
 
     pub encryption_key: Option<Vec<u8>>,
+
+    /// True when this state is attributable to a known device: always for AAP, and
+    /// for BLE only when a stored key decrypted the advertisement. Unidentified
+    /// advertisements are deliberately kept out of the main UI.
+    pub identified: bool,
 }
 
 impl PodState {
@@ -93,16 +101,26 @@ impl PodState {
 pub struct Snapshot {
     pub states: HashMap<String, PodState>,
     pub connected_mac: Option<String>,
+    /// Every MAC we hold an encryption key for, sorted. Independent of whether the
+    /// device is currently advertising or connected.
+    pub known_keys: Vec<String>,
 }
 
 impl Snapshot {
-    /// The device an AAP connection is up for, else any device present.
+    /// The device an AAP connection is up for, else any identified device.
     pub fn primary(&self) -> Option<&PodState> {
         self.connected_mac
             .as_ref()
             .and_then(|m| self.states.get(m))
-            .or_else(|| self.states.values().next())
+            .or_else(|| self.states.values().find(|s| s.identified))
     }
+
+}
+
+/// True when an active AAP connection makes this device's BLE advertisement
+/// redundant. Only the connected device is superseded; everything else still counts.
+fn supersedes_ble(connected_mac: Option<&str>, advertising_mac: &str) -> bool {
+    connected_mac == Some(advertising_mac)
 }
 
 struct Entry {
@@ -125,6 +143,9 @@ impl Inner {
     }
 
     fn snapshot(&self) -> Snapshot {
+        let mut known_keys: Vec<String> = self.encryption_keys.keys().cloned().collect();
+        known_keys.sort();
+
         Snapshot {
             states: self
                 .devices
@@ -132,6 +153,7 @@ impl Inner {
                 .map(|(k, v)| (k.clone(), v.state.clone()))
                 .collect(),
             connected_mac: self.connected_mac.clone(),
+            known_keys,
         }
     }
 }
@@ -181,8 +203,20 @@ impl Coordinator {
     /// Registers a new consumer. Every subscriber receives every snapshot.
     ///
     /// Unbounded so a slow consumer can never stall a protocol read loop.
+    ///
+    /// The current state is delivered immediately. Without that a subscriber which
+    /// starts before the first advertisement sees nothing at all - the window came
+    /// up blank whenever no device was connected or in range, even though the keys
+    /// were already loaded from disk.
     pub fn subscribe(&self) -> async_channel::Receiver<Snapshot> {
         let (tx, rx) = async_channel::unbounded();
+
+        // try_read rather than blocking: subscribe() is called from the GTK main
+        // context, and at startup there is no contention anyway.
+        if let Ok(inner) = self.inner.try_read() {
+            let _ = tx.try_send(inner.snapshot());
+        }
+
         self.subscribers
             .lock()
             .expect("subscriber list poisoned")
@@ -251,14 +285,23 @@ impl Coordinator {
     }
 
     /// Handles one BLE advertisement.
+    ///
+    /// An AAP connection only supersedes BLE *for that one device*. Other AirPods
+    /// keep advertising and must still be tracked, so the decision is made per
+    /// device after identification rather than globally.
     pub async fn handle_advertisement(&self, mut data: ProximityData, ble_mac: String) {
-        // BLE is only a fallback; AAP is authoritative while connected.
-        if self.inner.read().await.connected_mac.is_some() {
-            return;
-        }
+        let connected = self.inner.read().await.connected_mac.clone();
 
         let real_mac = self.identify_and_decrypt(&mut data, &ble_mac).await;
+        let identified = real_mac.is_some();
         let key_mac = real_mac.clone().unwrap_or_else(|| ble_mac.clone());
+
+        // AAP data for this device is exact and current; its own advertisements are
+        // coarser and lag behind, so letting them through would overwrite good data
+        // with worse data.
+        if supersedes_ble(connected.as_deref(), &key_mac) {
+            return;
+        }
 
         let encryption_key = self
             .inner
@@ -286,6 +329,7 @@ impl Coordinator {
             real_mac: real_mac.unwrap_or_default(),
             current_ble_mac: ble_mac,
             encryption_key,
+            identified,
         };
 
         tracing::debug!(
@@ -351,8 +395,12 @@ impl Coordinator {
 
     /// Reads AAP packets until the connection drops.
     pub async fn aap_read_loop(&self, mac_addr: String) {
+        tracing::debug!("AAP read loop started for {mac_addr}");
         loop {
-            let Some(client) = self.client().await else { return };
+            let Some(client) = self.client().await else {
+                tracing::debug!("AAP read loop: client gone, exiting");
+                return;
+            };
 
             let packet = match client.read_packet().await {
                 Ok(p) => p,
@@ -362,6 +410,12 @@ impl Coordinator {
                     return;
                 }
             };
+
+            tracing::debug!(
+                "AAP packet ({} bytes): {}",
+                packet.len(),
+                packet.iter().take(8).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            );
 
             if aap::is_battery_packet(&packet) {
                 match aap::parse_battery_packet(&packet) {
@@ -399,6 +453,7 @@ impl Coordinator {
             case_charging: info.case.is_some_and(|b| b.is_charging()),
             real_mac: mac_addr.to_string(),
             encryption_key,
+            identified: true,
             // AAP carries no in-ear, lid, model, colour or primary-pod data.
             ..Default::default()
         };
@@ -452,6 +507,11 @@ impl Coordinator {
 
     pub async fn has_encryption_keys(&self) -> bool {
         !self.inner.read().await.encryption_keys.is_empty()
+    }
+
+    /// Number of devices we hold a key for.
+    pub async fn known_key_count(&self) -> usize {
+        self.inner.read().await.encryption_keys.len()
     }
 }
 
@@ -514,6 +574,35 @@ mod tests {
         );
     }
 
+    /// Regression: the window came up blank with no device connected and none in
+    /// range, because nothing was broadcast until the first advertisement arrived.
+    #[tokio::test]
+    async fn subscribe_delivers_current_state_immediately() {
+        let coordinator = Coordinator::new().await.expect("coordinator");
+        let rx = coordinator.subscribe();
+
+        let snapshot = rx
+            .try_recv()
+            .expect("a subscriber must receive the current state without waiting");
+
+        // Whatever is on disk, the snapshot must carry the loaded key list so the
+        // UI can render known devices before anything is heard over the air.
+        assert_eq!(snapshot.known_keys.len(), coordinator.known_key_count().await);
+    }
+
+    #[test]
+    fn aap_supersedes_ble_only_for_the_connected_device() {
+        // The connected device's own advertisements are dropped...
+        assert!(supersedes_ble(Some("aa"), "aa"));
+        // ...but a second pair of AirPods keeps being tracked over BLE.
+        assert!(!supersedes_ble(Some("aa"), "bb"));
+        // With nothing connected, everything is processed.
+        assert!(!supersedes_ble(None, "aa"));
+        // An unidentified advertisement is keyed by its random MAC, so it is never
+        // mistaken for the connected device.
+        assert!(!supersedes_ble(Some("aa"), "5C:4D:3F:B5:41:B6"));
+    }
+
     #[test]
     fn lowest_earbud_handles_missing_values() {
         let mut s = PodState { left_battery: Some(80), right_battery: Some(60), ..Default::default() };
@@ -532,7 +621,42 @@ mod tests {
         states.insert("aa".into(), PodState { device_model: 1, ..Default::default() });
         states.insert("bb".into(), PodState { device_model: 2, ..Default::default() });
 
-        let snap = Snapshot { states, connected_mac: Some("bb".into()) };
+        let snap = Snapshot {
+            states,
+            connected_mac: Some("bb".into()),
+            known_keys: vec!["aa".into(), "bb".into()],
+        };
         assert_eq!(snap.primary().unwrap().device_model, 2);
+    }
+
+    /// Unidentified advertisements must not become the primary device: with
+    /// rotating MACs, strangers nearby would otherwise drive the tray and the
+    /// GNOME battery reading.
+    #[test]
+    fn primary_ignores_unidentified_devices() {
+        let mut states = HashMap::new();
+        states.insert(
+            "known".into(),
+            PodState { device_model: 7, identified: true, ..Default::default() },
+        );
+        states.insert(
+            "stranger".into(),
+            PodState { device_model: 9, identified: false, ..Default::default() },
+        );
+
+        let snap = Snapshot { states, connected_mac: None, known_keys: vec![] };
+        assert_eq!(snap.primary().unwrap().device_model, 7);
+    }
+
+    #[test]
+    fn primary_falls_back_to_an_identified_device() {
+        let mut states = HashMap::new();
+        states.insert(
+            "stranger".into(),
+            PodState { identified: false, ..Default::default() },
+        );
+
+        let snap = Snapshot { states, connected_mac: None, known_keys: vec![] };
+        assert!(snap.primary().is_none(), "an unidentified device is not a primary");
     }
 }
