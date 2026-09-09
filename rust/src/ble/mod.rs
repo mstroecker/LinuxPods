@@ -2,9 +2,7 @@
 
 pub mod decrypt;
 pub mod parser;
+pub mod scanner;
 
-pub use decrypt::{DecryptError, decrypt_proximity_payload};
-pub use parser::{
-    ParseError, PodSide, ProximityData, decode_battery, decode_color, decode_connection_state,
-    decode_model_name, parse_proximity_data,
-};
+pub use decrypt::decrypt_proximity_payload;
+pub use parser::decode_model_name;
