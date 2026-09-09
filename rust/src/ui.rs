@@ -362,6 +362,7 @@ fn sync_device_list(view: &ControlView, macs: &[String], snapshot: &Snapshot) {
 /// Draws one device, and gates the control sections on how the data arrived.
 fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
     let state = mac.and_then(|m| snapshot.states.get(m));
+    let connected = mac.is_some() && mac == snapshot.connected_mac.as_deref();
 
     match state {
         Some(state) => {
@@ -373,9 +374,16 @@ fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
             view.features_group.set_sensitive(interactive);
         }
         // Known device, nothing heard from it yet: show it as empty rather than
-        // hiding it, so the switcher and the display agree.
+        // hiding it, so the switcher and the display agree. Distinguish a device
+        // that is connected but has not reported yet from one simply out of range -
+        // otherwise a live AAP link looks identical to a missing device.
         None => {
-            clear_battery_display(&view.battery, "No recent data");
+            let status = if connected {
+                "Connected • waiting for data"
+            } else {
+                "No recent data"
+            };
+            clear_battery_display(&view.battery, status);
             view.noise_group.set_sensitive(false);
             view.features_group.set_sensitive(false);
         }
