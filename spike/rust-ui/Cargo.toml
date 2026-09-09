@@ -1,0 +1,13 @@
+[package]
+name = "linuxpods-ui-spike"
+version = "0.1.0"
+edition = "2021"
+
+# Spike only: a faithful port of internal/ui/window.go to gtk4-rs + libadwaita-rs,
+# to evaluate ergonomics against the existing gotk4 implementation.
+# Not wired to the real BLE/AAP/BlueZ stack - see state.rs for the mock coordinator.
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11" }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_4"] }
+async-channel = "2"
