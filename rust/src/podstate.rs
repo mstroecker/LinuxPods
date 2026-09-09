@@ -142,6 +142,21 @@ impl Inner {
             .retain(|_, e| now.duration_since(e.last_seen) < ttl);
     }
 
+    /// Drops a device's state if it came from AAP.
+    ///
+    /// After the link goes the readings are no longer current, and leaving them in
+    /// place left the UI reporting "Source: AAP" for a device that had disconnected.
+    /// BLE repopulates within a second or two if the device is still in range.
+    fn drop_aap_state(&mut self, mac: &str) {
+        if self
+            .devices
+            .get(mac)
+            .is_some_and(|e| e.state.source == DataSource::Aap)
+        {
+            self.devices.remove(mac);
+        }
+    }
+
     fn snapshot(&self) -> Snapshot {
         let mut known_keys: Vec<String> = self.encryption_keys.keys().cloned().collect();
         known_keys.sort();
@@ -371,7 +386,13 @@ impl Coordinator {
             .context("failed to enable features")?;
 
         *self.aap_client.lock().await = Some(Arc::new(client));
-        self.inner.write().await.connected_mac = Some(mac_addr.to_string());
+
+        let snapshot = {
+            let mut inner = self.inner.write().await;
+            inner.connected_mac = Some(mac_addr.to_string());
+            inner.snapshot()
+        };
+        self.broadcast(snapshot);
 
         tracing::info!(
             "AAP connected to {mac_addr} - exact battery for this device; \
@@ -397,7 +418,18 @@ impl Coordinator {
                 mac = mac.as_deref().unwrap_or("device")
             );
         }
-        self.inner.write().await.connected_mac = None;
+        let snapshot = {
+            let mut inner = self.inner.write().await;
+            inner.connected_mac = None;
+            if let Some(mac) = &mac {
+                inner.drop_aap_state(mac);
+            }
+            inner.snapshot()
+        };
+
+        // Without this the UI, tray and battery provider never hear that the
+        // connection ended and keep showing the last AAP reading.
+        self.broadcast(snapshot);
     }
 
     /// Reads AAP packets until the connection drops.
@@ -595,6 +627,39 @@ mod tests {
         // Whatever is on disk, the snapshot must carry the loaded key list so the
         // UI can render known devices before anything is heard over the air.
         assert_eq!(snapshot.known_keys.len(), coordinator.known_key_count().await);
+    }
+
+    /// Regression: a dropped AAP link left the UI reporting Source: AAP forever,
+    /// because the stale state stayed in the map and nothing was broadcast.
+    #[test]
+    fn disconnect_drops_stale_aap_state() {
+        let mut inner = inner_with(vec![]);
+        inner.devices.insert(
+            "aa".into(),
+            Entry {
+                state: PodState { source: DataSource::Aap, ..Default::default() },
+                last_seen: Instant::now(),
+            },
+        );
+
+        inner.drop_aap_state("aa");
+        assert!(!inner.devices.contains_key("aa"));
+    }
+
+    #[test]
+    fn disconnect_keeps_ble_state() {
+        let mut inner = inner_with(vec![]);
+        inner.devices.insert(
+            "aa".into(),
+            Entry {
+                state: PodState { source: DataSource::Ble, ..Default::default() },
+                last_seen: Instant::now(),
+            },
+        );
+
+        // A BLE reading is still the best we have; only AAP state goes stale here.
+        inner.drop_aap_state("aa");
+        assert!(inner.devices.contains_key("aa"));
     }
 
     #[test]
