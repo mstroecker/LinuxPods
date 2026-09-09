@@ -145,36 +145,89 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
         }
     };
 
-    // Connect to AirPods that are already paired and connected.
-    if let Ok(device_path) = provider.discover_airpods().await {
-        if let Err(e) = provider.add_battery(0, &device_path).await {
-            tracing::warn!("failed to add battery object: {e}");
-        } else {
-            tracing::info!("Battery provider registered for {device_path}");
+    // Subscribe before the initial sweep so a connection racing startup is not missed.
+    let events = match provider.watch_connections().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("failed to watch device connections: {e:#}");
+            return;
         }
+    };
+    tokio::pin!(events);
+    tracing::info!("watching for AirPods connections");
 
-        if let Ok(mac) = provider.device_address(&device_path).await {
-            match coordinator.connect_aap(&mac).await {
-                Ok(()) => {
-                    let coord = coordinator.clone();
-                    tokio::spawn(async move { coord.aap_read_loop(mac).await });
+    // Attach to AirPods that are already connected.
+    if let Ok(device_path) = provider.discover_airpods().await {
+        attach_device(&mut provider, &coordinator, &device_path).await;
+    }
+
+    let updates = coordinator.subscribe();
+
+    loop {
+        tokio::select! {
+            Some(event) = events.next() => {
+                let alias = provider.device_alias(&event.device_path).await;
+                tracing::debug!(
+                    "connection event: {} connected={} alias={alias:?}",
+                    event.device_path,
+                    event.connected
+                );
+
+                // Only react to AirPods, not every Bluetooth device on the system.
+                if !alias.contains("AirPods") {
+                    continue;
                 }
-                Err(e) => {
-                    tracing::warn!("failed to connect AAP: {e:#}");
-                    tracing::warn!("Falling back to BLE for battery monitoring (approximate)");
+
+                if event.connected {
+                    tracing::info!("AirPods connected: {}", event.device_path);
+                    attach_device(&mut provider, &coordinator, &event.device_path).await;
+                } else {
+                    tracing::info!("AirPods disconnected: {}", event.device_path);
+                    coordinator.disconnect_aap().await;
                 }
             }
+
+            // Mirror the lowest earbud level into GNOME Settings.
+            Ok(snapshot) = updates.recv() => {
+                let Some(level) = snapshot.primary().and_then(|s| s.lowest_earbud()) else {
+                    continue;
+                };
+                if let Err(e) = provider.update_percentage(level).await {
+                    tracing::debug!("update BlueZ battery: {e}");
+                }
+            }
+
+            else => break,
+        }
+    }
+}
+
+/// Registers the battery object and opens an AAP connection for one device.
+async fn attach_device(
+    provider: &mut bluez::BatteryProvider,
+    coordinator: &Arc<Coordinator>,
+    device_path: &str,
+) {
+    if !provider.has_battery() {
+        match provider.add_battery(0, device_path).await {
+            Ok(()) => tracing::info!("Battery provider registered for {device_path}"),
+            Err(e) => tracing::warn!("failed to add battery object: {e:#}"),
         }
     }
 
-    // Mirror the lowest earbud level into GNOME Settings.
-    let updates = coordinator.subscribe();
-    while let Ok(snapshot) = updates.recv().await {
-        let Some(level) = snapshot.primary().and_then(|s| s.lowest_earbud()) else {
-            continue;
-        };
-        if let Err(e) = provider.update_percentage(level).await {
-            tracing::debug!("update BlueZ battery: {e}");
+    let Ok(mac) = provider.device_address(device_path).await else {
+        tracing::warn!("could not read address for {device_path}");
+        return;
+    };
+
+    match coordinator.connect_aap(&mac).await {
+        Ok(()) => {
+            let coord = coordinator.clone();
+            tokio::spawn(async move { coord.aap_read_loop(mac).await });
+        }
+        Err(e) => {
+            tracing::warn!("failed to connect AAP: {e:#}");
+            tracing::warn!("Falling back to BLE for battery monitoring (approximate)");
         }
     }
 }
