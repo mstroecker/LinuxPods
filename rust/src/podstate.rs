@@ -142,8 +142,10 @@ pub struct Coordinator {
     /// Shared so a blocked read never blocks a concurrent send. bluer's
     /// SeqPacket takes &self for both send and recv, so this is safe.
     aap_client: Mutex<Option<Arc<aap::Client>>>,
-    updates: async_channel::Sender<Snapshot>,
-    subscribe: async_channel::Receiver<Snapshot>,
+    /// One sender per consumer. A single shared channel would NOT work here:
+    /// async_channel is MPMC, so each snapshot would go to exactly one of the
+    /// UI / BlueZ provider / tray rather than all three.
+    subscribers: std::sync::Mutex<Vec<async_channel::Sender<Snapshot>>>,
 }
 
 impl Coordinator {
@@ -163,9 +165,6 @@ impl Coordinator {
             }
         };
 
-        // Unbounded so a slow consumer can never stall a protocol read loop.
-        let (tx, rx) = async_channel::unbounded();
-
         Ok(Arc::new(Self {
             inner: RwLock::new(Inner {
                 devices: HashMap::new(),
@@ -174,14 +173,32 @@ impl Coordinator {
             }),
             keystore: Mutex::new(keystore),
             aap_client: Mutex::new(None),
-            updates: tx,
-            subscribe: rx,
+            subscribers: std::sync::Mutex::new(Vec::new()),
         }))
     }
 
-    /// Receiver of state snapshots. Cloneable; every clone sees every update.
+    /// Registers a new consumer. Every subscriber receives every snapshot.
+    ///
+    /// Unbounded so a slow consumer can never stall a protocol read loop.
     pub fn subscribe(&self) -> async_channel::Receiver<Snapshot> {
-        self.subscribe.clone()
+        let (tx, rx) = async_channel::unbounded();
+        self.subscribers
+            .lock()
+            .expect("subscriber list poisoned")
+            .push(tx);
+        rx
+    }
+
+    /// Fans a snapshot out to every subscriber, dropping any that have gone away.
+    ///
+    /// Uses try_send so no await happens while the std mutex is held; the channels
+    /// are unbounded, so the only failure mode is a closed receiver.
+    fn broadcast(&self, snapshot: Snapshot) {
+        let mut subs = self.subscribers.lock().expect("subscriber list poisoned");
+        subs.retain(|tx| !matches!(
+            tx.try_send(snapshot.clone()),
+            Err(async_channel::TrySendError::Closed(_))
+        ));
     }
 
     pub async fn connected_mac(&self) -> Option<String> {
@@ -201,7 +218,7 @@ impl Coordinator {
             inner.prune(now, DEVICE_TTL);
             inner.snapshot()
         };
-        let _ = self.updates.send(snapshot).await;
+        self.broadcast(snapshot);
     }
 
     /// Tries every stored key against the advertisement's encrypted portion.
@@ -368,6 +385,13 @@ impl Coordinator {
             ..Default::default()
         };
 
+        tracing::debug!(
+            "AAP battery: left={:?} right={:?} case={:?}",
+            state.left_battery,
+            state.right_battery,
+            state.case_battery
+        );
+
         self.publish(mac_addr.to_string(), state).await;
     }
 
@@ -394,7 +418,7 @@ impl Coordinator {
         drop(ks);
 
         let snapshot = self.inner.read().await.snapshot();
-        let _ = self.updates.send(snapshot).await;
+        self.broadcast(snapshot);
     }
 
     /// Asks the AirPods for their proximity keys. Requires an active connection.
