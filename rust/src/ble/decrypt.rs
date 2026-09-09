@@ -13,8 +13,6 @@ pub const KEY_LEN: usize = 16;
 /// Where the device's MAC suffix sits inside the decrypted payload.
 const MAC_SUFFIX_RANGE: std::ops::Range<usize> = 7..10;
 
-/// Byte 4 marker used by pre-Pro-3 models.
-const LEGACY_MAGIC: u8 = 0x2D;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecryptError {
@@ -30,14 +28,22 @@ pub enum DecryptError {
 
 /// Decrypts a 16-byte payload and checks it against the device the key belongs to.
 ///
-/// Prefer this over [`decrypt_proximity_payload`]: the decrypted payload embeds the
-/// last three bytes of the device's real MAC at offset 7, a far stronger signal than
-/// the legacy magic bytes and exactly what identification needs.
+/// The decrypted payload embeds the last three bytes of the device's real MAC at
+/// offset 7, so it identifies its own device - which is exactly what is needed to
+/// resolve a randomized BLE MAC back to a permanent one.
 ///
-/// Observed on AirPods Pro 3 (model 0x2720), where bytes 0..12 are stable across
-/// advertisements and only the trailing four rotate:
-///   `10 be be 9f 1d 7d 64 [DD EE FF] 00 00 a7 8a b5 cc`
-///                          ^^^^^^^^ MAC suffix of AA:BB:CC:DD:EE:FF
+/// Layout confirmed on two models; only byte 0, the batteries and the trailing
+/// four bytes differ between them:
+/// ```text
+/// Pro 3  (0x2720): 10 be be 9f 1d 7d 64 [DD EE FF] 00 00 a7 8a b5 cc
+/// Gen 2  (0x2420): 00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 3b a2 15 bd
+///                     ^^ ^^ ^^              ^^^^^^ MAC suffix
+///                     batteries (bit 7 = charging)
+/// ```
+///
+/// Note there is no magic-byte alternative: the 0x2D marker at byte 4 reported by
+/// earlier reverse engineering appears on neither model (both report 0x1D), so a
+/// magic-byte check rejects every correct decryption.
 pub fn decrypt_for_device(
     encrypted: &[u8],
     key: &[u8],
@@ -45,7 +51,7 @@ pub fn decrypt_for_device(
 ) -> Result<[u8; ENCRYPTED_LEN], DecryptError> {
     let decrypted = decrypt_block_only(encrypted, key)?;
 
-    if matches_device(&decrypted, mac_addr) || has_legacy_magic(&decrypted) {
+    if matches_device(&decrypted, mac_addr) {
         Ok(decrypted)
     } else {
         Err(DecryptError::ValidationFailed)
@@ -60,14 +66,6 @@ pub fn matches_device(decrypted: &[u8; ENCRYPTED_LEN], mac_addr: &str) -> bool {
         return false;
     };
     decrypted[MAC_SUFFIX_RANGE] == suffix
-}
-
-/// The pre-Pro-3 marker: upper nibble of byte 0 clear, byte 4 == 0x2D.
-///
-/// AirPods Pro 3 does not satisfy this (it reports byte 0 = 0x10, byte 4 = 0x1D),
-/// so it is kept only as a fallback for older models.
-pub fn has_legacy_magic(decrypted: &[u8; ENCRYPTED_LEN]) -> bool {
-    (decrypted[0] & 0xF0) == 0 && decrypted[4] == LEGACY_MAGIC
 }
 
 /// Parses "AA:BB:CC:DD:EE:FF" into its last three bytes.
@@ -86,20 +84,6 @@ fn mac_suffix(mac_addr: &str) -> Option<[u8; 3]> {
 /// Decrypts without any validation. Exposed for probes and tests.
 pub fn decrypt_raw(encrypted: &[u8], key: &[u8]) -> Result<[u8; ENCRYPTED_LEN], DecryptError> {
     decrypt_block_only(encrypted, key)
-}
-
-/// Decrypts and validates using the legacy magic bytes only.
-///
-/// Retained for older models and callers without a candidate MAC.
-pub fn decrypt_proximity_payload(
-    encrypted: &[u8],
-    key: &[u8],
-) -> Result<[u8; ENCRYPTED_LEN], DecryptError> {
-    let out = decrypt_block_only(encrypted, key)?;
-    if !has_legacy_magic(&out) {
-        return Err(DecryptError::ValidationFailed);
-    }
-    Ok(out)
 }
 
 fn decrypt_block_only(encrypted: &[u8], key: &[u8]) -> Result<[u8; ENCRYPTED_LEN], DecryptError> {
@@ -127,20 +111,20 @@ mod tests {
     #[test]
     fn rejects_wrong_lengths() {
         assert!(matches!(
-            decrypt_proximity_payload(&[0u8; 8], &[0u8; 16]),
+            decrypt_for_device(&[0u8; 8], &[0u8; 16], "AA:BB:CC:DD:EE:FF"),
             Err(DecryptError::BadDataLen(8))
         ));
         assert!(matches!(
-            decrypt_proximity_payload(&[0u8; 16], &[0u8; 8]),
+            decrypt_for_device(&[0u8; 16], &[0u8; 8], "AA:BB:CC:DD:EE:FF"),
             Err(DecryptError::BadKeyLen(8))
         ));
     }
 
     #[test]
     fn rejects_garbage_from_wrong_key() {
-        // A random block under an arbitrary key will essentially never satisfy both
-        // magic-byte constraints, which is the property the identification relies on.
-        let err = decrypt_proximity_payload(&[0xAB; 16], &[0xCD; 16]);
+        // A random block under an arbitrary key will essentially never reproduce the
+        // device's MAC suffix, which is the property identification relies on.
+        let err = decrypt_for_device(&[0xAB; 16], &[0xCD; 16], "AA:BB:CC:DD:EE:FF");
         assert!(matches!(err, Err(DecryptError::ValidationFailed)));
     }
 
@@ -179,12 +163,6 @@ mod tests {
         let plain = pro3_plaintext([0xDD, 0xEE, 0xFF]);
         let ct = encrypt(&plain, &key);
 
-        // The legacy validator rejects this model outright...
-        assert!(matches!(
-            decrypt_proximity_payload(&ct, &key),
-            Err(DecryptError::ValidationFailed)
-        ));
-        // ...while matching against the device's own MAC accepts it.
         assert_eq!(decrypt_for_device(&ct, &key, mac).unwrap(), plain);
     }
 
@@ -199,18 +177,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_models_still_validate_without_mac_match() {
-        let key = [0x22u8; 16];
-        let mut plain = [0u8; 16];
-        plain[0] = 0x03; // upper nibble clear
-        plain[4] = LEGACY_MAGIC;
-        let ct = encrypt(&plain, &key);
-
-        // MAC does not match, but the legacy magic carries it.
-        assert_eq!(decrypt_for_device(&ct, &key, "99:88:77:66:55:44").unwrap(), plain);
-    }
-
-    #[test]
     fn parses_mac_suffix() {
         assert_eq!(mac_suffix("AA:BB:CC:DD:EE:FF"), Some([0xDD, 0xEE, 0xFF]));
         assert_eq!(mac_suffix("not-a-mac"), None);
@@ -218,20 +184,18 @@ mod tests {
     }
 
     #[test]
-    fn accepts_payload_that_decrypts_to_valid_magic() {
-        use aes::cipher::BlockCipherEncrypt;
-        // Construct a plaintext with valid magic, encrypt it, and check we recover it.
-        let key = [0x11u8; 16];
-        let mut plain = [0u8; 16];
-        plain[0] = 0x03; // upper nibble must be 0
-        plain[4] = 0x2D; // magic marker
-        plain[1] = 0x55;
+    fn round_trips_gen2_layout() {
+        // Gen 2 (0x2420) reports byte 0 = 0x00 where Pro 3 reports 0x10; both carry
+        // the MAC suffix, which is why validation keys on that and nothing else.
+        let key = [0x33u8; 16];
+        let mac = "11:22:33:44:55:66";
+        let mut plain = pro3_plaintext([0x44, 0x55, 0x66]);
+        plain[0] = 0x00;
+        plain[1] = 0x80 | 100;
+        plain[2] = 0x80 | 100;
+        plain[3] = 0x80 | 14;
 
-        let cipher = Aes128::new_from_slice(&key).unwrap();
-        let mut block = Block::<Aes128>::try_from(&plain[..]).unwrap();
-        cipher.encrypt_block(&mut block);
-
-        let got = decrypt_proximity_payload(block.as_slice(), &key).unwrap();
-        assert_eq!(got, plain);
+        let ct = encrypt(&plain, &key);
+        assert_eq!(decrypt_for_device(&ct, &key, mac).unwrap(), plain);
     }
 }

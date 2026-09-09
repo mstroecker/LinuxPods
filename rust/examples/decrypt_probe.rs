@@ -9,12 +9,13 @@ use linuxpods::keystore::Keystore;
 
 /// Payloads captured from the running app (AirPods Pro 3, model 0x2720).
 const CAPTURED: &[&str] = &[
+    // AirPods Pro 3 (model 0x2720)
     "01 27 20 05 66 f3 51 00 00 3e e1 09 50 3d e9 16 6e 44 f2 82 f3 d3 82 28 95",
-    "01 27 20 05 66 f3 51 00 00 fd b8 95 53 23 c3 b2 a0 05 55 2b 03 f4 e6 60 af",
-    "01 27 20 15 66 f3 51 00 00 2f 2b 63 7b 12 04 ae 03 71 ce e7 92 95 5a 97 3d",
-    "01 27 20 75 66 f3 51 00 00 62 84 ee 3c 78 44 99 cc 44 6e 72 78 f1 c4 34 40",
-    // Captured later, same device while charging (70/70/50):
     "01 27 20 14 77 f5 59 00 00 12 d1 88 e9 8b bd c8 6f 14 78 ed cd 5e 52 7d c7",
+    // AirPods Pro Gen 2 (model 0x2420)
+    "01 24 20 25 aa f1 51 00 00 46 0e 45 fc cf ae 4e ff f6 70 ff 14 46 bd 19 ff",
+    "01 24 20 25 aa f1 51 00 00 4f cb 61 56 ef 4a f9 64 bd 4d f2 e5 f1 e2 58 c0",
+    "01 24 20 34 aa f1 51 00 00 92 f3 36 1d bd da 42 5c b3 2e da 0c 35 b2 0a 7f",
 ];
 
 fn hex(s: &str) -> Vec<u8> {
@@ -41,6 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pt = block.as_slice();
 
             let magic_ok = (pt[0] & 0xF0) == 0 && pt[4] == 0x2D;
+            let suffix: Vec<u8> = mac.split(':').skip(3)
+                .map(|b| u8::from_str_radix(b, 16).unwrap()).collect();
+            if pt[7..10] != suffix[..] { continue; }
             println!(
                 "  ct[0..4]={:02x?} -> pt={} | byte0={:02x} byte4={:02x} magic={}",
                 &ct[..4],

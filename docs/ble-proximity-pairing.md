@@ -194,35 +194,41 @@ treat it as unknown.
 ```
 Byte    Description                     Status      Notes
 ----    -----------                     ------      -----
-0       Header/Flags                    ✅ Working   0x10 on Pro 3; upper nibble clear on older models
+0       Header/Flags                    ❓          Model-dependent: 0x10 (Pro 3), 0x00/0x04 (Gen 2)
 1       First Pod Battery + Charging    ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
 2       Second Pod Battery + Charging   ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
 3       Case Battery + Charging         ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
-4       Model marker                    ✅ Working   0x1D on Pro 3, 0x2D on older models
-5       Unknown                         ❓          Constant 0x7D across all Pro 3 samples
-6       Unknown                         ❓          Constant 0x64 across all Pro 3 samples
+4       Unknown                         ❓          Constant 0x1D on both models tested
+5       Unknown                         ❓          Constant 0x7D on both models tested
+6       Unknown                         ❓          Constant 0x64 on both models tested
 7-9     Real MAC suffix                 ✅ Working   Last 3 bytes of the device's permanent MAC
 10-11   Padding/Unknown                 ❓          Always 00 00 in observed samples
 12-15   Rotating tail                   ❓          Changes every advertisement (counter or MIC?)
 ```
 
-**Observed samples** (AirPods Pro 3, real MAC `AA:BB:CC:DD:EE:FF`, two ads minutes apart):
+**Observed samples** (two models, placeholder MACs):
 ```
+Pro 3 (0x2720), real MAC AA:BB:CC:DD:EE:FF
 10 be be 9f 1d 7d 64 [DD EE FF] 00 00 a7 8a b5 cc   -> 62% / 62% / 31%
 10 c8 ca ba 1d 7d 64 [DD EE FF] 00 00 7e 5b ee 7a   -> 72% / 74% / 58%
-   ^^ ^^ ^^              ^^^^^^ MAC suffix, stable
-   batteries
+
+Gen 2 (0x2420), real MAC 11:22:33:44:55:66
+00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 3b a2 15 bd   -> 100% / 100% / 14%
+00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 03 f4 13 e0   -> 100% / 100% / 14%
+   ^^ ^^ ^^  ^^ ^^ ^^  ^^^^^^^^ ^^^^^
+   batteries  identical across both models
 ```
-Only bytes 1-3 (batteries) and 12-15 (rotating tail) change between advertisements.
-Bytes 0 and 4-11 were byte-identical across every sample captured.
+Within one device, only bytes 1-3 (batteries) and 12-15 (rotating tail) change
+between advertisements. Across the two models, bytes 4-6 and 10-11 are identical;
+only byte 0 differs.
 
 **Decryption Validation:**
 
-⚠️ **The magic-byte check does not work on AirPods Pro 3.** The historical check
-(byte 0 upper nibble clear, byte 4 == `0x2D`) comes from reverse engineering of
-older models. Pro 3 reports byte 0 = `0x10` and byte 4 = `0x1D`, so a *correct*
-decryption fails that test and gets discarded. This silently disabled 1% battery
-accuracy for Pro 3 entirely.
+⚠️ **Do not validate with magic bytes.** Earlier reverse engineering described a
+marker of byte 0 upper-nibble clear plus byte 4 == `0x2D`. Neither model tested here
+produces it - both report byte 4 = `0x1D`, and byte 0 varies by model (`0x10` on
+Pro 3, `0x00`/`0x04` on Gen 2). A magic-byte check therefore rejects *correct*
+decryptions, which silently disables 1% battery accuracy altogether.
 
 Validate against the **MAC suffix** instead:
 
@@ -230,12 +236,9 @@ Validate against the **MAC suffix** instead:
 - Compare them against the MAC the candidate key is stored under
 - Three exact bytes make a false positive roughly 1 in 16.7 million per key tried
 
-This is both more reliable and more useful than a magic byte: the payload
-identifies *its own device*, which is exactly what is needed to resolve a
-randomized BLE MAC back to a real one.
-
-Keep the legacy magic-byte check as a fallback for pre-Pro-3 models, which have
-not been re-tested against the MAC-suffix rule.
+This is both more reliable and more useful: the payload identifies *its own device*,
+which is exactly what is needed to resolve a randomized BLE MAC back to a real one.
+It is the only validation this implementation performs.
 
 **Orientation Handling:**
 - If NOT flipped (left pod primary): Byte 1=left, Byte 2=right
@@ -349,7 +352,7 @@ To identify which device a BLE advertisement belongs to:
 Wrong keys produce garbage, but AES always "succeeds", so the decrypted payload
 must be checked before it is trusted.
 
-**Preferred check - MAC suffix (works on Pro 3 and is self-identifying):**
+**The check - MAC suffix (confirmed on both models tested):**
 
 Bytes 7-9 of the decrypted payload carry the last 3 bytes of the device's real
 MAC. Compare them against the MAC the candidate key is stored under:
@@ -361,16 +364,8 @@ fn matches_device(decrypted: &[u8; 16], mac_addr: &str) -> bool {
 }
 ```
 
-**Fallback - legacy magic bytes (pre-Pro-3 models only):**
-
-```rust
-fn has_legacy_magic(decrypted: &[u8; 16]) -> bool {
-    (decrypted[0] & 0xF0) == 0 && decrypted[4] == 0x2D
-}
-```
-
-Accept a decryption if **either** check passes. Do not rely on the magic bytes
-alone - see the warning under [Bytes 9-24](#bytes-9-24-encrypted-battery-data).
+This is the only validation needed. Do not add a magic-byte check alongside it -
+see the warning under [Bytes 9-24](#bytes-9-24-encrypted-battery-data).
 
 ### Multi-Device Workflow
 
@@ -419,14 +414,14 @@ collapsed.
 1. **Update latency** - BLE advertisements update every 30-60 seconds (inherent to protocol)
 2. **Unencrypted battery accuracy** - ~10% granularity, may be off by up to 10% (use encrypted data for 1% accuracy)
 3. **Encryption key requirement** - Accurate (1%) battery requires one-time key retrieval via AAP connection
-4. **Decrypted layout is model-dependent** - Byte 0 and byte 4 differ between Pro 3
-   and older models. Validate by MAC suffix (bytes 7-9) rather than by magic bytes;
-   see [Decryption Validation](#decryption-validation)
-5. **Bytes 5-6 and 12-15 unidentified** - Bytes 5 (`0x7D`) and 6 (`0x64`) are constant
-   across all captured Pro 3 samples; bytes 12-15 change on every advertisement and are
+4. **Byte 0 is model-dependent** - `0x10` on Pro 3, `0x00`/`0x04` on Gen 2. Its meaning
+   is unknown; do not validate against it. Validate by MAC suffix (bytes 7-9); see
+   [Decryption Validation](#decryption-validation)
+5. **Bytes 4-6 and 12-15 unidentified** - Bytes 4 (`0x1D`), 5 (`0x7D`) and 6 (`0x64`) are
+   constant across both models tested; bytes 12-15 change on every advertisement and are
    presumed to be a counter or MIC. None have been confirmed
-6. **MAC-suffix rule unverified on older models** - Confirmed on AirPods Pro 3 (0x2720)
-   only. Pre-Pro-3 devices still rely on the legacy magic-byte fallback
+6. **Only two models tested** - AirPods Pro 3 (0x2720) and AirPods Pro Gen 2 (0x2420).
+   The MAC-suffix rule holds on both; behaviour on older hardware is unknown
 
 ---
 
@@ -435,9 +430,10 @@ collapsed.
  - AirPods Pro (Gen 2) (0x2420), Firmware 7A305
  - AirPods Pro 3 (0x2720), Firmware 8A353
 
-**Confidence note:** The Pro 3 decrypted layout documented here was derived from a
-handful of advertisements captured from a single device on 2026-09-09. Byte
-positions 1-3 (batteries) and 7-9 (MAC suffix) are confirmed - the batteries track
-the cleartext values and the suffix matches the device's real MAC across every
-sample. The remaining fields are inference from constancy, not verified meaning.
+**Confidence note:** The decrypted layout was derived from advertisements captured
+from two devices on 2026-09-09/10. Byte positions 1-3 (batteries) and 7-9 (MAC
+suffix) are confirmed on both - the batteries track the cleartext values, and the
+suffix matched the real MAC on every sample across both models. The remaining fields
+are inference from constancy, not verified meaning. The `0x2D` marker at byte 4
+described by earlier reverse engineering was not observed on either device.
 
