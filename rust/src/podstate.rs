@@ -373,7 +373,10 @@ impl Coordinator {
         *self.aap_client.lock().await = Some(Arc::new(client));
         self.inner.write().await.connected_mac = Some(mac_addr.to_string());
 
-        tracing::info!("AAP connected to {mac_addr} - using accurate battery data (1%)");
+        tracing::info!(
+            "AAP connected to {mac_addr} - exact battery for this device; \
+             other devices continue over BLE"
+        );
         Ok(())
     }
 
@@ -385,10 +388,14 @@ impl Coordinator {
     }
 
     pub async fn disconnect_aap(&self) {
+        let mac = self.inner.read().await.connected_mac.clone();
         if let Some(client) = self.aap_client.lock().await.take() {
             // Wakes a read loop parked in recv so it can exit and drop its Arc.
             client.shutdown();
-            tracing::info!("AAP disconnected - resuming BLE scanning");
+            tracing::info!(
+                "AAP disconnected from {mac} - its BLE advertisements count again",
+                mac = mac.as_deref().unwrap_or("device")
+            );
         }
         self.inner.write().await.connected_mac = None;
     }
