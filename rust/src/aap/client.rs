@@ -170,6 +170,16 @@ impl Client {
         Ok(buf)
     }
 
+    /// Shuts the socket down in both directions.
+    ///
+    /// Takes `&self` so it can be called through an `Arc` while a read loop is
+    /// parked in `recv`; the shutdown is what wakes that read up with an error.
+    pub fn shutdown(&self) {
+        if let Some(socket) = &self.socket {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
     /// Drops the socket, closing the connection.
     pub fn close(&mut self) {
         self.socket = None;

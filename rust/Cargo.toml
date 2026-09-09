@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 
+[lib]
+name = "linuxpods"
+path = "src/lib.rs"
+
+[[bin]]
+name = "linuxpods"
+path = "src/main.rs"
+
 [dependencies]
 # UI
 gtk = { package = "gtk4", version = "0.11" }
