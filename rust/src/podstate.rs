@@ -139,7 +139,9 @@ impl Inner {
 pub struct Coordinator {
     inner: RwLock<Inner>,
     keystore: Mutex<Keystore>,
-    aap_client: Mutex<Option<aap::Client>>,
+    /// Shared so a blocked read never blocks a concurrent send. bluer's
+    /// SeqPacket takes &self for both send and recv, so this is safe.
+    aap_client: Mutex<Option<Arc<aap::Client>>>,
     updates: async_channel::Sender<Snapshot>,
     subscribe: async_channel::Receiver<Snapshot>,
 }
@@ -289,16 +291,24 @@ impl Coordinator {
             .await
             .context("failed to enable features")?;
 
-        *self.aap_client.lock().await = Some(client);
+        *self.aap_client.lock().await = Some(Arc::new(client));
         self.inner.write().await.connected_mac = Some(mac_addr.to_string());
 
         tracing::info!("AAP connected to {mac_addr} - using accurate battery data (1%)");
         Ok(())
     }
 
+    /// Clones the client out of the mutex so callers never hold the lock across
+    /// an await. Holding it across `read_packet` deadlocked every other user of
+    /// the connection.
+    async fn client(&self) -> Option<Arc<aap::Client>> {
+        self.aap_client.lock().await.clone()
+    }
+
     pub async fn disconnect_aap(&self) {
-        if let Some(mut client) = self.aap_client.lock().await.take() {
-            client.close();
+        if let Some(client) = self.aap_client.lock().await.take() {
+            // Wakes a read loop parked in recv so it can exit and drop its Arc.
+            client.shutdown();
             tracing::info!("AAP disconnected - resuming BLE scanning");
         }
         self.inner.write().await.connected_mac = None;
@@ -307,17 +317,14 @@ impl Coordinator {
     /// Reads AAP packets until the connection drops.
     pub async fn aap_read_loop(&self, mac_addr: String) {
         loop {
-            let packet = {
-                let guard = self.aap_client.lock().await;
-                let Some(client) = guard.as_ref() else { return };
-                match client.read_packet().await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!("AAP read error: {e}");
-                        drop(guard);
-                        self.disconnect_aap().await;
-                        return;
-                    }
+            let Some(client) = self.client().await else { return };
+
+            let packet = match client.read_packet().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("AAP read error: {e}");
+                    self.disconnect_aap().await;
+                    return;
                 }
             };
 
@@ -392,9 +399,9 @@ impl Coordinator {
 
     /// Asks the AirPods for their proximity keys. Requires an active connection.
     pub async fn request_encryption_keys(&self) -> Result<()> {
-        let guard = self.aap_client.lock().await;
-        let client = guard
-            .as_ref()
+        let client = self
+            .client()
+            .await
             .context("no active AAP connection - connect to AirPods first")?;
         client.request_proximity_keys().await?;
         tracing::info!("Encryption key request sent");

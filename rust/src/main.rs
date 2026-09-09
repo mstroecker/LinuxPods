@@ -4,17 +4,7 @@
 //! runtime carries the BLE, AAP and D-Bus work, and the two meet over async
 //! channels consumed on the GTK main context.
 
-// Several ported helpers mirror the Go API surface but are not wired up yet
-// (noise control, key/colour decoding, battery removal). Kept deliberately.
-#![allow(dead_code)]
-
-mod aap;
-mod ble;
-mod bluez;
-mod indicator;
-mod keystore;
-mod podstate;
-mod ui;
+use linuxpods::{ble, bluez, indicator, podstate, ui};
 
 use std::sync::Arc;
 
@@ -22,8 +12,8 @@ use adw::prelude::*;
 use futures_util::StreamExt;
 use gtk::glib;
 
-use crate::indicator::{Indicator, NoiseMode, TrayActions};
-use crate::podstate::Coordinator;
+use indicator::{Indicator, NoiseMode, TrayActions};
+use podstate::Coordinator;
 
 const APP_ID: &str = "com.linuxpods.app";
 
