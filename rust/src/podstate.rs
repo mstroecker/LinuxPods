@@ -287,6 +287,23 @@ impl Coordinator {
             encryption_key,
         };
 
+        tracing::debug!(
+            "BLE {} [{}]: left={:?} right={:?} case={:?} lid_open={} in_ear={}/{}",
+            state.current_ble_mac,
+            if data.has_decrypted { "decrypted 1%" } else { "cleartext 10%" },
+            state.left_battery,
+            state.right_battery,
+            state.case_battery,
+            state.lid_open,
+            state.left_in_ear,
+            state.right_in_ear
+        );
+        tracing::debug!(
+            "BLE {} raw: {}",
+            state.current_ble_mac,
+            data.raw_data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        );
+
         self.publish(key_mac, state).await;
     }
 
