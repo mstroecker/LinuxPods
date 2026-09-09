@@ -10,7 +10,8 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
-use zbus::{Connection, interface, proxy};
+use futures_util::StreamExt;
+use zbus::{Connection, MatchRule, MessageStream, interface, proxy};
 
 const BLUEZ_SERVICE: &str = "org.bluez";
 const ADAPTER_PATH: &str = "/org/bluez/hci0";
@@ -214,6 +215,55 @@ impl BatteryProvider {
         let path = ObjectPath::try_from(PROVIDER_PATH)?;
         manager.unregister_battery_provider(&path).await?;
         Ok(())
+    }
+}
+
+/// A device connecting or disconnecting.
+#[derive(Debug, Clone)]
+pub struct ConnectionEvent {
+    pub device_path: String,
+    pub connected: bool,
+}
+
+impl BatteryProvider {
+    /// Stream of Connected changes on org.bluez.Device1.
+    ///
+    /// Port of the Go WatchForAirPods signal loop. Without this the provider only
+    /// ever saw devices that were already connected at startup, so plugging the
+    /// AirPods in later did nothing.
+    pub async fn watch_connections(
+        &self,
+    ) -> Result<impl futures_util::Stream<Item = ConnectionEvent> + use<>> {
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface("org.freedesktop.DBus.Properties")?
+            .member("PropertiesChanged")?
+            .path_namespace("/org/bluez")?
+            .build();
+
+        let stream = MessageStream::for_match_rule(rule, &self.conn, None)
+            .await
+            .context("failed to subscribe to device PropertiesChanged")?;
+
+        Ok(stream.filter_map(|msg| async move {
+            let msg = msg.ok()?;
+            let device_path = msg.header().path()?.to_string();
+
+            let (iface, changed, _invalidated) = msg
+                .body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                .ok()?;
+            if iface != "org.bluez.Device1" {
+                return None;
+            }
+
+            let connected = bool::try_from(changed.get("Connected")?.clone()).ok()?;
+            Some(ConnectionEvent { device_path, connected })
+        }))
+    }
+
+    pub fn has_battery(&self) -> bool {
+        self.battery_path.is_some()
     }
 }
 
