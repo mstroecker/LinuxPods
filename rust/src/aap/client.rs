@@ -13,15 +13,24 @@
 //!
 //! Based on reverse engineering from LibrePods and OpenPods.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use bluer::{Address, AddressType};
-use bluer::l2cap::{SeqPacket, SocketAddr};
+use bluer::l2cap::{SeqPacket, Socket, SocketAddr};
 
 /// L2CAP Protocol/Service Multiplexer for AAP.
 pub const AAP_PSM: u16 = 0x1001; // 4097
 
 /// Max AAP packet we will read in one recv.
 const READ_BUF_LEN: usize = 1024;
+
+/// Connect attempts before giving up. The first attempt against an idle device
+/// usually loses the race with ACL link setup (see [`Client::connect`]).
+const CONNECT_ATTEMPTS: usize = 6;
+
+/// Backoff between connect attempts.
+const CONNECT_BACKOFF: Duration = Duration::from_millis(200);
 
 /// Sent immediately after connecting to enable AAP communication.
 const PACKET_HANDSHAKE: [u8; 16] = [
@@ -72,11 +81,51 @@ impl Client {
             cid: 0,
         };
 
-        let socket = SeqPacket::connect(sa)
-            .await
-            .with_context(|| format!("failed to connect to AirPods at {}", self.addr))?;
-        self.socket = Some(socket);
-        Ok(())
+        // The Go implementation used a blocking connect(2), which waits for the
+        // BR/EDR ACL link to come up. bluer's socket is non-blocking and its
+        // connect returns almost immediately (~30us) without waiting: when the ACL
+        // link is not yet up the call still reports Ok, but the channel was never
+        // established and every send fails with ENOTCONN. Such a socket stays dead
+        // even after its cid later becomes nonzero, so it cannot be recovered.
+        //
+        // A zero cid immediately after connect is the reliable signal for that
+        // case. Discard the socket, let the ACL link finish coming up, and retry
+        // with a fresh one - which then connects with a real cid straight away.
+        let mut last_err = None;
+
+        for attempt in 1..=CONNECT_ATTEMPTS {
+            let socket = Socket::<SeqPacket>::new_seq_packet()
+                .context("failed to create L2CAP socket")?;
+
+            match socket.connect(sa).await {
+                Ok(sock) => {
+                    let cid = sock.peer_addr().map(|a| a.cid).unwrap_or(0);
+                    if cid != 0 {
+                        tracing::debug!("AAP connected to {} (cid {cid}, attempt {attempt})", self.addr);
+                        self.socket = Some(sock);
+                        return Ok(());
+                    }
+                    tracing::debug!("AAP connect attempt {attempt}: channel not established (cid 0)");
+                }
+                Err(e) => {
+                    tracing::debug!("AAP connect attempt {attempt} failed: {e}");
+                    last_err = Some(e);
+                }
+            }
+
+            if attempt < CONNECT_ATTEMPTS {
+                tokio::time::sleep(CONNECT_BACKOFF).await;
+            }
+        }
+
+        match last_err {
+            Some(e) => Err(anyhow::Error::new(e)
+                .context(format!("failed to connect to AirPods at {}", self.addr))),
+            None => anyhow::bail!(
+                "failed to establish L2CAP channel to {} after {CONNECT_ATTEMPTS} attempts",
+                self.addr
+            ),
+        }
     }
 
     pub async fn handshake(&self) -> Result<()> {
@@ -103,7 +152,7 @@ impl Client {
         let n = socket
             .send(packet)
             .await
-            .with_context(|| format!("failed to send {kind}"))?;
+            .with_context(|| format!("failed to send {kind} ({} bytes)", packet.len()))?;
         anyhow::ensure!(
             n == packet.len(),
             "incomplete {kind} write: {n}/{} bytes",
