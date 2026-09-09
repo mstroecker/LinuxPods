@@ -13,7 +13,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::podstate::{Coordinator, PodState, Snapshot};
+use crate::podstate::{Coordinator, DataSource, PodState, Snapshot};
 
 /// Mirrors ui.BatteryWidgets.
 pub struct BatteryWidgets {
@@ -44,7 +44,8 @@ pub fn activate(
     win.set_title(Some("LinuxPods"));
     win.set_default_size(400, 500);
 
-    let (battery, dev_group) = setup_ui(&win);
+    let (control, dev_group) = setup_ui(&win);
+    let control = Rc::new(control);
     win.present();
 
     // Go used glib.IdleAdd from a goroutine. GTK types are !Send in Rust, so the
@@ -53,12 +54,68 @@ pub fn activate(
     let device_rows: Rc<RefCell<HashMap<String, DeviceRow>>> =
         Rc::new(RefCell::new(HashMap::new()));
 
+    // Which device the Control tab is showing, and the snapshot behind it, so a
+    // switcher change can redraw without waiting for the next update.
+    let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let last_snapshot: Rc<RefCell<Option<Snapshot>>> = Rc::new(RefCell::new(None));
+    // Guards against the programmatic set_selected() below re-entering this handler.
+    let syncing = Rc::new(std::cell::Cell::new(false));
+
+    control.device_combo.connect_selected_notify(glib::clone!(
+        #[strong] control,
+        #[strong] selected,
+        #[strong] last_snapshot,
+        #[strong] syncing,
+        move |combo| {
+            if syncing.get() {
+                return;
+            }
+            let idx = combo.selected() as usize;
+            let mac = control.device_macs.borrow().get(idx).cloned();
+            if let Some(mac) = mac {
+                *selected.borrow_mut() = Some(mac.clone());
+                if let Some(snapshot) = last_snapshot.borrow().as_ref() {
+                    render_device(&control, snapshot, Some(&mac));
+                }
+            }
+        }
+    ));
+
     glib::spawn_future_local(async move {
         while let Ok(snapshot) = updates.recv().await {
-            if let Some(state) = snapshot.primary() {
-                update_battery_display(&battery, state);
+            // The switcher lists every device we hold a key for. That keeps the list
+            // stable instead of flickering as advertisements arrive, and strangers
+            // still cannot appear: an advertisement we could not decrypt is stored
+            // under its random MAC, which never matches a stored key.
+            let macs = snapshot.known_keys.clone();
+
+            // Read the selection BEFORE touching the widget. Splicing the model makes
+            // ComboRow emit selected-notify, and if that ran unguarded it would clobber
+            // the user's choice with index 0 - which is why switching device appeared
+            // to snap back to the AAP-connected one.
+            let current = selected.borrow().clone();
+
+            syncing.set(true);
+            sync_device_list(&control, &macs, &snapshot);
+
+            // Keep the current selection if it still exists, else prefer the
+            // AAP-connected device, else the first known one.
+            let chosen = current
+                .filter(|m| macs.contains(m))
+                .or_else(|| snapshot.connected_mac.clone().filter(|m| macs.contains(m)))
+                .or_else(|| macs.first().cloned());
+            *selected.borrow_mut() = chosen.clone();
+
+            if let Some(mac) = &chosen {
+                if let Some(idx) = macs.iter().position(|m| m == mac) {
+                    control.device_combo.set_selected(idx as u32);
+                }
             }
+            syncing.set(false);
+
+            render_device(&control, &snapshot, chosen.as_deref());
             update_device_rows(&dev_group, &device_rows, &snapshot, &coordinator, &runtime);
+            *last_snapshot.borrow_mut() = Some(snapshot);
         }
     });
 
@@ -66,7 +123,7 @@ pub fn activate(
 }
 
 /// Mirrors ui.setupUI.
-fn setup_ui(win: &adw::ApplicationWindow) -> (BatteryWidgets, adw::PreferencesGroup) {
+fn setup_ui(win: &adw::ApplicationWindow) -> (ControlView, adw::PreferencesGroup) {
     let header_bar = adw::HeaderBar::new();
 
     let view_stack = adw::ViewStack::new();
@@ -77,7 +134,7 @@ fn setup_ui(win: &adw::ApplicationWindow) -> (BatteryWidgets, adw::PreferencesGr
         .build();
     header_bar.set_title_widget(Some(&view_switcher));
 
-    let (control_box, battery) = create_control_view();
+    let (control_box, control) = create_control_view();
     view_stack.add_titled_with_icon(
         &control_box,
         Some("control"),
@@ -99,11 +156,24 @@ fn setup_ui(win: &adw::ApplicationWindow) -> (BatteryWidgets, adw::PreferencesGr
 
     win.set_content(Some(&toolbar_view));
 
-    (battery, dev_group)
+    (control, dev_group)
+}
+
+/// Everything in the Control tab the update loop needs to touch.
+pub struct ControlView {
+    pub battery: BatteryWidgets,
+    /// Holds the device switcher; hidden unless more than one device is identified.
+    pub device_group: adw::PreferencesGroup,
+    pub device_combo: adw::ComboRow,
+    pub device_list: gtk::StringList,
+    /// MAC per row in `device_list`, kept parallel so the display string can differ.
+    pub device_macs: RefCell<Vec<String>>,
+    pub noise_group: adw::PreferencesGroup,
+    pub features_group: adw::PreferencesGroup,
 }
 
 /// Mirrors ui.createControlView.
-fn create_control_view() -> (gtk::Box, BatteryWidgets) {
+fn create_control_view() -> (gtk::Box, ControlView) {
     let control_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(20)
@@ -112,6 +182,19 @@ fn create_control_view() -> (gtk::Box, BatteryWidgets) {
         .margin_start(20)
         .margin_end(20)
         .build();
+
+    // Device switcher. Only shown when more than one device is identified, so the
+    // common single-device case looks unchanged.
+    let device_list = gtk::StringList::new(&[]);
+    let device_combo = adw::ComboRow::builder()
+        .title("Device")
+        .subtitle("Which AirPods these readings are from")
+        .model(&device_list)
+        .build();
+    let device_group = adw::PreferencesGroup::new();
+    device_group.add(&device_combo);
+    device_group.set_visible(false);
+    control_box.append(&device_group);
 
     let battery_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -240,7 +323,76 @@ fn create_control_view() -> (gtk::Box, BatteryWidgets) {
     conversation_group.add(&conversation_row);
     control_box.append(&conversation_group);
 
-    (control_box, widgets)
+    let view = ControlView {
+        battery: widgets,
+        device_group,
+        device_combo,
+        device_list,
+        device_macs: RefCell::new(Vec::new()),
+        noise_group: noise_control_group,
+        features_group: conversation_group,
+    };
+
+    (control_box, view)
+}
+
+/// Repopulates the switcher, preserving the current selection where possible.
+fn sync_device_list(view: &ControlView, macs: &[String], snapshot: &Snapshot) {
+    if *view.device_macs.borrow() == macs {
+        return; // nothing changed; leave the selection alone
+    }
+
+    let labels: Vec<String> = macs
+        .iter()
+        .map(|mac| match snapshot.states.get(mac) {
+            Some(s) if !s.model_name.is_empty() => format!("{} ({mac})", s.model_name),
+            _ => mac.clone(),
+        })
+        .collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+
+    let old_len = view.device_list.n_items();
+    view.device_list.splice(0, old_len, &refs);
+    *view.device_macs.borrow_mut() = macs.to_vec();
+
+    // More than one device is the only case worth showing a switcher for.
+    view.device_group.set_visible(macs.len() > 1);
+}
+
+/// Draws one device, and gates the control sections on how the data arrived.
+fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
+    let state = mac.and_then(|m| snapshot.states.get(m));
+
+    match state {
+        Some(state) => {
+            update_battery_display(&view.battery, state);
+            // Noise control and features need an AAP connection; over BLE we can
+            // read state but not command the device, so they are disabled.
+            let interactive = state.source == DataSource::Aap;
+            view.noise_group.set_sensitive(interactive);
+            view.features_group.set_sensitive(interactive);
+        }
+        // Known device, nothing heard from it yet: show it as empty rather than
+        // hiding it, so the switcher and the display agree.
+        None => {
+            clear_battery_display(&view.battery, "No recent data");
+            view.noise_group.set_sensitive(false);
+            view.features_group.set_sensitive(false);
+        }
+    }
+}
+
+/// Resets the display, with the reason shown in the status line.
+fn clear_battery_display(w: &BatteryWidgets, status: &str) {
+    for (level, label) in [
+        (&w.left_level, &w.left_label),
+        (&w.right_level, &w.right_label),
+        (&w.case_level, &w.case_label),
+    ] {
+        level.set_value(0.0);
+        label.set_text("--");
+    }
+    w.status_label.set_text(status);
 }
 
 /// Mirrors ui.createSettingsView. Returns the Development group so the update loop
@@ -292,7 +444,8 @@ fn create_settings_view() -> (gtk::Box, adw::PreferencesGroup) {
 /// Mirrors the DeviceRow struct declared inside createSettingsView.
 pub struct DeviceRow {
     row: adw::ActionRow,
-    key_label: gtk::Label,
+    /// Connection state for this device: Connected / Advertising / Idle.
+    status_label: gtk::Label,
     request_button: gtk::Button,
 }
 
@@ -306,19 +459,30 @@ fn update_device_rows(
 ) {
     let connected_mac = snapshot.connected_mac.as_deref();
 
-    for (mac_addr, state) in &snapshot.states {
+    // Known devices first, in stable key order, then anything else we have heard
+    // advertising. Unknown entries are the whole point of a Development section:
+    // they are how you spot a device whose key you have not captured yet.
+    let mut entries: Vec<(&String, bool)> =
+        snapshot.known_keys.iter().map(|m| (m, true)).collect();
+    let mut unknown: Vec<&String> = snapshot
+        .states
+        .keys()
+        .filter(|m| !snapshot.known_keys.contains(m))
+        .collect();
+    unknown.sort();
+    entries.extend(unknown.into_iter().map(|m| (m, false)));
+
+    for (mac_addr, known) in entries {
+        let state = snapshot.states.get(mac_addr);
         let mut rows = device_rows.borrow_mut();
         if !rows.contains_key(mac_addr) {
             let row = adw::ActionRow::builder().title(mac_addr).build();
-            if !state.model_name.is_empty() {
-                row.set_subtitle(&state.model_name);
-            }
 
-            let key_label = gtk::Label::new(Some("Not present"));
-            key_label.add_css_class("dim-label");
-            key_label.set_valign(gtk::Align::Center);
-            key_label.set_margin_end(8);
-            row.add_suffix(&key_label);
+            let status_label = gtk::Label::new(Some("Idle"));
+            status_label.add_css_class("dim-label");
+            status_label.set_valign(gtk::Align::Center);
+            status_label.set_margin_end(8);
+            row.add_suffix(&status_label);
 
             let request_button = gtk::Button::builder()
                 .label("Request Keys")
@@ -365,47 +529,49 @@ fn update_device_rows(
             dev_group.add(&row);
             rows.insert(
                 mac_addr.clone(),
-                DeviceRow { row, key_label, request_button },
+                DeviceRow { row, status_label, request_button },
             );
         }
 
         let dev_row = &rows[mac_addr];
+        let connected = Some(mac_addr.as_str()) == connected_mac;
 
-        let title = if Some(mac_addr.as_str()) == connected_mac {
-            format!("{mac_addr} • Connected")
-        } else if !state.current_ble_mac.is_empty() && &state.current_ble_mac != mac_addr {
-            format!("{mac_addr} • BLE: {}", state.current_ble_mac)
-        } else {
-            mac_addr.clone()
+        // Show the rotating BLE address alongside the real one when they differ.
+        let title = match state {
+            Some(s) if !s.current_ble_mac.is_empty() && &s.current_ble_mac != mac_addr => {
+                format!("{mac_addr} • BLE: {}", s.current_ble_mac)
+            }
+            _ => mac_addr.clone(),
         };
         dev_row.row.set_title(&title);
 
-        if !state.model_name.is_empty() {
-            dev_row.row.set_subtitle(&state.model_name);
+        match state {
+            Some(s) if !s.model_name.is_empty() => dev_row.row.set_subtitle(&s.model_name),
+            _ => dev_row.row.set_subtitle(""),
         }
 
-        match &state.encryption_key {
-            Some(k) if !k.is_empty() => {
-                dev_row.key_label.set_text("Present");
-                dev_row.key_label.remove_css_class("dim-label");
-                dev_row.key_label.add_css_class("success");
-            }
-            _ => {
-                dev_row.key_label.set_text("Not present");
-                dev_row.key_label.remove_css_class("success");
-                dev_row.key_label.add_css_class("dim-label");
-            }
+        let (text, css) = match (known, connected, state.is_some()) {
+            (_, true, _) => ("Connected", "success"),
+            // Advertising but no stored key: visible, not yet decryptable. Its MAC
+            // rotates, so these entries come and go until a key is captured.
+            (false, _, _) => ("No key", "warning"),
+            (true, _, true) => ("Advertising", "dim-label"),
+            (true, _, false) => ("Idle", "dim-label"),
+        };
+        dev_row.status_label.set_text(text);
+        for class in ["success", "warning", "dim-label"] {
+            dev_row.status_label.remove_css_class(class);
         }
+        dev_row.status_label.add_css_class(css);
 
-        dev_row
-            .request_button
-            .set_sensitive(Some(mac_addr.as_str()) == connected_mac);
+        // Keys can only be requested over an active AAP connection.
+        dev_row.request_button.set_sensitive(connected);
     }
 
-    // Remove rows for devices no longer present.
+    // Drop a row once its key is gone and it has stopped advertising.
     let mut rows = device_rows.borrow_mut();
     rows.retain(|mac, dev_row| {
-        let keep = snapshot.states.contains_key(mac);
+        let keep = snapshot.known_keys.contains(mac) || snapshot.states.contains_key(mac);
         if !keep {
             dev_group.remove(&dev_row.row);
         }
@@ -447,6 +613,14 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
         &flags(state.case_charging, false));
 
     let lid = if state.lid_open { "Open" } else { "Closed" };
-    w.status_label
-        .set_text(&format!("Model: 0x{:04X} • Lid: {lid}", state.device_model));
+    // Which protocol produced these numbers.
+    let source = match state.source {
+        DataSource::Aap => "AAP",
+        DataSource::Ble => "BLE",
+        DataSource::Unknown => "unknown",
+    };
+    w.status_label.set_text(&format!(
+        "Model: 0x{:04X} • Lid: {lid} • Source: {source}",
+        state.device_model
+    ));
 }
