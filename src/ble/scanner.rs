@@ -114,6 +114,17 @@ impl Scanner {
                         data.device_model,
                         data.raw_data.len()
                     );
+                    // Every parsable advertisement, including the ones the
+                    // coordinator drops as superseded by AAP - which is the only
+                    // place to see the payload of a device connected to this host.
+                    tracing::trace!(
+                        "BLE parsable raw: {ble_mac} {}",
+                        data.raw_data
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
                     Some(Advertisement { data, ble_mac })
                 }
                 Err(e) => {

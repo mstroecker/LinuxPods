@@ -188,8 +188,8 @@ pub fn parse_proximity_data(data: &[u8]) -> Result<ProximityData, ParseError> {
         std::mem::swap(&mut pd.left_in_ear, &mut pd.right_in_ear);
     }
 
-    // Lid: bit 3 clear means open.
-    pd.lid_open = ((payload[8] >> 3) & 0x01) == 0;
+    // Lid: byte 6, bit 3 clear means open.
+    pd.lid_open = ((payload[6] >> 3) & 0x01) == 0;
     pd.connection_state = payload[9];
 
     Ok(pd)
@@ -251,20 +251,36 @@ mod tests {
     use super::*;
 
     /// Builds a minimal well-formed advertisement with a controllable status byte.
+    /// The lid byte defaults to a captured in-case, lid-open value.
     fn advert(status: u8, battery: u8, charging: u8) -> Vec<u8> {
+        advert_with_lid(status, battery, charging, 0x51)
+    }
+
+    fn advert_with_lid(status: u8, battery: u8, charging: u8, lid: u8) -> Vec<u8> {
         let payload = vec![
-            0x01,    // prefix
-            0x27,    // model hi
-            0x20,    // model lo -> AirPods Pro 3
-            status,  //
-            battery, // battery nibbles
-            charging, 0x00, 0x05, // color
-            0x00, // lid byte: bit 3 clear -> open
-            0x05, // connection state: Music
+            0x01,     // 0: prefix
+            0x27,     // 1: model hi
+            0x20,     // 2: model lo -> AirPods Pro 3
+            status,   // 3: status
+            battery,  // 4: battery nibbles
+            charging, // 5: charging bits + case battery
+            lid,      // 6: lid counter + lid state
+            0x00,     // 7: colour
+            0x00,     // 8: unknown
+            0x05,     // 9: first byte of the encrypted portion
         ];
         let mut v = vec![PROXIMITY_TYPE, payload.len() as u8];
         v.extend_from_slice(&payload);
         v
+    }
+
+    /// Captured lid bytes: open and closed, with and without an AAP link up.
+    #[test]
+    fn lid_state_comes_from_byte_6() {
+        for (lid, open) in [(0x52, true), (0x5A, false), (0x51, true), (0x59, false)] {
+            let pd = parse_proximity_data(&advert_with_lid(0x35, 0x76, 0xba, lid)).unwrap();
+            assert_eq!(pd.lid_open, open, "lid byte {lid:#04x}");
+        }
     }
 
     #[test]
