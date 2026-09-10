@@ -12,6 +12,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
+use crate::ble::decode_connection_state;
 use crate::podstate::{Coordinator, DataSource, PodState, Snapshot};
 
 /// Mirrors ui.BatteryWidgets.
@@ -701,7 +702,18 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
         &flags(state.case_charging, false),
     );
 
+    w.status_label.set_text(&status_line(state));
+}
+
+/// The one-line summary under the battery display.
+fn status_line(state: &PodState) -> String {
     let lid = if state.lid_open { "Open" } else { "Closed" };
+    // What the AirPods are doing - playing, on a call - comes from the BLE
+    // advertisement only, so it is absent whenever the reading came over AAP.
+    let activity = state
+        .connection_state
+        .map(|s| format!(" • {}", decode_connection_state(s)))
+        .unwrap_or_default();
     // Which protocol produced these numbers.
     let source = match state.source {
         DataSource::Aap => "AAP",
@@ -718,8 +730,7 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
         "AirPods".to_string()
     };
 
-    w.status_label
-        .set_text(&format!("{model} • Lid: {lid} • Source: {source}"));
+    format!("{model} • Lid: {lid}{activity} • Source: {source}")
 }
 
 #[cfg(test)]
@@ -738,6 +749,37 @@ mod tests {
             let path = asset(name);
             assert!(path.exists(), "missing asset: {}", path.display());
         }
+    }
+
+    #[test]
+    fn status_line_shows_what_the_airpods_are_doing() {
+        let state = PodState {
+            source: DataSource::Ble,
+            model_name: "AirPods Pro 3".into(),
+            lid_open: true,
+            connection_state: Some(0x05),
+            ..Default::default()
+        };
+        assert_eq!(
+            status_line(&state),
+            "AirPods Pro 3 • Lid: Open • Music • Source: BLE"
+        );
+    }
+
+    /// AAP carries no connection state, and a stale carried-forward value would be
+    /// worse than none - so the segment is left out entirely.
+    #[test]
+    fn status_line_omits_activity_on_aap() {
+        let state = PodState {
+            source: DataSource::Aap,
+            model_name: "AirPods Pro 3".into(),
+            connection_state: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            status_line(&state),
+            "AirPods Pro 3 • Lid: Closed • Source: AAP"
+        );
     }
 
     fn snapshot(names: &[(&str, &str)], models: &[(&str, &str)]) -> Snapshot {
