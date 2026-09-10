@@ -65,7 +65,9 @@ pub struct PodState {
     pub left_in_ear: bool,
     pub right_in_ear: bool,
 
-    pub lid_open: bool,
+    /// `None` when nothing has reported it: over AAP, which carries no lid data, or
+    /// from a BLE advertisement sent while the earbuds are out of the case.
+    pub lid_open: Option<bool>,
 
     /// Decoded with `ble::decode_connection_state`. `None` while the reading came
     /// from AAP, which carries no such field - it is deliberately not carried
@@ -397,7 +399,7 @@ impl Coordinator {
         };
 
         tracing::debug!(
-            "BLE {} [{}]: left={:?} right={:?} case={:?} lid_open={} in_ear={}/{}",
+            "BLE {} [{}]: left={:?} right={:?} case={:?} lid_open={:?} in_ear={}/{}",
             state.current_ble_mac,
             if data.has_decrypted {
                 "decrypted 1%"
