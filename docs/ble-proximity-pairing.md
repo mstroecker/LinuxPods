@@ -48,7 +48,7 @@ len     Length                          0x19        ✅ Working   Payload length
 5       Charging + Case Battery         0x07        ✅ Working   Charging bits, case battery (~10% accuracy)
 6       Lid State                       0x51        ✅ Working   Bit 3 = lid (0=open)
 7       Device Color                    0x00        ✅ Working   Color byte
-8       Host Connection                  0x04        ⚠️ Observed  0x04 while connected to a host, 0x00 while not
+8       Connection State                0x04        ✅ Working   0x00 disconnected, 0x04 idle, 0x05 music, ...
 9-24    Encrypted Battery Data          ...         ✅ Working   AES-128 ECB, 1% accuracy (if key available)
 ```
 
@@ -302,12 +302,19 @@ payload of a different length.
 
 ### Connection State
 
-⚠️ **Observed, not parsed** - byte 8 reads `0x04` while the AirPods are connected to
-a host and `0x00` while they are not. The other bits are unknown.
+✅ **Working** - byte 8. See `decode_connection_state` in `src/ble/parser.rs`:
 
-`ProximityData::connection_state` is assigned `payload[9]`, which is the *first byte
-of the ciphertext*, so its value is noise; `decode_connection_state` is never called
-on it. Remove it, or point it at byte 8.
+```
+Value  State
+-----  -----
+0x00   Disconnected
+0x04   Idle
+0x05   Music
+0x06   Call
+0x07   Ringing
+0x09   Hanging Up
+0xFF   Unknown
+```
 
 ## Comparison: BLE vs AAP
 

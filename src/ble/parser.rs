@@ -190,7 +190,8 @@ pub fn parse_proximity_data(data: &[u8]) -> Result<ProximityData, ParseError> {
 
     // Lid: byte 6, bit 3 clear means open.
     pd.lid_open = ((payload[6] >> 3) & 0x01) == 0;
-    pd.connection_state = payload[9];
+    // Byte 8, not 9 - 9 is the first byte of the encrypted portion.
+    pd.connection_state = payload[8];
 
     Ok(pd)
 }
@@ -266,12 +267,19 @@ mod tests {
             charging, // 5: charging bits + case battery
             lid,      // 6: lid counter + lid state
             0x00,     // 7: colour
-            0x00,     // 8: unknown
-            0x05,     // 9: first byte of the encrypted portion
+            0x05,     // 8: connection state -> Music
+            0x00,     // 9: first byte of the encrypted portion
         ];
         let mut v = vec![PROXIMITY_TYPE, payload.len() as u8];
         v.extend_from_slice(&payload);
         v
+    }
+
+    #[test]
+    fn parses_connection_state_from_byte_8() {
+        let pd = parse_proximity_data(&advert(0x35, 0x76, 0xba)).unwrap();
+        assert_eq!(pd.connection_state, 0x05);
+        assert_eq!(decode_connection_state(pd.connection_state), "Music");
     }
 
     /// Captured lid bytes: open and closed, with and without an AAP link up.
