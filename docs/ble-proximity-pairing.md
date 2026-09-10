@@ -32,22 +32,28 @@ Length: Variable (typically 25 bytes)
 
 ### Payload Structure
 
+The type and length bytes precede the payload; the parser slices them off, so byte
+0 below is the first payload byte. Offsets are payload-relative throughout this
+document, the code, and the `raw:` log lines.
+
 ```
 Byte    Description                     Example     Status      Notes
 ----    -----------                     -------     ------      -----
+type    Message Type                    0x07        ✅ Working   0x07 = proximity pairing
+len     Length                          0x19        ✅ Working   Payload length (25 bytes)
 0       Prefix                          0x01        ✅ Working   Always 0x01
 1-2     Device Model (Big-Endian)       0x2420      ✅ Working   0x2420 = AirPods Pro
 3       Status Byte                     0x0b        ✅ Working   Ear detection, orientation
 4       Battery Levels                  0x88        ✅ Working   Left/Right AirPods (~10% accuracy)
 5       Charging + Case Battery         0x07        ✅ Working   Charging bits, case battery (~10% accuracy)
-6       Lid Open Counter                0x08        ❌ TO FIX    Unknown format
+6       Lid State                       0x51        ✅ Working   Bit 3 = lid (0=open)
 7       Device Color                    0x00        ✅ Working   Color byte
-8       Lid/Connection (encrypted?)     0x05        ❌ TO FIX    Encrypted, format unknown
+8       Host Connection                  0x04        ⚠️ Observed  0x04 while connected to a host, 0x00 while not
 9-24    Encrypted Battery Data          ...         ✅ Working   AES-128 ECB, 1% accuracy (if key available)
 ```
 
-**Working Features** (unencrypted): All batteries (~10%), In Ear detection, Orientation (IsFlipped), Model, Color<br>
-**Not Working** (encrypted/unknown format): Lid status, Connection state
+**Working Features** (unencrypted): All batteries (~10%), In Ear detection, Orientation (IsFlipped), Model, Color, Lid state<br>
+**Not Working** (format unknown): Byte 6 bits 0-2
 
 ## Byte-by-Byte Parsing
 
@@ -142,9 +148,17 @@ Bit     Component (Normal)
 
 Left and Right AirPods may be swapped based on the primary pod.
 
-### Byte 6: Unknown (Lid Open Counter?)
+### Byte 6: Lid State
 
-❌ **TO FIX** - Format unknown, appears to increment on lid events but exact encoding unclear.
+```
+Bit     Meaning
+---     -------
+0-2     Unknown
+3       Lid state (0 = open, 1 = closed)
+4-7     0x5 with the pods in the case, 0x1 with them out
+```
+
+✅ **Working** - `lid_open` reads bit 3. Both earbuds report the same value.
 
 ### Byte 7: Device Color
 
@@ -284,11 +298,16 @@ payload of a different length.
 
 ### Lid Status
 
-❌ **TO FIX** - Byte 6 and byte 8 appear related to lid status but format is unknown/unreliable
+✅ **Working** - byte 6, bit 3 (0 = open). See [Byte 6](#byte-6-lid-state).
 
 ### Connection State
 
-❌ **TO FIX** - Byte 8 may contain connection state but parsing is currently unreliable
+⚠️ **Observed, not parsed** - byte 8 reads `0x04` while the AirPods are connected to
+a host and `0x00` while they are not. The other bits are unknown.
+
+`ProximityData::connection_state` is assigned `payload[9]`, which is the *first byte
+of the ciphertext*, so its value is noise; `decode_connection_state` is never called
+on it. Remove it, or point it at byte 8.
 
 ## Comparison: BLE vs AAP
 
