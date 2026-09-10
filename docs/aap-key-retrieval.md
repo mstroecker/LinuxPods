@@ -246,7 +246,7 @@ Common failure modes:
 
 See the `debug_proximity_keys` tool in this repository:
 ```bash
-go run ./cmd/debug_proximity_keys <MAC_ADDRESS>
+cargo run --example key_request <MAC_ADDRESS>
 ```
 
 Example output:
@@ -273,10 +273,10 @@ Use the retrieved ENC_KEY to test decryption:
 
 ```bash
 # Test with a known BLE payload
-go run ./cmd/debug_decrypt_test <ENC_KEY>
+cargo run --example decrypt_probe
 
 # Live scanning with decryption
-go run ./cmd/debug_ble <ENC_KEY>
+RUST_LOG=linuxpods=debug cargo run
 ```
 
 If decryption is working correctly, you should see:

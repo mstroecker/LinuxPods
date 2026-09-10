@@ -148,7 +148,7 @@ Left and Right AirPods may be swapped based on the primary pod.
 
 ### Byte 7: Device Color
 
-✅ **Working** - See color decoding in `internal/ble/parser.go`:
+✅ **Working** - See `decode_color` in `src/ble/parser.rs`:
 
 ```go
 // DecodeColor maps color byte to readable name
@@ -186,9 +186,9 @@ treat it as unknown.
 - **Key Source**: Retrieved via AAP connection (PSM 4097) (See [AAP Key Retrieval](aap-key-retrieval.md))
 - **Key Type**: ENC_KEY from proximity pairing keys
 - **Tools**:
-  - `cmd/debug_aap_key_retrieval` - Retrieve encryption key
-  - `cmd/debug_ble` - Live scanner with optional decryption
-  - `cmd/debug_decrypt_test` - Test parsing/decryption
+  - `cargo run --example key_request <MAC>` - retrieve the encryption key over AAP
+  - `cargo run --example decrypt_probe` - decrypt captured payloads offline
+  - `RUST_LOG=linuxpods=debug cargo run` - live parse/decrypt logging
 
 **Decrypted Format** (16 bytes):
 ```
