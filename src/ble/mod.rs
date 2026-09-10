@@ -5,4 +5,4 @@ pub mod parser;
 pub mod scanner;
 
 pub use decrypt::{decrypt_for_device, matches_device};
-pub use parser::decode_model_name;
+pub use parser::{decode_connection_state, decode_model_name};

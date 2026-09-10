@@ -67,6 +67,13 @@ pub struct PodState {
 
     pub lid_open: bool,
 
+    /// Decoded with `ble::decode_connection_state`. `None` while the reading came
+    /// from AAP, which carries no such field - it is deliberately not carried
+    /// forward from earlier BLE state the way the model and colour are, because
+    /// unlike those it changes as the user plays music or takes a call, and a
+    /// carried-forward value would sit there stale for the whole AAP session.
+    pub connection_state: Option<u8>,
+
     pub device_model: u16,
     pub model_name: String,
     pub color: u8,
@@ -378,6 +385,7 @@ impl Coordinator {
             left_in_ear: data.left_in_ear,
             right_in_ear: data.right_in_ear,
             lid_open: data.lid_open,
+            connection_state: Some(data.connection_state),
             device_model: data.device_model,
             model_name: decode_model_name(data.device_model),
             color: data.color,
@@ -564,7 +572,8 @@ impl Coordinator {
             model_name,
             color,
             primary_pod,
-            // AAP carries no in-ear or lid data; those stay at their defaults.
+            // AAP carries no in-ear, lid or connection-state data; those stay at
+            // their defaults.
             ..Default::default()
         };
 
