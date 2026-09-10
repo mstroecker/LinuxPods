@@ -103,9 +103,20 @@ pub struct Snapshot {
     /// Every MAC we hold an encryption key for, sorted. Independent of whether the
     /// device is currently advertising or connected.
     pub known_keys: Vec<String>,
+    /// BlueZ aliases keyed by uppercase MAC - the names the rest of the desktop
+    /// shows for these devices. Empty until the BlueZ task reports them, and it
+    /// stays empty when BlueZ is unreachable, so consumers need a fallback.
+    pub device_names: HashMap<String, String>,
 }
 
 impl Snapshot {
+    /// The BlueZ alias for `mac`, when one is known.
+    pub fn device_name(&self, mac: &str) -> Option<&str> {
+        self.device_names
+            .get(&mac.to_uppercase())
+            .map(String::as_str)
+    }
+
     /// The device an AAP connection is up for, else any identified device.
     pub fn primary(&self) -> Option<&PodState> {
         self.connected_mac
@@ -130,6 +141,7 @@ struct Inner {
     devices: HashMap<String, Entry>,
     encryption_keys: HashMap<String, Vec<u8>>,
     connected_mac: Option<String>,
+    device_names: HashMap<String, String>,
 }
 
 impl Inner {
@@ -167,6 +179,7 @@ impl Inner {
                 .collect(),
             connected_mac: self.connected_mac.clone(),
             known_keys,
+            device_names: self.device_names.clone(),
         }
     }
 }
@@ -206,6 +219,7 @@ impl Coordinator {
                 devices: HashMap::new(),
                 encryption_keys: loaded,
                 connected_mac: None,
+                device_names: HashMap::new(),
             }),
             keystore: Mutex::new(keystore),
             aap_client: Mutex::new(None),
@@ -249,6 +263,24 @@ impl Coordinator {
                 Err(async_channel::TrySendError::Closed(_))
             )
         });
+    }
+
+    /// Replaces the BlueZ alias map and broadcasts if anything changed.
+    ///
+    /// Names are display-only, so a snapshot is only worth sending when they
+    /// actually differ - the BlueZ task re-reads them on every connection event,
+    /// and rebroadcasting an identical map would wake the UI, tray and battery
+    /// provider for nothing.
+    pub async fn set_device_names(&self, names: HashMap<String, String>) {
+        let snapshot = {
+            let mut inner = self.inner.write().await;
+            if inner.device_names == names {
+                return;
+            }
+            inner.device_names = names;
+            inner.snapshot()
+        };
+        self.broadcast(snapshot);
     }
 
     pub async fn connected_mac(&self) -> Option<String> {
@@ -612,6 +644,7 @@ mod tests {
                 .collect(),
             encryption_keys: HashMap::new(),
             connected_mac: None,
+            device_names: HashMap::new(),
         }
     }
 
@@ -764,6 +797,7 @@ mod tests {
             states,
             connected_mac: Some("bb".into()),
             known_keys: vec!["aa".into(), "bb".into()],
+            device_names: HashMap::new(),
         };
         assert_eq!(snap.primary().unwrap().device_model, 2);
     }
@@ -795,6 +829,7 @@ mod tests {
             states,
             connected_mac: None,
             known_keys: vec![],
+            device_names: HashMap::new(),
         };
         assert_eq!(snap.primary().unwrap().device_model, 7);
     }
@@ -814,6 +849,7 @@ mod tests {
             states,
             connected_mac: None,
             known_keys: vec![],
+            device_names: HashMap::new(),
         };
         assert!(
             snap.primary().is_none(),

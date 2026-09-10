@@ -59,29 +59,33 @@ pub fn activate(
     // Guards against the programmatic set_selected() below re-entering this handler.
     let syncing = Rc::new(std::cell::Cell::new(false));
 
-    control.device_combo.connect_selected_notify(glib::clone!(
-        #[strong]
-        control,
-        #[strong]
-        selected,
-        #[strong]
-        last_snapshot,
-        #[strong]
-        syncing,
-        move |combo| {
-            if syncing.get() {
-                return;
-            }
-            let idx = combo.selected() as usize;
-            let mac = control.device_macs.borrow().get(idx).cloned();
-            if let Some(mac) = mac {
-                *selected.borrow_mut() = Some(mac.clone());
-                if let Some(snapshot) = last_snapshot.borrow().as_ref() {
-                    render_device(&control, snapshot, Some(&mac));
+    control
+        .device_dropdown
+        .connect_selected_notify(glib::clone!(
+            #[strong]
+            control,
+            #[strong]
+            selected,
+            #[strong]
+            last_snapshot,
+            #[strong]
+            syncing,
+            move |dropdown| {
+                if syncing.get() {
+                    return;
+                }
+                // GTK_INVALID_LIST_POSITION on an empty model is out of range for the
+                // MAC list, so the lookup below simply finds nothing.
+                let idx = dropdown.selected() as usize;
+                let mac = control.device_macs.borrow().get(idx).cloned();
+                if let Some(mac) = mac {
+                    *selected.borrow_mut() = Some(mac.clone());
+                    if let Some(snapshot) = last_snapshot.borrow().as_ref() {
+                        render_device(&control, snapshot, Some(&mac));
+                    }
                 }
             }
-        }
-    ));
+        ));
 
     glib::spawn_future_local(async move {
         while let Ok(snapshot) = updates.recv().await {
@@ -92,7 +96,7 @@ pub fn activate(
             let macs = snapshot.known_keys.clone();
 
             // Read the selection BEFORE touching the widget. Splicing the model makes
-            // ComboRow emit selected-notify, and if that ran unguarded it would clobber
+            // the dropdown emit selected-notify, and if that ran unguarded it would clobber
             // the user's choice with index 0 - which is why switching device appeared
             // to snap back to the AAP-connected one.
             let current = selected.borrow().clone();
@@ -110,7 +114,7 @@ pub fn activate(
 
             if let Some(mac) = &chosen {
                 if let Some(idx) = macs.iter().position(|m| m == mac) {
-                    control.device_combo.set_selected(idx as u32);
+                    control.device_dropdown.set_selected(idx as u32);
                 }
             }
             syncing.set(false);
@@ -164,12 +168,15 @@ fn setup_ui(win: &adw::ApplicationWindow) -> (ControlView, adw::PreferencesGroup
 /// Everything in the Control tab the update loop needs to touch.
 pub struct ControlView {
     pub battery: BatteryWidgets,
-    /// Holds the device switcher; hidden unless more than one device is identified.
-    pub device_group: adw::PreferencesGroup,
-    pub device_combo: adw::ComboRow,
+    /// The device switcher; hidden unless more than one device is identified.
+    pub device_dropdown: gtk::DropDown,
     pub device_list: gtk::StringList,
     /// MAC per row in `device_list`, kept parallel so the display string can differ.
     pub device_macs: RefCell<Vec<String>>,
+    /// The labels currently in the model. Kept alongside the MACs so a rename or a
+    /// newly decoded model name refreshes the switcher even though the MAC list is
+    /// unchanged.
+    pub device_labels: RefCell<Vec<String>>,
     pub noise_group: adw::PreferencesGroup,
     pub features_group: adw::PreferencesGroup,
 }
@@ -187,16 +194,21 @@ fn create_control_view() -> (gtk::Box, ControlView) {
 
     // Device switcher. Only shown when more than one device is identified, so the
     // common single-device case looks unchanged.
+    //
+    // A flat dropdown centered over the battery display rather than a boxed list
+    // row: it reads as a scope selector for what is directly below it, costs half
+    // the height of an AdwComboRow, and gives the device name the full width
+    // instead of sharing it with a title. What it selects is evident from where it
+    // sits, so the explanation lives in a tooltip rather than a subtitle.
     let device_list = gtk::StringList::new(&[]);
-    let device_combo = adw::ComboRow::builder()
-        .title("Device")
-        .subtitle("Which AirPods these readings are from")
+    let device_dropdown = gtk::DropDown::builder()
         .model(&device_list)
+        .halign(gtk::Align::Center)
+        .tooltip_text("Which AirPods these readings are from")
+        .visible(false)
         .build();
-    let device_group = adw::PreferencesGroup::new();
-    device_group.add(&device_combo);
-    device_group.set_visible(false);
-    control_box.append(&device_group);
+    device_dropdown.add_css_class("flat");
+    control_box.append(&device_dropdown);
 
     let battery_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -338,10 +350,10 @@ fn create_control_view() -> (gtk::Box, ControlView) {
 
     let view = ControlView {
         battery: widgets,
-        device_group,
-        device_combo,
+        device_dropdown,
         device_list,
         device_macs: RefCell::new(Vec::new()),
+        device_labels: RefCell::new(Vec::new()),
         noise_group: noise_control_group,
         features_group: conversation_group,
     };
@@ -351,25 +363,53 @@ fn create_control_view() -> (gtk::Box, ControlView) {
 
 /// Repopulates the switcher, preserving the current selection where possible.
 fn sync_device_list(view: &ControlView, macs: &[String], snapshot: &Snapshot) {
-    if *view.device_macs.borrow() == macs {
+    let labels = device_labels(macs, snapshot);
+    if *view.device_macs.borrow() == macs && *view.device_labels.borrow() == labels {
         return; // nothing changed; leave the selection alone
     }
 
-    let labels: Vec<String> = macs
-        .iter()
-        .map(|mac| match snapshot.states.get(mac) {
-            Some(s) if !s.model_name.is_empty() => format!("{} ({mac})", s.model_name),
-            _ => mac.clone(),
-        })
-        .collect();
     let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
     let old_len = view.device_list.n_items();
     view.device_list.splice(0, old_len, &refs);
     *view.device_macs.borrow_mut() = macs.to_vec();
+    *view.device_labels.borrow_mut() = labels;
 
     // More than one device is the only case worth showing a switcher for.
-    view.device_group.set_visible(macs.len() > 1);
+    view.device_dropdown.set_visible(macs.len() > 1);
+}
+
+/// Names one entry of the switcher, in descending order of usefulness: the BlueZ
+/// alias (what the user named the device, and what the rest of the desktop shows),
+/// then the model decoded from BLE, then the bare MAC.
+///
+/// The MAC is appended whenever a label would otherwise be ambiguous - two pairs of
+/// the same model, or two devices the user gave the same name - since the entries
+/// would otherwise be impossible to tell apart.
+fn device_labels(macs: &[String], snapshot: &Snapshot) -> Vec<String> {
+    let names: Vec<Option<String>> = macs
+        .iter()
+        .map(|mac| {
+            snapshot.device_name(mac).map(str::to_string).or_else(|| {
+                snapshot
+                    .states
+                    .get(mac)
+                    .map(|s| s.model_name.clone())
+                    .filter(|n| !n.is_empty())
+            })
+        })
+        .collect();
+
+    macs.iter()
+        .zip(&names)
+        .map(|(mac, name)| match name {
+            Some(name) if names.iter().filter(|n| n.as_ref() == Some(name)).count() == 1 => {
+                name.clone()
+            }
+            Some(name) => format!("{name} ({mac})"),
+            None => mac.clone(),
+        })
+        .collect()
 }
 
 /// Draws one device, and gates the control sections on how the data arrived.
@@ -698,5 +738,77 @@ mod tests {
             let path = asset(name);
             assert!(path.exists(), "missing asset: {}", path.display());
         }
+    }
+
+    fn snapshot(names: &[(&str, &str)], models: &[(&str, &str)]) -> Snapshot {
+        Snapshot {
+            states: models
+                .iter()
+                .map(|(mac, model)| {
+                    (
+                        (*mac).to_string(),
+                        PodState {
+                            model_name: (*model).to_string(),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            device_names: names
+                .iter()
+                .map(|(mac, name)| ((*mac).to_string(), (*name).to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn labels_prefer_the_bluetooth_name() {
+        let macs = vec!["AA:BB:CC:DD:EE:FF".to_string()];
+        let snap = snapshot(
+            &[("AA:BB:CC:DD:EE:FF", "Marcel's AirPods Pro")],
+            &[("AA:BB:CC:DD:EE:FF", "AirPods Pro 2")],
+        );
+        assert_eq!(device_labels(&macs, &snap), ["Marcel's AirPods Pro"]);
+    }
+
+    #[test]
+    fn labels_fall_back_to_the_model_then_the_mac() {
+        let macs = vec![
+            "AA:BB:CC:DD:EE:FF".to_string(),
+            "11:22:33:44:55:66".to_string(),
+        ];
+        let snap = snapshot(&[], &[("AA:BB:CC:DD:EE:FF", "AirPods Pro 2")]);
+        assert_eq!(
+            device_labels(&macs, &snap),
+            ["AirPods Pro 2", "11:22:33:44:55:66"]
+        );
+    }
+
+    /// Two devices sharing a name would be indistinguishable in the switcher, so
+    /// only the ambiguous ones carry their MAC.
+    #[test]
+    fn duplicate_names_keep_the_mac() {
+        let macs = vec![
+            "AA:BB:CC:DD:EE:FF".to_string(),
+            "11:22:33:44:55:66".to_string(),
+            "77:88:99:AA:BB:CC".to_string(),
+        ];
+        let snap = snapshot(
+            &[
+                ("AA:BB:CC:DD:EE:FF", "AirPods Pro"),
+                ("11:22:33:44:55:66", "AirPods Pro"),
+                ("77:88:99:AA:BB:CC", "AirPods Max"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            device_labels(&macs, &snap),
+            [
+                "AirPods Pro (AA:BB:CC:DD:EE:FF)",
+                "AirPods Pro (11:22:33:44:55:66)",
+                "AirPods Max",
+            ]
+        );
     }
 }

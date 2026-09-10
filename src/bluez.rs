@@ -206,6 +206,43 @@ impl BatteryProvider {
             .context("failed to get device address")
     }
 
+    /// Every known device's BlueZ alias, keyed by uppercase MAC.
+    ///
+    /// The alias is the name the user sees everywhere else on the desktop - their
+    /// own rename if they made one, the device's advertised name otherwise - so it
+    /// is what the device switcher should show. Addresses are uppercased because
+    /// that is how they arrive from `Device1.Address` and how the keystore keys
+    /// its entries; a mismatch would silently fall back to the raw MAC.
+    pub async fn device_aliases(&self) -> HashMap<String, String> {
+        match self.read_device_aliases().await {
+            Ok(names) => names,
+            Err(e) => {
+                // Names are cosmetic: without them the switcher falls back to the
+                // model or the MAC, so this must never be fatal.
+                tracing::debug!("failed to read device aliases: {e:#}");
+                HashMap::new()
+            }
+        }
+    }
+
+    async fn read_device_aliases(&self) -> Result<HashMap<String, String>> {
+        let om = zbus::fdo::ObjectManagerProxy::builder(&self.conn)
+            .destination(BLUEZ_SERVICE)?
+            .path("/")?
+            .build()
+            .await?;
+
+        let objects = om
+            .get_managed_objects()
+            .await
+            .context("failed to get managed objects")?;
+
+        Ok(objects
+            .into_values()
+            .filter_map(|interfaces| device_name_entry(interfaces.get("org.bluez.Device1")?))
+            .collect())
+    }
+
     /// Empty string when the device is gone or has no alias.
     pub async fn device_alias(&self, device_path: &str) -> String {
         let Ok(builder) = Device1Proxy::builder(&self.conn).path(device_path.to_string()) else {
@@ -288,6 +325,23 @@ pub fn is_airpods(props: &HashMap<String, OwnedValue>) -> bool {
         .unwrap_or(false)
 }
 
+/// Pulls the (uppercase MAC, alias) pair out of a Device1 property map.
+///
+/// Both properties are required: an address with no alias has no name to show, and
+/// an alias with no address cannot be matched to a device we track.
+fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(String, String)> {
+    let string_prop = |k: &str| {
+        props
+            .get(k)
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .filter(|s| !s.is_empty())
+    };
+    Some((
+        string_prop("Address")?.to_uppercase(),
+        string_prop("Alias")?,
+    ))
+}
+
 pub const fn adapter_path() -> &'static str {
     ADAPTER_PATH
 }
@@ -305,6 +359,28 @@ mod tests {
             );
         }
         m
+    }
+
+    /// Both properties are needed, and the address is normalized because the
+    /// keystore keys its entries on the uppercase form.
+    #[test]
+    fn name_entry_needs_an_address_and_an_alias() {
+        let mut p = props(Some("Marcel's AirPods Pro"));
+        assert_eq!(device_name_entry(&p), None);
+
+        p.insert(
+            "Address".to_string(),
+            OwnedValue::try_from(zbus::zvariant::Value::from("aa:bb:cc:dd:ee:ff")).unwrap(),
+        );
+        assert_eq!(
+            device_name_entry(&p),
+            Some((
+                "AA:BB:CC:DD:EE:FF".to_string(),
+                "Marcel's AirPods Pro".to_string()
+            ))
+        );
+
+        assert_eq!(device_name_entry(&props(None)), None);
     }
 
     #[test]
