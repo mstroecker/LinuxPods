@@ -76,8 +76,8 @@ Model ID    Device
 ```
 
 **Decoding:**
-```go
-deviceModel := uint16(payload[1])<<8 | uint16(payload[2])
+```rust
+let device_model = u16::from(payload[1]) << 8 | u16::from(payload[2]);
 ```
 
 ### Byte 3: Status Byte
@@ -101,9 +101,9 @@ Bit     Flag                    Example
 
 The AirPods broadcast which pod is "primary". This affects how battery levels, charging status, and ear detection should be interpreted:
 
-```go
-isFlipped := !primaryLeft
-xorFactor := primaryLeft != thisInCase  // XOR operation
+```rust
+let is_flipped = !primary_left;
+let xor_factor = primary_left != this_in_case;
 ```
 
 - **isFlipped**: When `true`, battery nibbles and charging bits are swapped
@@ -150,8 +150,8 @@ Left and Right AirPods may be swapped based on the primary pod.
 
 ✅ **Working** - See `decode_color` in `src/ble/parser.rs`:
 
-```go
-// DecodeColor maps color byte to readable name
+```
+Colour byte -> name
 0x00: White
 0x01: Black
 0x02: Red

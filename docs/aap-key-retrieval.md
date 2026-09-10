@@ -33,12 +33,19 @@ By retrieving keys via AAP, you can decrypt BLE advertisements and get accurate 
 
 Establish an L2CAP connection to the AirPods on PSM 0x1001:
 
-```go
-// Example: Go using syscall
-fd, err := syscall.Socket(syscall.AF_BLUETOOTH, syscall.SOCK_SEQPACKET, 0)
-// ... configure sockaddr_l2 with PSM 0x1001 ...
-syscall.Connect(fd, &addr, sizeof(addr))
+```rust
+use bluer::l2cap::{SeqPacket, Socket, SocketAddr};
+use bluer::{Address, AddressType};
+
+let sa = SocketAddr { addr, addr_type: AddressType::BrEdr, psm: 0x1001, cid: 0 };
+let socket = Socket::<SeqPacket>::new_seq_packet()?;
+let stream = socket.connect(sa).await?;
 ```
+
+⚠️ A non-blocking connect returns almost immediately and reports success even when
+the BR/EDR ACL link is not yet up. **Check `peer_addr().cid` straight after
+connecting**: a zero cid means no channel was established, every send will fail with
+`ENOTCONN`, and the socket cannot recover - discard it and retry with a fresh one.
 
 ### Step 2: Send Handshake
 
@@ -71,8 +78,8 @@ A packet contains key data if:
 - **Byte [4] == 0x31** (key data marker)
 
 Example check:
-```go
-if len(packet) >= 7 && packet[4] == 0x31 {
+```rust
+if packet.len() >= 7 && packet[4] == 0x31 {
     // This packet contains keys
 }
 ```
@@ -100,21 +107,19 @@ For each key:
 
 Parse each key in the response:
 
-```go
-// Go example
-keyCount := int(data[6])
-offset := 7
+```rust
+let key_count = data[6] as usize;
+let mut offset = 7;
 
-for i := 0; i < keyCount; i++ {
-    keyType := data[offset]      // Byte 0: Type
-    // data[offset+1]            // Byte 1: Unknown
-    keyLength := int(data[offset+2])  // Byte 2: Length
-    // data[offset+3]            // Byte 3: Unknown
+for _ in 0..key_count {
+    let key_type = data[offset];                 // Byte 0: type
+    let key_length = data[offset + 2] as usize;  // Byte 2: length
+    // bytes 1 and 3 of the header are unknown
 
-    offset += 4  // Skip 4-byte header
+    offset += 4; // skip the 4-byte header
 
-    keyBytes := data[offset : offset+keyLength]
-    offset += keyLength
+    let key_bytes = &data[offset..offset + key_length];
+    offset += key_length;
 
     // Process key...
     switch keyType {
@@ -184,21 +189,23 @@ Key 2: ENC_KEY (Encryption Key)
 
 Once you have the **ENC_KEY** (type 0x04), you can decrypt BLE proximity pairing advertisements:
 
-1. **Extract encrypted portion**: Last 16 bytes of BLE payload
-2. **Decrypt**: AES-128 ECB mode, no padding
-3. **Parse**: Bytes 1-2 contain accurate battery levels
+1. **Extract encrypted portion**: last 16 bytes of the BLE payload
+2. **Decrypt**: AES-128 ECB, single block, no padding
+3. **Validate**: bytes 7-9 hold the last three bytes of the device's real MAC
+4. **Parse**: bytes 1-3 are first pod, second pod and case (bit 7 = charging)
 
-```go
-// Example decryption (Go)
-import "crypto/aes"
+```rust
+use aes::Aes128;
+use aes::cipher::{Block, BlockCipherDecrypt, KeyInit};
 
-func DecryptBLEPayload(encrypted, encKey []byte) ([]byte, error) {
-    block, _ := aes.NewCipher(encKey)
-    decrypted := make([]byte, 16)
-    block.Decrypt(decrypted, encrypted)
-    return decrypted, nil
-}
+let cipher = Aes128::new_from_slice(enc_key)?;
+let mut block = Block::<Aes128>::try_from(encrypted)?;
+cipher.decrypt_block(&mut block);
+// block now holds the 16-byte plaintext
 ```
+
+AES always "succeeds", so step 3 is what tells a correct key from a wrong one - and
+because the payload carries its own MAC, it also identifies which device sent it.
 
 See [BLE Proximity Pairing documentation](ble-proximity-pairing.md) for details on the decrypted payload format.
 
@@ -213,15 +220,14 @@ The AirPods may send several packets after the key request:
 
 ### Timeout Handling
 
-```go
-// Example: Read up to 100 packets or until keys found
-maxAttempts := 100
-for attempt := 1; attempt <= maxAttempts; attempt++ {
-    packet := readPacket()
+```rust
+// Read until a key packet arrives, bounded so a silent device cannot hang the loop
+for _ in 0..100 {
+    let packet = client.read_packet().await?;
 
-    if len(packet) >= 7 && packet[4] == 0x31 {
-        keys := parseKeys(packet)
-        break
+    if packet.len() >= 7 && packet[4] == 0x31 {
+        let keys = parse_proximity_keys(&packet)?;
+        break;
     }
 }
 ```
@@ -244,7 +250,7 @@ Common failure modes:
 
 ## Reference Implementation
 
-See the `debug_proximity_keys` tool in this repository:
+See the `key_request` example in this repository:
 ```bash
 cargo run --example key_request <MAC_ADDRESS>
 ```
@@ -310,7 +316,10 @@ Likely works with:
 ### "Decryption produces garbage"
 - Wrong key type (use ENC_KEY, not IRK)
 - Wrong key extracted (check parsing logic)
-- BLE payload from different AirPods device
+- BLE payload from a different AirPods device - expected when trying every stored
+  key; the MAC suffix at bytes 7-9 is what tells you which one matched
+- Validating with magic bytes rather than the MAC suffix. The old marker (byte 0
+  upper nibble `0x0`, byte 4 `0x2D`) rejects correct decryptions on current models
 
 ### "Keys change after re-pairing"
 - Expected behavior
@@ -325,5 +334,5 @@ Likely works with:
 
 ---
 
-- **Last Updated:** 2025-10-14
-- **Tested With:** AirPods Pro (2nd Gen), AirPods Pro 3
+- **Last Updated:** 2026-09-10
+- **Tested With:** AirPods Pro (2nd Gen) 0x2420, AirPods Pro 3 0x2720
