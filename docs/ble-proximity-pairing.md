@@ -160,6 +160,10 @@ Bit     Meaning
 
 ✅ **Working** - `lid_open` reads bit 3. Both earbuds report the same value.
 
+> **Note:** bit 3 only means anything while the pods are in the case. With them
+> out, it reads 0 whatever the lid is doing, so `lid_open` is `None` unless bits
+> 4-7 say the pods are inside.
+
 ### Byte 7: Device Color
 
 ✅ **Working** - See `decode_color` in `src/ble/parser.rs`:

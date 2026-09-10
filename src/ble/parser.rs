@@ -51,7 +51,8 @@ pub struct ProximityData {
     pub case_charging: bool,
     pub left_in_ear: bool,
     pub right_in_ear: bool,
-    pub lid_open: bool,
+    /// `None` while the earbuds are out of the case - see [`parse_proximity_data`].
+    pub lid_open: Option<bool>,
     pub color: u8,
     pub connection_state: u8,
     /// True when the right pod is primary.
@@ -188,8 +189,13 @@ pub fn parse_proximity_data(data: &[u8]) -> Result<ProximityData, ParseError> {
         std::mem::swap(&mut pd.left_in_ear, &mut pd.right_in_ear);
     }
 
-    // Lid: byte 6, bit 3 clear means open.
-    pd.lid_open = ((payload[6] >> 3) & 0x01) == 0;
+    // Lid: byte 6, bit 3 clear means open - but the byte describes the case, and
+    // only carries a lid state worth reading while the earbuds are inside it. With
+    // them out, bit 3 reads 0 whatever the case is doing, which showed up as a lid
+    // stuck on "Open" the whole time the pods were in someone's ears. Bits 4-7
+    // separate the two: 0x5 in the case, 0x1 out of it.
+    let pods_in_case = (payload[6] >> 4) == 0x05;
+    pd.lid_open = pods_in_case.then(|| ((payload[6] >> 3) & 0x01) == 0);
     // Byte 8, not 9 - 9 is the first byte of the encrypted portion.
     pd.connection_state = payload[8];
 
@@ -265,7 +271,7 @@ mod tests {
             status,   // 3: status
             battery,  // 4: battery nibbles
             charging, // 5: charging bits + case battery
-            lid,      // 6: lid counter + lid state
+            lid,      // 6: in-case indicator + lid state
             0x00,     // 7: colour
             0x05,     // 8: connection state -> Music
             0x00,     // 9: first byte of the encrypted portion
@@ -287,8 +293,16 @@ mod tests {
     fn lid_state_comes_from_byte_6() {
         for (lid, open) in [(0x52, true), (0x5A, false), (0x51, true), (0x59, false)] {
             let pd = parse_proximity_data(&advert_with_lid(0x35, 0x76, 0xba, lid)).unwrap();
-            assert_eq!(pd.lid_open, open, "lid byte {lid:#04x}");
+            assert_eq!(pd.lid_open, Some(open), "lid byte {lid:#04x}");
         }
+    }
+
+    /// `0x11` is what the earbuds report from someone's ears, and its lid bit is
+    /// clear whether or not the case is shut - so there is nothing to report.
+    #[test]
+    fn lid_state_is_unknown_out_of_the_case() {
+        let pd = parse_proximity_data(&advert_with_lid(0x0b, 0x76, 0x8f, 0x11)).unwrap();
+        assert_eq!(pd.lid_open, None);
     }
 
     #[test]
@@ -318,7 +332,7 @@ mod tests {
         assert_eq!(pd.right_battery, Some(70));
         assert_eq!(pd.device_model, 0x2720);
         assert_eq!(decode_model_name(pd.device_model), "AirPods Pro 3");
-        assert!(pd.lid_open);
+        assert_eq!(pd.lid_open, Some(true));
     }
 
     #[test]

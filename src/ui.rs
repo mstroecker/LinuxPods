@@ -707,7 +707,12 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
 
 /// The one-line summary under the battery display.
 fn status_line(state: &PodState) -> String {
-    let lid = if state.lid_open { "Open" } else { "Closed" };
+    // Absent unless the earbuds are in the case; the case is what reports it.
+    let lid = match state.lid_open {
+        Some(true) => " • Lid: Open",
+        Some(false) => " • Lid: Closed",
+        None => "",
+    };
     // What the AirPods are doing - playing, on a call - comes from the BLE
     // advertisement only, so it is absent whenever the reading came over AAP.
     let activity = state
@@ -730,7 +735,7 @@ fn status_line(state: &PodState) -> String {
         "AirPods".to_string()
     };
 
-    format!("{model} • Lid: {lid}{activity} • Source: {source}")
+    format!("{model}{lid}{activity} • Source: {source}")
 }
 
 #[cfg(test)]
@@ -756,7 +761,7 @@ mod tests {
         let state = PodState {
             source: DataSource::Ble,
             model_name: "AirPods Pro 3".into(),
-            lid_open: true,
+            lid_open: Some(true),
             connection_state: Some(0x05),
             ..Default::default()
         };
@@ -776,10 +781,7 @@ mod tests {
             connection_state: None,
             ..Default::default()
         };
-        assert_eq!(
-            status_line(&state),
-            "AirPods Pro 3 • Lid: Closed • Source: AAP"
-        );
+        assert_eq!(status_line(&state), "AirPods Pro 3 • Source: AAP");
     }
 
     fn snapshot(names: &[(&str, &str)], models: &[(&str, &str)]) -> Snapshot {
