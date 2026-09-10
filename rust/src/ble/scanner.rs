@@ -99,9 +99,27 @@ impl Scanner {
             }
 
             let apple_data = apple_manufacturer_data(&changed)?;
-            let data = parse_proximity_data(&apple_data).ok()?;
+            let ble_mac = mac_from_path(&path)?;
 
-            Some(Advertisement { data, ble_mac: mac_from_path(&path)? })
+            // Logged here rather than downstream so it covers every advertisement
+            // that parses, including ones the coordinator later drops (for example
+            // the device currently on AAP).
+            match parse_proximity_data(&apple_data) {
+                Ok(data) => {
+                    tracing::debug!(
+                        "BLE parsable: {ble_mac} model=0x{:04X} payload={}B",
+                        data.device_model,
+                        data.raw_data.len()
+                    );
+                    Some(Advertisement { data, ble_mac })
+                }
+                Err(e) => {
+                    // Apple broadcasts plenty of non-proximity message types; at
+                    // debug level these would drown out everything else.
+                    tracing::trace!("BLE unparsable from {ble_mac}: {e}");
+                    None
+                }
+            }
         }))
     }
 }

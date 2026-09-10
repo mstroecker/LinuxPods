@@ -288,13 +288,16 @@ impl Coordinator {
                 continue;
             };
             if data.add_decrypted_data(&decrypted).is_ok() {
-                tracing::debug!("BLE: identified {real_mac} (random MAC {ble_mac}) via key");
+                tracing::debug!("BLE decryptable: {ble_mac} -> {real_mac} (key matched)");
                 return Some(real_mac.clone());
             }
         }
 
         if !keys.is_empty() {
-            tracing::debug!("BLE: no stored key decrypted advertisement from {ble_mac}");
+            tracing::debug!(
+                "BLE not decryptable: {ble_mac} (tried {} stored key(s))",
+                keys.len()
+            );
         }
         None
     }
