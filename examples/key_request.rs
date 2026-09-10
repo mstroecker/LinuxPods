@@ -12,7 +12,9 @@ use linuxpods::podstate::Coordinator;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
 
     let mac = std::env::args().nth(1).expect("usage: key_request <MAC>");
     let coordinator = Coordinator::new().await?;

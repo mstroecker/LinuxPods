@@ -35,13 +35,19 @@ impl Keystore {
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data directory {}", data_dir.display()))?;
         restrict_permissions(&data_dir, 0o700)?;
-        Ok(Self { data_dir, keys: HashMap::new() })
+        Ok(Self {
+            data_dir,
+            keys: HashMap::new(),
+        })
     }
 
     /// Test hook: use an explicit directory instead of the XDG one.
     pub fn with_dir(data_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&data_dir)?;
-        Ok(Self { data_dir, keys: HashMap::new() })
+        Ok(Self {
+            data_dir,
+            keys: HashMap::new(),
+        })
     }
 
     fn path(&self) -> PathBuf {
@@ -57,8 +63,7 @@ impl Keystore {
 
         let raw = std::fs::read(&path)
             .with_context(|| format!("failed to read keys file {}", path.display()))?;
-        let parsed: KeyData =
-            serde_json::from_slice(&raw).context("failed to parse keys JSON")?;
+        let parsed: KeyData = serde_json::from_slice(&raw).context("failed to parse keys JSON")?;
 
         let mut keys = HashMap::with_capacity(parsed.keys.len());
         for (mac, b64) in parsed.keys {

@@ -22,9 +22,9 @@ use anyhow::{Context, Result};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::aap;
-use crate::ble::parser::{PodSide, ProximityData};
 use crate::ble::decode_model_name;
 use crate::ble::decrypt::decrypt_for_device;
+use crate::ble::parser::{PodSide, ProximityData};
 use crate::keystore::Keystore;
 
 /// How long a device may go unseen before its state is dropped. Bounds the map
@@ -113,7 +113,6 @@ impl Snapshot {
             .and_then(|m| self.states.get(m))
             .or_else(|| self.states.values().find(|s| s.identified))
     }
-
 }
 
 /// True when an active AAP connection makes this device's BLE advertisement
@@ -244,10 +243,12 @@ impl Coordinator {
     /// are unbounded, so the only failure mode is a closed receiver.
     fn broadcast(&self, snapshot: Snapshot) {
         let mut subs = self.subscribers.lock().expect("subscriber list poisoned");
-        subs.retain(|tx| !matches!(
-            tx.try_send(snapshot.clone()),
-            Err(async_channel::TrySendError::Closed(_))
-        ));
+        subs.retain(|tx| {
+            !matches!(
+                tx.try_send(snapshot.clone()),
+                Err(async_channel::TrySendError::Closed(_))
+            )
+        });
     }
 
     pub async fn connected_mac(&self) -> Option<String> {
@@ -263,7 +264,13 @@ impl Coordinator {
         let snapshot = {
             let mut inner = self.inner.write().await;
             let now = Instant::now();
-            inner.devices.insert(mac, Entry { state, last_seen: now });
+            inner.devices.insert(
+                mac,
+                Entry {
+                    state,
+                    last_seen: now,
+                },
+            );
             inner.prune(now, DEVICE_TTL);
             inner.snapshot()
         };
@@ -352,7 +359,11 @@ impl Coordinator {
         tracing::debug!(
             "BLE {} [{}]: left={:?} right={:?} case={:?} lid_open={} in_ear={}/{}",
             state.current_ble_mac,
-            if data.has_decrypted { "decrypted 1%" } else { "cleartext 10%" },
+            if data.has_decrypted {
+                "decrypted 1%"
+            } else {
+                "cleartext 10%"
+            },
             state.left_battery,
             state.right_battery,
             state.case_battery,
@@ -363,7 +374,11 @@ impl Coordinator {
         tracing::debug!(
             "BLE {} raw: {}",
             state.current_ble_mac,
-            data.raw_data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            data.raw_data
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
 
         self.publish(key_mac, state).await;
@@ -373,7 +388,10 @@ impl Coordinator {
     pub async fn connect_aap(&self, mac_addr: &str) -> Result<()> {
         let mut client = aap::Client::new(mac_addr)?;
         client.connect().await?;
-        client.handshake().await.context("failed to send handshake")?;
+        client
+            .handshake()
+            .await
+            .context("failed to send handshake")?;
 
         // The Go version slept 500ms for the handshake to be processed.
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -455,7 +473,12 @@ impl Coordinator {
             tracing::debug!(
                 "AAP packet ({} bytes): {}",
                 packet.len(),
-                packet.iter().take(8).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+                packet
+                    .iter()
+                    .take(8)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
 
             if aap::is_battery_packet(&packet) {
@@ -616,7 +639,10 @@ mod tests {
             let now = start + Duration::from_secs(i * 30);
             inner.devices.insert(
                 format!("random-mac-{i}"),
-                Entry { state: PodState::default(), last_seen: now },
+                Entry {
+                    state: PodState::default(),
+                    last_seen: now,
+                },
             );
             inner.prune(now, DEVICE_TTL);
         }
@@ -642,7 +668,10 @@ mod tests {
 
         // Whatever is on disk, the snapshot must carry the loaded key list so the
         // UI can render known devices before anything is heard over the air.
-        assert_eq!(snapshot.known_keys.len(), coordinator.known_key_count().await);
+        assert_eq!(
+            snapshot.known_keys.len(),
+            coordinator.known_key_count().await
+        );
     }
 
     /// Regression: a dropped AAP link left the UI reporting Source: AAP forever,
@@ -653,7 +682,10 @@ mod tests {
         inner.devices.insert(
             "aa".into(),
             Entry {
-                state: PodState { source: DataSource::Aap, ..Default::default() },
+                state: PodState {
+                    source: DataSource::Aap,
+                    ..Default::default()
+                },
                 last_seen: Instant::now(),
             },
         );
@@ -668,7 +700,10 @@ mod tests {
         inner.devices.insert(
             "aa".into(),
             Entry {
-                state: PodState { source: DataSource::Ble, ..Default::default() },
+                state: PodState {
+                    source: DataSource::Ble,
+                    ..Default::default()
+                },
                 last_seen: Instant::now(),
             },
         );
@@ -693,7 +728,11 @@ mod tests {
 
     #[test]
     fn lowest_earbud_handles_missing_values() {
-        let mut s = PodState { left_battery: Some(80), right_battery: Some(60), ..Default::default() };
+        let mut s = PodState {
+            left_battery: Some(80),
+            right_battery: Some(60),
+            ..Default::default()
+        };
         assert_eq!(s.lowest_earbud(), Some(60));
 
         s.right_battery = None;
@@ -706,8 +745,20 @@ mod tests {
     #[test]
     fn snapshot_primary_prefers_connected_device() {
         let mut states = HashMap::new();
-        states.insert("aa".into(), PodState { device_model: 1, ..Default::default() });
-        states.insert("bb".into(), PodState { device_model: 2, ..Default::default() });
+        states.insert(
+            "aa".into(),
+            PodState {
+                device_model: 1,
+                ..Default::default()
+            },
+        );
+        states.insert(
+            "bb".into(),
+            PodState {
+                device_model: 2,
+                ..Default::default()
+            },
+        );
 
         let snap = Snapshot {
             states,
@@ -725,14 +776,26 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(
             "known".into(),
-            PodState { device_model: 7, identified: true, ..Default::default() },
+            PodState {
+                device_model: 7,
+                identified: true,
+                ..Default::default()
+            },
         );
         states.insert(
             "stranger".into(),
-            PodState { device_model: 9, identified: false, ..Default::default() },
+            PodState {
+                device_model: 9,
+                identified: false,
+                ..Default::default()
+            },
         );
 
-        let snap = Snapshot { states, connected_mac: None, known_keys: vec![] };
+        let snap = Snapshot {
+            states,
+            connected_mac: None,
+            known_keys: vec![],
+        };
         assert_eq!(snap.primary().unwrap().device_model, 7);
     }
 
@@ -741,10 +804,20 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(
             "stranger".into(),
-            PodState { identified: false, ..Default::default() },
+            PodState {
+                identified: false,
+                ..Default::default()
+            },
         );
 
-        let snap = Snapshot { states, connected_mac: None, known_keys: vec![] };
-        assert!(snap.primary().is_none(), "an unidentified device is not a primary");
+        let snap = Snapshot {
+            states,
+            connected_mac: None,
+            known_keys: vec![],
+        };
+        assert!(
+            snap.primary().is_none(),
+            "an unidentified device is not a primary"
+        );
     }
 }

@@ -158,7 +158,10 @@ mod tests {
 
     #[test]
     fn rejects_malformed_packets() {
-        assert_eq!(parse_proximity_keys(&[0u8; 3]), Err(KeyParseError::TooShort(3)));
+        assert_eq!(
+            parse_proximity_keys(&[0u8; 3]),
+            Err(KeyParseError::TooShort(3))
+        );
         assert_eq!(
             parse_proximity_keys(&[0x04, 0x00, 0x04, 0x00, 0x99, 0x00, 0x01]),
             Err(KeyParseError::NotKeyPacket(0x99))
@@ -177,6 +180,9 @@ mod tests {
     fn detects_truncated_key_data() {
         let mut p = packet(&[(0x04, &[0xBBu8; 16])]);
         p.truncate(p.len() - 4);
-        assert_eq!(parse_proximity_keys(&p), Err(KeyParseError::TruncatedData(1)));
+        assert_eq!(
+            parse_proximity_keys(&p),
+            Err(KeyParseError::TruncatedData(1))
+        );
     }
 }
