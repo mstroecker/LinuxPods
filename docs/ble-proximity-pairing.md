@@ -201,7 +201,7 @@ Byte    Description                     Status      Notes
 4       Unknown                         ❓          Constant 0x1D on both models tested
 5       Unknown                         ❓          Constant 0x7D on both models tested
 6       Unknown                         ❓          Constant 0x64 on both models tested
-7-9     Real MAC suffix                 ✅ Working   Last 3 bytes of the device's permanent MAC
+7-9     Real MAC suffix                 ✅ Working   Last 3 bytes of the permanent MAC; 00 00 00 while connected
 10-11   Padding/Unknown                 ❓          Always 00 00 in observed samples
 12-15   Rotating tail                   ❓          Changes every advertisement (counter or MIC?)
 ```
@@ -360,9 +360,31 @@ MAC. Compare them against the MAC the candidate key is stored under:
 ```rust
 fn matches_device(decrypted: &[u8; 16], mac_addr: &str) -> bool {
     let Some(suffix) = mac_suffix(mac_addr) else { return false };
-    decrypted[7..10] == suffix
+    decrypted[7..10] == suffix || decrypted[7..10] == [0x00; 3]
 }
 ```
+
+**While connected, the suffix is zeroed.** A device connected to a host publishes
+`00 00 00` in bytes 7-9 instead of its MAC suffix - which fits the field's purpose,
+since it exists so a *disconnected* device can be recognised behind a randomized
+address. Observed on AirPods Pro 3 (0x2720), with the rest of the plaintext intact:
+
+```
+14 50 4d ff 1d 7d 64 [00 00 00] 00 0f d4 65 7c 03   -> 80% / 77% / case unknown
+      ^^ ^^ ^^  ^^ ^^ ^^ ^^^^^^^^
+      batteries  usual markers   zeroed suffix
+```
+
+Rejecting that form drops the connected device to the cleartext's 10% buckets and
+leaves it unidentified behind its rotating address - exactly the "connected to an
+iPhone" case this document sets out to support.
+
+**Why accepting both is safe.** Identification never came from *reading* the
+suffix; it comes from which key produced the plaintext, one key being tried at a
+time. The suffix is only the test that the key was right, and zeros test that just
+as well - a wrong key yields pseudorandom bytes either way. The union of the two
+rules costs exactly one bit: 2^-23 per wrong key rather than 2^-24, measured at 4
+and 4 false accepts respectively over 40M random keys against one real ciphertext.
 
 This is the only validation needed. Do not add a magic-byte check alongside it -
 see the warning under [Bytes 9-24](#bytes-9-24-encrypted-battery-data).

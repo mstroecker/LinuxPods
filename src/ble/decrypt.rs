@@ -13,6 +13,15 @@ pub const KEY_LEN: usize = 16;
 /// Where the device's MAC suffix sits inside the decrypted payload.
 const MAC_SUFFIX_RANGE: std::ops::Range<usize> = 7..10;
 
+/// What sits there instead while the device is connected to a host.
+///
+/// The suffix exists so a paired-but-disconnected device can be recognised behind
+/// a randomized address; connected, the device publishes zeros. Observed on
+/// AirPods Pro 3 (0x2720) with a key that decrypts correctly by every other
+/// measure - batteries agreeing with the cleartext buckets and the usual
+/// `1d 7d 64` at bytes 4-6.
+const CONNECTED_SUFFIX: [u8; 3] = [0x00; 3];
+
 #[derive(Debug, thiserror::Error)]
 pub enum DecryptError {
     #[error("encrypted data must be {ENCRYPTED_LEN} bytes, got {0}")]
@@ -30,6 +39,9 @@ pub enum DecryptError {
 /// The decrypted payload embeds the last three bytes of the device's real MAC at
 /// offset 7, so it identifies its own device - which is exactly what is needed to
 /// resolve a randomized BLE MAC back to a permanent one.
+///
+/// While the device is connected the suffix reads `00 00 00` instead; see
+/// [`matches_device`], which accepts either.
 ///
 /// Layout confirmed on two models; only byte 0, the batteries and the trailing
 /// four bytes differ between them:
@@ -57,14 +69,25 @@ pub fn decrypt_for_device(
     }
 }
 
-/// True when the payload carries the last three bytes of `mac_addr` at offset 7.
+/// True when the payload carries the last three bytes of `mac_addr` at offset 7,
+/// or the zeros a connected device publishes in their place.
 ///
-/// Three exact bytes make a false positive about one in 16 million per key tried.
+/// Identification does not come from reading the suffix - it comes from *which*
+/// key produced this plaintext, one key being tried at a time. The suffix is only
+/// the test that the key was the right one, so zeros serve that purpose just as
+/// well: a wrong key yields pseudorandom bytes, and three of them landing on zero
+/// is as unlikely as landing on one specific device's suffix.
+///
+/// Accepting both costs exactly one bit - a false accept per wrong key goes from
+/// 2^-24 to 2^-23, measured at 4 and 4 accepts respectively over 40M random keys.
+/// Without the second rule, a device connected to a phone falls back to the
+/// cleartext's 10% buckets and stays unidentified behind its rotating address,
+/// which is the case `docs/ble-proximity-pairing.md` sets out to cover.
 pub fn matches_device(decrypted: &[u8; ENCRYPTED_LEN], mac_addr: &str) -> bool {
     let Some(suffix) = mac_suffix(mac_addr) else {
         return false;
     };
-    decrypted[MAC_SUFFIX_RANGE] == suffix
+    decrypted[MAC_SUFFIX_RANGE] == suffix || decrypted[MAC_SUFFIX_RANGE] == CONNECTED_SUFFIX
 }
 
 /// Parses "AA:BB:CC:DD:EE:FF" into its last three bytes.
@@ -171,6 +194,33 @@ mod tests {
         let ct = encrypt(&pro3_plaintext([0xDD, 0xEE, 0xFF]), &key);
         assert!(matches!(
             decrypt_for_device(&ct, &key, "99:88:77:66:55:44"),
+            Err(DecryptError::ValidationFailed)
+        ));
+    }
+
+    /// A connected device zeroes the suffix field. The plaintext is otherwise
+    /// intact, so rejecting it would drop 1% accuracy exactly when AAP is not
+    /// available - the AirPods are on someone's phone.
+    #[test]
+    fn accepts_the_zeroed_suffix_of_a_connected_device() {
+        let key = [0x11u8; 16];
+        let plain = pro3_plaintext([0x00, 0x00, 0x00]);
+        let ct = encrypt(&plain, &key);
+
+        assert_eq!(
+            decrypt_for_device(&ct, &key, "AA:BB:CC:DD:EE:FF").unwrap(),
+            plain
+        );
+    }
+
+    /// The zeroed form is an exact value, not a wildcard: a partial match is still
+    /// a wrong key.
+    #[test]
+    fn rejects_a_partially_zeroed_suffix() {
+        let key = [0x11u8; 16];
+        let ct = encrypt(&pro3_plaintext([0x00, 0x00, 0x01]), &key);
+        assert!(matches!(
+            decrypt_for_device(&ct, &key, "AA:BB:CC:DD:EE:FF"),
             Err(DecryptError::ValidationFailed)
         ));
     }

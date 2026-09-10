@@ -92,6 +92,9 @@ MAC**. Devices that cannot be identified still need `DEVICE_TTL` pruning, since 
 Validate a decrypted proximity payload by **MAC suffix**: bytes 7-9 hold the last three bytes of the device's real
 MAC. A match both validates the decryption and identifies the device.
 
+A connected device zeroes that field, so `00 00 00` is accepted too. Identification still holds: it comes from which
+key decrypted the payload, not from reading the suffix. The union costs one bit (2^-23 per wrong key, from 2^-24).
+
 ⚠️ Do **not** validate with magic bytes. The older check (byte 0 upper nibble `0x0`, byte 4 `0x2D`) holds on neither
 AirPods Pro 3 (0x2720) nor Pro Gen 2 (0x2420) - both report byte 4 = `0x1D` - and rejects correct decryptions, which
 silently disables 1% accuracy. See `docs/ble-proximity-pairing.md`.

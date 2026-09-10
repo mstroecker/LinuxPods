@@ -5,6 +5,7 @@
 
 use aes::Aes128;
 use aes::cipher::{Block, BlockCipherDecrypt, KeyInit};
+use linuxpods::ble::matches_device;
 use linuxpods::keystore::Keystore;
 
 /// Payloads captured from the running app (AirPods Pro 3, model 0x2720).
@@ -12,6 +13,9 @@ const CAPTURED: &[&str] = &[
     // AirPods Pro 3 (model 0x2720)
     "01 27 20 05 66 f3 51 00 00 3e e1 09 50 3d e9 16 6e 44 f2 82 f3 d3 82 28 95",
     "01 27 20 14 77 f5 59 00 00 12 d1 88 e9 8b bd c8 6f 14 78 ed cd 5e 52 7d c7",
+    // AirPods Pro 3, connected to a host: bytes 7-9 of the plaintext read 00 00 00
+    // instead of the MAC suffix.
+    "01 27 20 0b 78 8f 11 00 04 4d 34 49 4e ba 6f 1b 09 c6 65 ed 3c ba 4a 63 26",
     // AirPods Pro Gen 2 (model 0x2420)
     "01 24 20 25 aa f1 51 00 00 46 0e 45 fc cf ae 4e ff f6 70 ff 14 46 bd 19 ff",
     "01 24 20 25 aa f1 51 00 00 4f cb 61 56 ef 4a f9 64 bd 4d f2 e5 f1 e2 58 c0",
@@ -42,12 +46,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pt = block.as_slice();
 
             let magic_ok = (pt[0] & 0xF0) == 0 && pt[4] == 0x2D;
-            let suffix: Vec<u8> = mac
-                .split(':')
-                .skip(3)
-                .map(|b| u8::from_str_radix(b, 16).unwrap())
-                .collect();
-            if pt[7..10] != suffix[..] {
+            // The library's rule, so the probe cannot disagree with the app about
+            // what counts as a match - including the zeroed suffix of a connected
+            // device, which an inline suffix comparison would silently skip.
+            let mut plain = [0u8; 16];
+            plain.copy_from_slice(pt);
+            if !matches_device(&plain, mac) {
                 continue;
             }
             println!(
