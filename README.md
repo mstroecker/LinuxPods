@@ -41,48 +41,44 @@ A modern Linux desktop application for managing Apple AirPods with a native GNOM
 
 - GTK4
 - libadwaita
-- Go 1.25+ (for building)
+- BlueZ
+- Rust 1.85+ (for building; edition 2024)
 
 ### Installation
 
 **Arch Linux:**
 
 ```bash
-sudo pacman -S gtk4 libadwaita go
+sudo pacman -S gtk4 libadwaita bluez rust
 ```
 
 **Ubuntu/Debian:**
 
 ```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev golang
+sudo apt install libgtk-4-dev libadwaita-1-dev bluez cargo
 ```
 
 **NixOS:**
 
 ```bash
-nix-shell -p gtk4 libadwaita go
+nix-shell -p gtk4 libadwaita bluez cargo
 ```
 
 ## Building
 
 ```bash
-# Clone and build
 git clone https://github.com/mstroecker/LinuxPods.git
-cd linuxpods
-go mod download
+cd LinuxPods
 
-# Build (using Makefile - recommended)
-make build
-
-# Or build directly with go
-go build -o linuxpods ./cmd/gui
-
-# Build all debug tools
-make tools
+# Build (cargo, or `make build`)
+cargo build --release
 
 # Run
-./linuxpods
+cargo run
 ```
+
+The first build compiles the GTK4 and libadwaita bindings and takes a couple of
+minutes; later builds are incremental and take seconds.
 
 ## Usage
 
@@ -120,85 +116,71 @@ The application provides:
 
 LinuxPods includes several debugging tools for testing different components:
 
-**debug_ble** - BLE advertisement scanner with optional decryption:
-```bash
-# Unencrypted only (~10% accuracy)
-go run ./cmd/debug_ble
+The application logs each protocol stage. `RUST_LOG=linuxpods=debug` shows BLE
+advertisements as they are received, decrypted and decoded, plus AAP packets:
 
-# With decryption (1% accuracy)
-go run ./cmd/debug_ble <ENCRYPTION_KEY>
 ```
-Passively scans for AirPods BLE advertisements and parses Apple Continuity protocol. Works even when AirPods are connected to another device. Supports optional decryption for accurate battery levels.
-
-**debug_aap** - AAP protocol client:
-```bash
-go run ./cmd/debug_aap <MAC_ADDRESS>
-# Example: go run ./cmd/debug_aap 90:62:3F:59:00:2F
+BLE parsable: 5C:4D:3F:B5:41:B6 model=0x2720 payload=25B
+BLE decryptable: 5C:4D:3F:B5:41:B6 -> AA:BB:CC:DD:EE:FF (key matched)
+BLE AA:BB:CC:DD:EE:FF [decrypted 1%]: left=Some(75) right=Some(73) case=Some(61)
+AAP connected to AA:BB:CC:DD:EE:FF (cid 2822, attempt 1)
 ```
-Tests direct L2CAP connection to AirPods using Apple Accessory Protocol (AAP). Displays raw packets and parsed battery information.
 
-**debug_aap_key_retrieval** - Retrieve encryption keys:
+Add `linuxpods=trace` to also see Apple manufacturer data that is not proximity
+pairing, which is filtered out at debug level.
+
+Two probes exercise the protocol layers without the interface:
+
+**key_request** - AAP connection and key retrieval:
 ```bash
-go run ./cmd/debug_aap_key_retrieval <MAC_ADDRESS>
-# Example: go run ./cmd/debug_aap_key_retrieval 90:62:3F:59:00:2F
+cargo run --example key_request <MAC_ADDRESS>
 ```
-Retrieves proximity pairing encryption keys (IRK and ENC_KEY) from AirPods via AAP connection. The ENC_KEY is used to decrypt BLE advertisements for 1% battery accuracy.
+Connects over L2CAP, starts the read loop, and requests the proximity pairing keys
+while that loop is parked in `recv` - which is where a mutex deadlock used to hide.
+The retrieved ENC_KEY is what enables 1% battery accuracy over BLE.
 
-**debug_decrypt_test** - Test BLE parsing and decryption:
+**decrypt_probe** - Offline decryption of captured advertisements:
 ```bash
-# Unencrypted only
-go run ./cmd/debug_decrypt_test
-
-# With decryption
-go run ./cmd/debug_decrypt_test <ENCRYPTION_KEY>
+cargo run --example decrypt_probe
 ```
-Tests BLE advertisement parsing and decryption with a hardcoded payload. Useful for verifying encryption keys and understanding the protocol.
-
-**debug_bluez_dbus_discover** - BlueZ device discovery:
-```bash
-go run ./cmd/debug_bluez_dbus_discover
-```
-Queries BlueZ D-Bus API to discover paired AirPods and display all device properties, interfaces, and services.
-
-**debug_bluez_dbus_battery** - Battery provider integration test:
-```bash
-go run ./cmd/debug_bluez_dbus_battery full
-```
-Tests BlueZ Battery Provider D-Bus API implementation. Verifies batteries appear correctly in GNOME Settings.
+Decrypts sample payloads with the stored keys and prints the plaintext, bypassing
+validation. This is how the Pro 3 and Gen 2 payload layouts were worked out.
 
 ## Development
 
 ### Project Structure
 
 ```
-linuxpods/
-├── cmd/
-│   ├── gui/                        # Main GUI application
-│   ├── debug_ble/                  # BLE scanner with optional decryption
-│   ├── debug_aap/                  # AAP client debugging tool
-│   ├── debug_aap_key_retrieval/    # Retrieve BLE encryption keys
-│   ├── debug_decrypt_test/         # Test BLE parsing/decryption
-│   ├── debug_bluez_dbus_discover/  # BlueZ device discovery tool
-│   └── debug_bluez_dbus_battery/   # BlueZ battery provider test tool
-├── internal/
-│   ├── podstate/     # AirPods state coordinator
-│   ├── ble/          # BLE scanner and proximity pairing parser
-│   ├── aap/          # Apple Accessory Protocol (L2CAP) client
-│   ├── bluez/        # BlueZ D-Bus battery provider
-│   ├── keystore/     # Persistent encryption key storage (XDG Base Directory)
-│   ├── ui/           # GTK4/libadwaita UI components
-│   ├── indicator/    # System tray indicator
-│   └── util/         # Utility functions
-├── docs/             # Protocol documentation
+LinuxPods/
+├── src/
+│   ├── main.rs        # Entry point: GTK main loop plus a tokio runtime
+│   ├── lib.rs         # Library target, so the layers can be driven from tests
+│   ├── podstate.rs    # State coordinator: AAP and BLE, per device
+│   ├── aap/           # Apple Accessory Protocol over L2CAP
+│   │   ├── client.rs  #   PSM 4097 connection
+│   │   ├── battery.rs #   battery packet parsing
+│   │   └── keys.rs    #   proximity key parsing
+│   ├── ble/           # BLE advertisements
+│   │   ├── scanner.rs #   BlueZ D-Bus discovery
+│   │   ├── parser.rs  #   Apple Continuity proximity pairing
+│   │   └── decrypt.rs #   AES-128 decryption and device identification
+│   ├── bluez.rs       # BatteryProvider1, so the battery shows in GNOME Settings
+│   ├── keystore.rs    # Encryption key storage (XDG Base Directory)
+│   ├── indicator.rs   # System tray (StatusNotifierItem)
+│   └── ui.rs          # GTK4/libadwaita interface
+├── examples/          # Protocol probes (cargo run --example …)
+├── docs/              # Protocol documentation
 │   ├── ble-proximity-pairing.md  # BLE protocol and decryption
 │   └── aap-key-retrieval.md      # AAP key retrieval protocol
-└── assets/           # PNG images for UI
+└── assets/            # PNG images for UI
 ```
 
 ### Technology Stack
 
-This project uses [gotk4](https://github.com/diamondburned/gotk4)
-and [gotk4-adwaita](https://github.com/diamondburned/gotk4-adwaita) - Go bindings for GTK4 and libadwaita.
+This project uses [gtk4-rs](https://github.com/gtk-rs/gtk4-rs) and
+[libadwaita-rs](https://gitlab.gnome.org/World/Rust/libadwaita-rs) for the interface,
+[zbus](https://github.com/dbus2/zbus) for BlueZ D-Bus integration, and
+[bluer](https://github.com/bluez/bluer) for L2CAP sockets.
 
 **Why libadwaita?** It provides polished, pre-styled components that match GNOME Settings and follow the GNOME Human
 Interface Guidelines.
@@ -206,15 +188,15 @@ Interface Guidelines.
 ### Development Setup
 
 ```bash
-# Install Go dependencies
-go get github.com/diamondburned/gotk4/pkg/gtk/v4
-go get github.com/diamondburned/gotk4-adwaita/pkg/adw
+cargo test                        # unit tests
+cargo clippy --all-targets        # lints
+cargo fmt                         # formatting
 
-# Development build with race detector
-go build -race -o linuxpods ./cmd/gui
+# Protocol tracing: BLE parse/decrypt plus AAP packets
+RUST_LOG=linuxpods=debug cargo run
 
-# Run with GTK inspector for debugging
-GTK_DEBUG=interactive ./linuxpods
+# GTK inspector for UI debugging
+GTK_DEBUG=interactive cargo run   # or: make run-debug
 ```
 
 ### Architecture
@@ -278,7 +260,8 @@ This project builds on research and implementations from:
 
 Contributions are welcome! Please:
 
-- Follow Go conventions and run `go fmt`
+- Run `cargo fmt` and `cargo clippy --all-targets` before submitting
+- Cover protocol parsing and decryption with tests; they need no hardware
 - Keep UI changes consistent with GNOME HIG
 - Test on multiple window sizes
 - Document any protocol discoveries in `docs/`
