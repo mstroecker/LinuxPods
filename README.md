@@ -10,7 +10,8 @@ A modern Linux desktop application for managing Apple AirPods with a native GNOM
 ### ✅ Implemented
 
 - **Real-Time Battery Monitoring**: View live battery levels for left AirPod, right AirPod, and charging case
-  - **Automatic Source Selection**: AAP (accurate, 1%) when connected, BLE (1-10%) otherwise
+  - **Per-Device Source Selection**: AAP (exact) for a connected device, BLE (10% steps,
+    or exact once decrypted) for every other - one connection does not blind the rest
   - **Multi-Device Support**: Track multiple AirPods devices simultaneously
   - **AAP Integration**: Apple Accessory Protocol over L2CAP for precise battery monitoring
   - **BLE Scanning with Optional Decryption**:
@@ -87,7 +88,7 @@ minutes; later builds are incremental and take seconds.
 Launch the application:
 
 ```bash
-./linuxpods
+cargo run              # or ./target/release/linuxpods after `cargo build --release`
 ```
 
 The application provides:
@@ -203,20 +204,25 @@ GTK_DEBUG=interactive cargo run   # or: make run-debug
 
 #### State Coordination
 
-LinuxPods uses a centralized `PodStateCoordinator` that coordinates all AirPods state data:
+A central `Coordinator` merges both sources and broadcasts a snapshot of all device
+state whenever anything changes. State is keyed by the device's **real** MAC, which
+is what lets a rotating BLE address collapse onto a single device.
 
 ```
-PodStateCoordinator (central state)
-    ├─ AAP Client ───────────> Active connection for accurate battery (when connected)
-    ├─ BLE Scanner ──────────> Passive scanning (fallback or when disconnected)
-    ├─ Automatic Switching ──> Prefers AAP, falls back to BLE
-    ├─ Updates via callbacks:
-    │   ├─ UI Window ────────> Updates battery widgets
-    │   ├─ System Tray ──────> Updates tray menu
-    │   └─ BlueZ Provider ───> Updates GNOME Settings
+Coordinator (state per device, keyed by real MAC)
+    ├─ AAP client ─────────> exact battery for the connected device
+    ├─ BLE scanner ────────> advertisements from every other device
+    ├─ Per-device choice ──> AAP supersedes BLE only for the device it is connected to
+    └─ Broadcasts snapshots to every subscriber:
+        ├─ UI ─────────────> battery widgets, device switcher
+        ├─ System tray ────> tray menu
+        └─ BlueZ provider ─> GNOME Settings battery
 ```
 
-**Two Battery Data Sources (Automatically Selected):**
+Each subscriber gets its own channel and receives the current state immediately on
+subscribing, so the interface is populated before the first advertisement arrives.
+
+**Two Battery Data Sources (Chosen Per Device):**
 
 1. **AAP Client** (Active, 1% accuracy) - **Primary when connected**
    - Apple Accessory Protocol over L2CAP (PSM 4097)
@@ -232,10 +238,14 @@ PodStateCoordinator (central state)
    - **Two-tier accuracy system**:
      - **Unencrypted**: ~10% accuracy (no key required)
      - **Encrypted**: 1% accuracy (requires one-time key retrieval via AAP)
-   - **BLE MAC Randomization**: AirPods randomize their BLE MAC address for privacy
-     - App identifies devices by trying stored encryption keys until validation succeeds
-     - Uses magic bytes (byte 0 upper nibble = 0x0, byte 4 = 0x2D) to validate decryption
-     - Encryption keys stored by real MAC address (from AAP connection)
+   - **BLE MAC Randomization**: AirPods rotate their advertised MAC continuously for
+     privacy - several distinct addresses per minute
+     - The app tries every stored key until one decrypts an advertisement
+     - Validation is by **MAC suffix**: bytes 7-9 of the decrypted payload hold the
+       last three bytes of the device's real MAC, so a payload identifies itself
+     - ⚠️ Not by magic bytes. The older marker (byte 0 upper nibble `0x0`, byte 4
+       `0x2D`) holds on neither tested model and rejects correct decryptions
+     - Encryption keys stored by real MAC address (retrieved over AAP)
    - See `docs/ble-proximity-pairing.md` and `docs/aap-key-retrieval.md` for protocol details
 
 #### BlueZ Integration
@@ -297,6 +307,9 @@ See the [LICENSE](LICENSE) file for the full license text.
 - [x] Centralized AirPods state coordination
 - [x] Comprehensive BLE protocol documentation (unencrypted + encrypted)
 - [x] **Persistent encryption key storage** (XDG Base Directory: `~/.local/share/linuxpods/`)
+- [x] **Device switcher** for tracking several pairs of AirPods at once
+- [x] **Protocol source indicator** showing whether readings came from AAP or BLE
+- [x] Unknown devices listed in the Development panel (heard over BLE, no key yet)
 
 ### 🚧 In Progress / Planned
 
@@ -306,4 +319,4 @@ See the [LICENSE](LICENSE) file for the full license text.
 - [ ] Persist UI preferences across sessions
 - [ ] Battery level notifications (low battery warnings)
 - [ ] Support for other Apple audio devices (AirPods Max, Beats, etc.)
-- [ ] Connection status indicator in UI
+
