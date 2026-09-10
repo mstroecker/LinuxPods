@@ -477,13 +477,23 @@ impl Coordinator {
     }
 
     async fn handle_battery_info(&self, info: aap::BatteryInfo, mac_addr: &str) {
-        let encryption_key = self
-            .inner
-            .read()
-            .await
-            .encryption_keys
-            .get(mac_addr)
-            .cloned();
+        // AAP packets carry battery only - no model, colour or orientation. Carry
+        // that identity forward from whatever BLE last saw for this device, so the
+        // UI does not lose the device name the moment it connects.
+        let (encryption_key, identity) = {
+            let inner = self.inner.read().await;
+            let key = inner.encryption_keys.get(mac_addr).cloned();
+            let identity = inner.devices.get(mac_addr).map(|e| {
+                (
+                    e.state.device_model,
+                    e.state.model_name.clone(),
+                    e.state.color,
+                    e.state.primary_pod,
+                )
+            });
+            (key, identity)
+        };
+        let (device_model, model_name, color, primary_pod) = identity.unwrap_or_default();
 
         let state = PodState {
             source: DataSource::Aap,
@@ -496,7 +506,11 @@ impl Coordinator {
             real_mac: mac_addr.to_string(),
             encryption_key,
             identified: true,
-            // AAP carries no in-ear, lid, model, colour or primary-pod data.
+            device_model,
+            model_name,
+            color,
+            primary_pod,
+            // AAP carries no in-ear or lid data; those stay at their defaults.
             ..Default::default()
         };
 

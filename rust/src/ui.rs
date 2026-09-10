@@ -627,8 +627,16 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
         DataSource::Ble => "BLE",
         DataSource::Unknown => "unknown",
     };
-    w.status_label.set_text(&format!(
-        "Model: 0x{:04X} • Lid: {lid} • Source: {source}",
-        state.device_model
-    ));
+    // Prefer the decoded name; fall back to the raw id only for models we do not
+    // recognise, and to a bare label when nothing has identified it yet.
+    let model = if !state.model_name.is_empty() {
+        state.model_name.clone()
+    } else if state.device_model != 0 {
+        format!("Unknown (0x{:04X})", state.device_model)
+    } else {
+        "AirPods".to_string()
+    };
+
+    w.status_label
+        .set_text(&format!("{model} • Lid: {lid} • Source: {source}"));
 }
