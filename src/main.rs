@@ -156,6 +156,14 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
     tokio::pin!(events);
     tracing::info!("watching for AirPods connections");
 
+    // Names for the device switcher. Read once up front so paired devices are
+    // labelled before any of them connects, then again on every connection event -
+    // that is when a newly paired device first shows up, and when a rename made
+    // while the app was running takes effect.
+    coordinator
+        .set_device_names(provider.device_aliases().await)
+        .await;
+
     // Attach to AirPods that are already connected.
     if let Ok(device_path) = provider.discover_airpods().await {
         attach_device(&mut provider, &coordinator, &device_path).await;
@@ -172,6 +180,8 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
                     event.device_path,
                     event.connected
                 );
+
+                coordinator.set_device_names(provider.device_aliases().await).await;
 
                 // Only react to AirPods, not every Bluetooth device on the system.
                 if !alias.contains("AirPods") {

@@ -123,7 +123,7 @@ else wanting the connection then waits forever - this deadlocked the Request Key
 ### UI
 
 - Widget updates arrive only from the snapshot stream; there is no other path into the UI.
-- Read a selection **before** mutating the widget: splicing a `StringList` makes `AdwComboRow` emit `selected-notify`,
+- Read a selection **before** mutating the widget: splicing a `StringList` makes `GtkDropDown` emit `selected-notify`,
   which will otherwise clobber the user's choice.
 - Noise Control and Features are commands, so they are insensitive unless the device is on AAP. BLE is receive-only.
 - Assets are resolved at runtime from `CARGO_MANIFEST_DIR`; a missing file fails silently, so a test asserts they exist.
