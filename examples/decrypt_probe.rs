@@ -42,13 +42,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pt = block.as_slice();
 
             let magic_ok = (pt[0] & 0xF0) == 0 && pt[4] == 0x2D;
-            let suffix: Vec<u8> = mac.split(':').skip(3)
-                .map(|b| u8::from_str_radix(b, 16).unwrap()).collect();
-            if pt[7..10] != suffix[..] { continue; }
+            let suffix: Vec<u8> = mac
+                .split(':')
+                .skip(3)
+                .map(|b| u8::from_str_radix(b, 16).unwrap())
+                .collect();
+            if pt[7..10] != suffix[..] {
+                continue;
+            }
             println!(
                 "  ct[0..4]={:02x?} -> pt={} | byte0={:02x} byte4={:02x} magic={}",
                 &ct[..4],
-                pt.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(""),
+                pt.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(""),
                 pt[0],
                 pt[4],
                 if magic_ok { "OK" } else { "FAIL" }

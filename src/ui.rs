@@ -60,10 +60,14 @@ pub fn activate(
     let syncing = Rc::new(std::cell::Cell::new(false));
 
     control.device_combo.connect_selected_notify(glib::clone!(
-        #[strong] control,
-        #[strong] selected,
-        #[strong] last_snapshot,
-        #[strong] syncing,
+        #[strong]
+        control,
+        #[strong]
+        selected,
+        #[strong]
+        last_snapshot,
+        #[strong]
+        syncing,
         move |combo| {
             if syncing.get() {
                 return;
@@ -263,14 +267,25 @@ fn create_control_view() -> (gtk::Box, ControlView) {
 
     let options = [
         ("transparency", "Transparency", "Hear the world around you"),
-        ("adaptive", "Adaptive", "Automatically adjusts to your environment"),
-        ("noise_cancelling", "Noise Cancelling", "Block out background noise"),
+        (
+            "adaptive",
+            "Adaptive",
+            "Automatically adjusts to your environment",
+        ),
+        (
+            "noise_cancelling",
+            "Noise Cancelling",
+            "Block out background noise",
+        ),
         ("off", "Off", "Noise control disabled"),
     ];
 
     let mut first_button: Option<gtk::CheckButton> = None;
     for (i, (id, title, desc)) in options.iter().enumerate() {
-        let row = adw::ActionRow::builder().title(*title).subtitle(*desc).build();
+        let row = adw::ActionRow::builder()
+            .title(*title)
+            .subtitle(*desc)
+            .build();
 
         let radio_button = gtk::CheckButton::new();
         if i == 0 {
@@ -419,11 +434,25 @@ fn create_settings_view() -> (gtk::Box, adw::PreferencesGroup) {
         .build();
 
     for (title, subtitle, active) in [
-        ("Auto-connect", "Automatically connect when AirPods are detected", true),
-        ("Battery notifications", "Show notification when battery is low", false),
+        (
+            "Auto-connect",
+            "Automatically connect when AirPods are detected",
+            true,
+        ),
+        (
+            "Battery notifications",
+            "Show notification when battery is low",
+            false,
+        ),
     ] {
-        let row = adw::ActionRow::builder().title(title).subtitle(subtitle).build();
-        let sw = gtk::Switch::builder().active(active).valign(gtk::Align::Center).build();
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .build();
+        let sw = gtk::Switch::builder()
+            .active(active)
+            .valign(gtk::Align::Center)
+            .build();
         row.add_suffix(&sw);
         row.set_activatable_widget(Some(&sw));
         settings_group.add(&row);
@@ -468,8 +497,7 @@ fn update_device_rows(
     // Known devices first, in stable key order, then anything else we have heard
     // advertising. Unknown entries are the whole point of a Development section:
     // they are how you spot a device whose key you have not captured yet.
-    let mut entries: Vec<(&String, bool)> =
-        snapshot.known_keys.iter().map(|m| (m, true)).collect();
+    let mut entries: Vec<(&String, bool)> = snapshot.known_keys.iter().map(|m| (m, true)).collect();
     let mut unknown: Vec<&String> = snapshot
         .states
         .keys()
@@ -534,7 +562,11 @@ fn update_device_rows(
             dev_group.add(&row);
             rows.insert(
                 mac_addr.clone(),
-                DeviceRow { row, status_label, request_button },
+                DeviceRow {
+                    row,
+                    status_label,
+                    request_button,
+                },
             );
         }
 
@@ -610,12 +642,24 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
         s
     };
 
-    set(&w.left_level, &w.left_label, state.left_battery,
-        &flags(state.left_charging, state.left_in_ear));
-    set(&w.right_level, &w.right_label, state.right_battery,
-        &flags(state.right_charging, state.right_in_ear));
-    set(&w.case_level, &w.case_label, state.case_battery,
-        &flags(state.case_charging, false));
+    set(
+        &w.left_level,
+        &w.left_label,
+        state.left_battery,
+        &flags(state.left_charging, state.left_in_ear),
+    );
+    set(
+        &w.right_level,
+        &w.right_label,
+        state.right_battery,
+        &flags(state.right_charging, state.right_in_ear),
+    );
+    set(
+        &w.case_level,
+        &w.case_label,
+        state.case_battery,
+        &flags(state.case_charging, false),
+    );
 
     let lid = if state.lid_open { "Open" } else { "Closed" };
     // Which protocol produced these numbers.

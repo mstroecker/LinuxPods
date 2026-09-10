@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use ksni::{Handle, MenuItem, Tray, TrayMethods};
 use ksni::menu::{CheckmarkItem, StandardItem};
+use ksni::{Handle, MenuItem, Tray, TrayMethods};
 
 use crate::podstate::Snapshot;
 
@@ -88,7 +88,12 @@ fn battery_label(name: &str, level: Option<u8>, charging: bool) -> String {
 }
 
 fn disabled(label: String) -> MenuItem<Indicator> {
-    StandardItem { label, enabled: false, ..Default::default() }.into()
+    StandardItem {
+        label,
+        enabled: false,
+        ..Default::default()
+    }
+    .into()
 }
 
 impl Tray for Indicator {

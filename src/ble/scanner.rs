@@ -69,7 +69,10 @@ impl Scanner {
 
     pub async fn stop_discovery(&self) -> Result<()> {
         let adapter = Adapter1Proxy::new(&self.conn).await?;
-        adapter.stop_discovery().await.context("failed to stop discovery")
+        adapter
+            .stop_discovery()
+            .await
+            .context("failed to stop discovery")
     }
 
     /// Yields advertisements as they arrive. Replaces the Go version's

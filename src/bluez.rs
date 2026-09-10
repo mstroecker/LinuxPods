@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 use futures_util::StreamExt;
+use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 use zbus::{Connection, MatchRule, MessageStream, interface, proxy};
 
 const BLUEZ_SERVICE: &str = "org.bluez";
@@ -93,7 +93,10 @@ impl BatteryProvider {
             .await
             .context("failed to register battery provider")?;
 
-        Ok(Self { conn, battery_path: None })
+        Ok(Self {
+            conn,
+            battery_path: None,
+        })
     }
 
     /// Adds the battery object. Registering the interface emits InterfacesAdded.
@@ -106,7 +109,11 @@ impl BatteryProvider {
             .object_server()
             .at(
                 &battery_path,
-                BatteryProvider1 { percentage, device, source: SOURCE.to_string() },
+                BatteryProvider1 {
+                    percentage,
+                    device,
+                    source: SOURCE.to_string(),
+                },
             )
             .await
             .context("failed to export battery object")?;
@@ -193,7 +200,10 @@ impl BatteryProvider {
             .path(device_path.to_string())?
             .build()
             .await?;
-        proxy.address().await.context("failed to get device address")
+        proxy
+            .address()
+            .await
+            .context("failed to get device address")
     }
 
     /// Empty string when the device is gone or has no alias.
@@ -257,7 +267,10 @@ impl BatteryProvider {
             }
 
             let connected = bool::try_from(changed.get("Connected")?.clone()).ok()?;
-            Some(ConnectionEvent { device_path, connected })
+            Some(ConnectionEvent {
+                device_path,
+                connected,
+            })
         }))
     }
 

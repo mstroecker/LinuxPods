@@ -13,7 +13,6 @@ pub const KEY_LEN: usize = 16;
 /// Where the device's MAC suffix sits inside the decrypted payload.
 const MAC_SUFFIX_RANGE: std::ops::Range<usize> = 7..10;
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum DecryptError {
     #[error("encrypted data must be {ENCRYPTED_LEN} bytes, got {0}")]

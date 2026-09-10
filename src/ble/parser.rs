@@ -116,7 +116,11 @@ impl ProximityData {
     }
 
     pub fn primary_pod(&self) -> PodSide {
-        if self.is_flipped { PodSide::Right } else { PodSide::Left }
+        if self.is_flipped {
+            PodSide::Right
+        } else {
+            PodSide::Left
+        }
     }
 }
 
@@ -254,9 +258,7 @@ mod tests {
             0x20,    // model lo -> AirPods Pro 3
             status,  //
             battery, // battery nibbles
-            charging,
-            0x00,
-            0x05, // color
+            charging, 0x00, 0x05, // color
             0x00, // lid byte: bit 3 clear -> open
             0x05, // connection state: Music
         ];
@@ -268,8 +270,14 @@ mod tests {
     #[test]
     fn rejects_malformed_input() {
         assert_eq!(parse_proximity_data(&[]), Err(ParseError::TooShort));
-        assert_eq!(parse_proximity_data(&[0x01, 0x00]), Err(ParseError::NotProximity));
-        assert_eq!(parse_proximity_data(&[0x07, 0x40]), Err(ParseError::Incomplete));
+        assert_eq!(
+            parse_proximity_data(&[0x01, 0x00]),
+            Err(ParseError::NotProximity)
+        );
+        assert_eq!(
+            parse_proximity_data(&[0x07, 0x40]),
+            Err(ParseError::Incomplete)
+        );
         assert_eq!(
             parse_proximity_data(&[0x07, 0x02, 0x00, 0x00]),
             Err(ParseError::PayloadTooShort)

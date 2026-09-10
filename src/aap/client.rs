@@ -14,8 +14,8 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use bluer::{Address, AddressType};
 use bluer::l2cap::{SeqPacket, Socket, SocketAddr};
+use bluer::{Address, AddressType};
 
 /// L2CAP Protocol/Service Multiplexer for AAP.
 pub const AAP_PSM: u16 = 0x1001; // 4097
@@ -92,18 +92,23 @@ impl Client {
         let mut last_err = None;
 
         for attempt in 1..=CONNECT_ATTEMPTS {
-            let socket = Socket::<SeqPacket>::new_seq_packet()
-                .context("failed to create L2CAP socket")?;
+            let socket =
+                Socket::<SeqPacket>::new_seq_packet().context("failed to create L2CAP socket")?;
 
             match socket.connect(sa).await {
                 Ok(sock) => {
                     let cid = sock.peer_addr().map(|a| a.cid).unwrap_or(0);
                     if cid != 0 {
-                        tracing::debug!("AAP connected to {} (cid {cid}, attempt {attempt})", self.addr);
+                        tracing::debug!(
+                            "AAP connected to {} (cid {cid}, attempt {attempt})",
+                            self.addr
+                        );
                         self.socket = Some(sock);
                         return Ok(());
                     }
-                    tracing::debug!("AAP connect attempt {attempt}: channel not established (cid 0)");
+                    tracing::debug!(
+                        "AAP connect attempt {attempt}: channel not established (cid 0)"
+                    );
                 }
                 Err(e) => {
                     tracing::debug!("AAP connect attempt {attempt} failed: {e}");
@@ -131,11 +136,13 @@ impl Client {
     }
 
     pub async fn request_battery_status(&self) -> Result<()> {
-        self.send_packet(&PACKET_BATTERY_REQUEST, "battery request").await
+        self.send_packet(&PACKET_BATTERY_REQUEST, "battery request")
+            .await
     }
 
     pub async fn enable_special_features(&self) -> Result<()> {
-        self.send_packet(&PACKET_ENABLE_FEATURES, "feature enable").await
+        self.send_packet(&PACKET_ENABLE_FEATURES, "feature enable")
+            .await
     }
 
     /// Requests the keys used to decrypt BLE proximity advertisements. The
@@ -163,7 +170,10 @@ impl Client {
     pub async fn read_packet(&self) -> Result<Vec<u8>> {
         let socket = self.socket.as_ref().context("not connected")?;
         let mut buf = vec![0u8; READ_BUF_LEN];
-        let n = socket.recv(&mut buf).await.context("failed to read packet")?;
+        let n = socket
+            .recv(&mut buf)
+            .await
+            .context("failed to read packet")?;
         buf.truncate(n);
         Ok(buf)
     }

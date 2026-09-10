@@ -145,7 +145,9 @@ mod tests {
     #[test]
     fn rejects_non_battery_packets() {
         assert!(!is_battery_packet(&[0x04, 0x00]));
-        assert!(!is_battery_packet(&[0x04, 0x00, 0x04, 0x00, 0x31, 0x00, 0x01]));
+        assert!(!is_battery_packet(&[
+            0x04, 0x00, 0x04, 0x00, 0x31, 0x00, 0x01
+        ]));
         assert_eq!(
             parse_battery_packet(&[0x00; 7]),
             Err(BatteryParseError::NotBatteryPacket)
@@ -182,7 +184,10 @@ mod tests {
     fn detects_truncated_entries() {
         let mut p = packet(&[(4, 80, 2), (2, 75, 1)]);
         p.truncate(p.len() - 3); // cut into the second entry
-        assert_eq!(parse_battery_packet(&p), Err(BatteryParseError::Incomplete(12)));
+        assert_eq!(
+            parse_battery_packet(&p),
+            Err(BatteryParseError::Incomplete(12))
+        );
     }
 
     #[test]
