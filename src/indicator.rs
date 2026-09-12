@@ -110,7 +110,7 @@ impl Tray for Indicator {
         };
         let description = match lowest {
             Some(v) => format!("AirPods - {v}%"),
-            None => "Searching for AirPods...".to_string(),
+            None => "Searching for AirPods…".to_string(),
         };
         ksni::ToolTip {
             title: "LinuxPods".into(),

@@ -78,6 +78,10 @@ const APP_ICON: &str = "com.linuxpods.app";
 /// worn, and headphones read as "audio device" rather than "in an ear".
 const IN_EAR_ICON: &str = "linuxpods-in-ear-symbolic";
 
+/// The app icon as a symbolic, for the empty state. Bundled, so it resolves
+/// without an install.
+const APP_SYMBOLIC_ICON: &str = "com.linuxpods.app-symbolic";
+
 const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
 
 /// Window action for noise control. Its state names the mode shown, by
@@ -263,6 +267,11 @@ pub fn activate(
             }
             syncing.set(false);
 
+            // With no stored key there is no device to show; the empty state says
+            // how to get one.
+            let page = if macs.is_empty() { "empty" } else { "device" };
+            control.content.set_visible_child_name(page);
+
             render_device(&control, &snapshot, chosen.as_deref());
             update_device_rows(&dev_group, &device_rows, &snapshot, &coordinator, &runtime);
             *last_snapshot.borrow_mut() = Some(snapshot);
@@ -295,7 +304,7 @@ fn setup_ui(
         .tooltip_text("Main Menu")
         .build();
 
-    let (control_page, control) = create_control_view();
+    let control = create_control_view();
     let (prefs, dev_group) = create_preferences_dialog();
 
     // The device switcher takes the title's place when there is a choice to
@@ -318,7 +327,7 @@ fn setup_ui(
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header_bar);
-    toolbar_view.set_content(Some(&control_page));
+    toolbar_view.set_content(Some(&control.content));
 
     win.set_content(Some(&toolbar_view));
 
@@ -342,6 +351,9 @@ fn show_about(win: &adw::ApplicationWindow) {
 
 /// Everything on the Control page the update loop needs to touch.
 pub struct ControlView {
+    /// The window's content: the Control page as `device`, or the empty state
+    /// as `empty` while no device has a stored key.
+    pub content: gtk::Stack,
     pub battery: BatteryWidgets,
     /// The device switcher, in the header bar in place of the title; hidden
     /// unless more than one device is identified.
@@ -361,7 +373,7 @@ pub struct ControlView {
 
 /// The Control page. An `AdwPreferencesPage` for its scrolling, width clamp and
 /// group spacing, although only the lower half is a list of settings.
-fn create_control_view() -> (adw::PreferencesPage, ControlView) {
+fn create_control_view() -> ControlView {
     let page = adw::PreferencesPage::new();
 
     // Battery display and status line. Not rows, so they share a plain box in an
@@ -451,7 +463,7 @@ fn create_control_view() -> (adw::PreferencesPage, ControlView) {
 
     control_box.append(&battery_box);
 
-    let status_label = gtk::Label::new(Some("Searching for AirPods..."));
+    let status_label = gtk::Label::new(Some("Searching for AirPods…"));
     status_label.add_css_class("dim-label");
     status_label.set_margin_top(10);
     control_box.append(&status_label);
@@ -536,7 +548,12 @@ fn create_control_view() -> (adw::PreferencesPage, ControlView) {
     conversation_group.add(&conversation_row);
     page.add(&conversation_group);
 
-    let view = ControlView {
+    let content = gtk::Stack::new();
+    content.add_named(&page, Some("device"));
+    content.add_named(&create_empty_state(), Some("empty"));
+
+    ControlView {
+        content,
         battery: widgets,
         device_dropdown,
         device_list,
@@ -544,9 +561,29 @@ fn create_control_view() -> (adw::PreferencesPage, ControlView) {
         device_labels: RefCell::new(Vec::new()),
         noise_action,
         features_group: conversation_group,
-    };
+    }
+}
 
-    (page, view)
+/// Shown instead of the Control page until a device has a stored key. The page
+/// and the switcher follow the keystore, and a key is stored only when
+/// requested, so a newly connected pair would otherwise sit behind empty bars.
+fn create_empty_state() -> adw::StatusPage {
+    let open_prefs = gtk::Button::builder()
+        .label("Open Preferences")
+        .action_name("win.preferences")
+        .halign(gtk::Align::Center)
+        .build();
+    open_prefs.add_css_class("pill");
+    open_prefs.add_css_class("suggested-action");
+
+    adw::StatusPage::builder()
+        .icon_name(APP_SYMBOLIC_ICON)
+        .title("No AirPods Set Up")
+        .description(
+            "Connect your AirPods to this computer, then request their keys in Preferences",
+        )
+        .child(&open_prefs)
+        .build()
 }
 
 /// The action target naming a mode. Stable identifiers, not labels, so the
@@ -771,7 +808,7 @@ fn update_device_rows(
                 request_button,
                 move |_| {
                     request_button.set_sensitive(false);
-                    request_button.set_label("Requesting...");
+                    request_button.set_label("Requesting…");
 
                     let (tx, rx) = async_channel::bounded(1);
                     let coord = coord.clone();
@@ -780,14 +817,24 @@ fn update_device_rows(
                     });
 
                     glib::spawn_future_local(async move {
-                        match rx.recv().await {
-                            Ok(Ok(())) => request_button.set_label("Request Keys"),
-                            Ok(Err(e)) => {
-                                tracing::warn!("key request failed: {e}");
-                                request_button.set_label("Error - Retry");
+                        let failure = match rx.recv().await {
+                            Ok(Ok(())) => None,
+                            Ok(Err(e)) => Some(format!("{e:#}")),
+                            Err(_) => Some("the request task ended without replying".into()),
+                        };
+                        // A failure is an event, not a state of the button: it goes
+                        // to a toast, and the button is ready to try again as is.
+                        // The dialog it sits in carries its own toast overlay.
+                        if let Some(reason) = failure {
+                            tracing::warn!("key request failed: {reason}");
+                            if let Some(dialog) = request_button
+                                .ancestor(adw::PreferencesDialog::static_type())
+                                .and_downcast::<adw::PreferencesDialog>()
+                            {
+                                dialog.add_toast(adw::Toast::new("Couldn’t request keys"));
                             }
-                            Err(_) => request_button.set_label("Error - Retry"),
                         }
+                        request_button.set_label("Request Keys");
                         request_button.set_sensitive(true);
                     });
                 }
@@ -931,6 +978,7 @@ mod tests {
         let icons = [
             format!("icons/scalable/apps/{APP_ICON}.svg"),
             format!("icons/scalable/status/{IN_EAR_ICON}.svg"),
+            format!("icons/scalable/apps/{APP_SYMBOLIC_ICON}.svg"),
         ];
         for name in BATTERY_IMAGES
             .into_iter()
