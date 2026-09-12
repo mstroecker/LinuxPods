@@ -84,6 +84,13 @@ clobbering the user's choice. Noise Control and Features are commands, so they s
 insensitive unless the device is on AAP; BLE is receive-only. Assets resolve at runtime
 from `CARGO_MANIFEST_DIR` and fail silently when missing, so a test asserts they exist.
 
+## Commits and pull requests
+
+Do **not** put the Claude session URL in commit messages or pull request descriptions -
+neither a `Claude-Session:` trailer nor a bare `https://claude.ai/code/session_...` link.
+The links resolve for nobody but the author, and they outlive the session they point at.
+A `Co-Authored-By:` trailer is fine.
+
 ## Documentation
 
 - `docs/ble-proximity-pairing.md` - proximity pairing, decrypted layout, suffix validation
