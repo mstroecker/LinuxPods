@@ -52,6 +52,10 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
 
 ## Protocol
 
+**Keys are requested on every AAP connection**, not only when none is stored. Re-pairing
+regenerates them, and a stale key fails suffix validation without a word, dropping BLE
+to 10% steps. The request is one packet; `aap_read_loop` stores whatever key comes back.
+
 **BLE validation is by MAC suffix.** Bytes 7-9 of the decrypted payload hold the last
 three bytes of the real MAC; a match both validates and identifies. A connected device
 zeroes the field, so `00 00 00` is accepted too - identification comes from *which key*
