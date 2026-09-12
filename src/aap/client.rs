@@ -17,6 +17,8 @@ use anyhow::{Context, Result};
 use bluer::l2cap::{SeqPacket, Socket, SocketAddr};
 use bluer::{Address, AddressType};
 
+use crate::aap::noise;
+
 /// L2CAP Protocol/Service Multiplexer for AAP.
 pub const AAP_PSM: u16 = 0x1001; // 4097
 
@@ -149,6 +151,19 @@ impl Client {
     /// response arrives asynchronously and is handled by the read loop.
     pub async fn request_proximity_keys(&self) -> Result<()> {
         self.send_packet(&PACKET_KEY_REQUEST, "key request").await
+    }
+
+    /// Switches the noise control mode.
+    ///
+    /// Fire and forget: the device answers with a generic settings-changed
+    /// notification that names neither the sub-command nor the mode, and the
+    /// 0x0D echo carrying the new mode arrives only sometimes. There is nothing
+    /// here to wait for - the caller updates its own state optimistically.
+    /// `enable_special_features` must have been sent first, or Adaptive is
+    /// unavailable.
+    pub async fn set_noise_mode(&self, mode: noise::NoiseMode) -> Result<()> {
+        self.send_packet(&noise::set_packet(mode), "noise control")
+            .await
     }
 
     /// Sends a packet, verifying the whole thing was written.
