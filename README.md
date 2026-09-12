@@ -278,11 +278,11 @@ Contributions are welcome! Please:
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). This means:
+This project is licensed under the GNU General Public License v3.0 or later (`GPL-3.0-or-later`). This means:
 
 - You can freely use, modify, and distribute this software
-- If you modify and distribute this software, you must share your source code under the same license
-- If you run a modified version as a network service, you must make your source code available to users
+- If you distribute this software, modified or not, you must pass on the source code under the same license
+- There is no warranty
 
 See the [LICENSE](LICENSE) file for the full license text.
 
