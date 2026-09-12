@@ -7,24 +7,41 @@ A native GNOME desktop application for managing Apple AirPods on Linux.
 
 ## Features
 
-- **Real-time battery** for the left pod, right pod and case, with charging (⚡) and
-  in-ear (👂) indicators.
-- **Two sources, chosen per device.** A connected device reports exact levels over the
-  Apple Accessory Protocol; everything else is read passively from BLE advertisements.
-  Connecting one pair does not blind the rest.
-- **Works while the AirPods are connected to something else** - an iPhone, say - because
-  BLE monitoring needs no connection of its own.
-- **1% accuracy over BLE**, once a one-time key retrieval over AAP lets the app decrypt
-  the advertisements. Without a key, readings come in ~10% steps.
-- **Survives BLE MAC randomization.** AirPods rotate their advertised address every few
-  seconds; decryption maps each one back to the real device.
-- **Multiple devices** tracked at once, with a switcher.
-- **System tray** battery display and quick actions via StatusNotifierItem.
-- **GNOME Settings integration** - the lowest of the three levels appears in the Power
-  panel, through BlueZ's battery provider API.
+What the AirPods can do, and how much of it LinuxPods supports.
 
-Planned: noise control mode switching, and the conversation awareness toggle. Both have
-their interface built; the AAP commands behind them are still unknown.
+| Feature | Status |
+| --- | --- |
+| Battery level - left pod, right pod, case | ✅ |
+| Charging state, per pod and case | ✅ |
+| In-ear detection | ✅ |
+| Case lid open/closed | ✅ |
+| Playback state - idle, music, call, ringing | ✅ |
+| Model and colour identification | ✅ |
+| Exact (1%) battery over BLE, via decryption | ✅ |
+| Identification behind a randomized BLE MAC | ✅ |
+| Noise control - Transparency, Adaptive, ANC, Off | 🚧 |
+| Conversation Awareness | 🚧 |
+| Device rename | 📋 |
+| Press-and-hold gesture configuration | 📋 |
+| Personalized and adaptive volume | 📋 |
+| Loud sound reduction | 📋 |
+| Firmware version | 📋 |
+| Ear tip fit test | ❌ |
+| Spatial audio and head tracking | ❌ |
+| Find My and Precision Finding | ❌ |
+| Hearing aid and hearing test | ❌ |
+| Automatic device switching between Apple devices | ❌ |
+| Announce notifications | ❌ |
+
+✅ fully working &nbsp;·&nbsp; 🚧 partial &nbsp;·&nbsp; 📋 planned &nbsp;·&nbsp; ❌ not planned
+
+🚧 means the interface is built but the AAP command behind it is still unknown.
+❌ means the feature depends on something Linux has no access to - Apple's audio
+pipeline, the U1 chip, or iCloud - rather than on work nobody has done yet.
+
+Alongside those, LinuxPods reads **multiple pairs at once**, keeps working **while the
+AirPods are connected to something else** such as an iPhone, and surfaces the battery in
+the **system tray** and in **GNOME Settings → Power**.
 
 ## Supported devices
 
