@@ -6,6 +6,8 @@
 
 use linuxpods::{ble, bluez, indicator, podstate, ui};
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
@@ -75,6 +77,17 @@ fn main() -> glib::ExitCode {
         }
     };
 
+    // Ours, not GTK's: the application rejects options it does not know, so the
+    // flag is taken out of the list before it ever sees it.
+    let mut minimized = false;
+    let args: Vec<String> = std::env::args()
+        .filter(|arg| {
+            let ours = arg == "--minimized";
+            minimized |= ours;
+            !ours
+        })
+        .collect();
+
     let (window_tx, window_rx) = async_channel::unbounded::<WindowCommand>();
 
     // Background workers.
@@ -92,8 +105,25 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     let handle = runtime.handle().clone();
 
+    // Activation runs again whenever the app is launched while already running -
+    // from the launcher entry, say - and the window from the first run is the one
+    // to raise. Building a second would leave two windows on one coordinator.
+    let window: Rc<RefCell<Option<adw::ApplicationWindow>>> = Rc::new(RefCell::new(None));
+
     app.connect_activate(move |app| {
+        if let Some(win) = window.borrow().as_ref() {
+            win.present();
+            return;
+        }
+
         let win = ui::activate(app, coordinator.clone(), handle.clone());
+        *window.borrow_mut() = Some(win.clone());
+
+        // --minimized hands the app to the tray: the window is built, which is
+        // what keeps GTK running, but stays hidden until something asks for it.
+        if !minimized {
+            win.present();
+        }
 
         // Tray commands arrive here, on the main context, where touching the
         // window is legal.
@@ -109,7 +139,7 @@ fn main() -> glib::ExitCode {
         });
     });
 
-    let code = app.run();
+    let code = app.run_with_args(&args);
     // Keep the runtime alive until GTK returns.
     drop(runtime);
     code

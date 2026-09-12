@@ -34,7 +34,8 @@ fn asset(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Mirrors ui.Activate.
+/// Builds the window and wires it to the coordinator. The caller presents it,
+/// so that `--minimized` can leave it built but hidden.
 pub fn activate(
     app: &adw::Application,
     coordinator: std::sync::Arc<Coordinator>,
@@ -47,7 +48,6 @@ pub fn activate(
 
     let (control, dev_group) = setup_ui(&win);
     let control = Rc::new(control);
-    win.present();
 
     // Set while the radio buttons are being brought in line with a snapshot, so
     // the toggle that causes does not go straight back out as a command.
