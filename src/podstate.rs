@@ -7,12 +7,21 @@
 //! The choice is per device, not global: an AAP connection to one pair of AirPods
 //! must not stop a second pair from being tracked over BLE.
 //!
+//! # BLE is cached, AAP is not
+//!
+//! The last advertisement of every device is kept, including the connected
+//! device's own advertisements while AAP supersedes them. When the link drops the
+//! cached reading takes over at once, rather than the device going blank until
+//! it next advertises - which, lid closed in the case, can be a long wait. AAP
+//! state is only ever the live link's and goes with it.
+//!
 //! # Why entries expire
 //!
 //! When no stored key decrypts an advertisement, its state is keyed by the
 //! *randomized* BLE MAC - and those rotate for privacy, several per minute per
 //! device. Without eviction the map grows for as long as the app runs. Every entry
-//! carries a `last_seen` and [`Inner::prune`] drops stale ones.
+//! carries a `last_seen` and [`Inner::prune`] drops stale ones: identified devices
+//! after [`BLE_CACHE_TTL`], the rest after [`DEVICE_TTL`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,9 +36,14 @@ use crate::ble::decrypt::decrypt_for_device;
 use crate::ble::parser::{PodSide, ProximityData};
 use crate::keystore::Keystore;
 
-/// How long a device may go unseen before its state is dropped. Bounds the map
-/// against rotating BLE MACs.
+/// How long an unidentified device may go unseen before its state is dropped.
+/// Bounds the map against rotating BLE MACs.
 pub const DEVICE_TTL: Duration = Duration::from_secs(120);
+
+/// How long the last advertisement of an identified device stays on show. Keyed
+/// by the real MAC, these do not rotate, so the map stays bounded by the number of
+/// stored keys.
+pub const BLE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DataSource {
@@ -95,6 +109,10 @@ pub struct PodState {
     /// for BLE only when a stored key decrypted the advertisement. Unidentified
     /// advertisements are deliberately kept out of the main UI.
     pub identified: bool,
+
+    /// When the advertisement behind a BLE reading arrived; it may be a cached
+    /// one up to [`BLE_CACHE_TTL`] old. `None` for AAP, which is always live.
+    pub last_seen: Option<Instant>,
 }
 
 impl PodState {
@@ -152,7 +170,11 @@ struct Entry {
 }
 
 struct Inner {
-    devices: HashMap<String, Entry>,
+    /// The last advertisement per device - BLE only. The connected device's entry
+    /// keeps updating underneath AAP, so it is current when the link drops.
+    ble: HashMap<String, Entry>,
+    /// The reading from the AAP link to `connected_mac`. Never outlives the link.
+    aap: Option<PodState>,
     encryption_keys: HashMap<String, Vec<u8>>,
     connected_mac: Option<String>,
     device_names: HashMap<String, String>,
@@ -167,47 +189,50 @@ struct Inner {
 }
 
 impl Inner {
-    /// Drops devices unseen for longer than `ttl`. This is what keeps rotating
-    /// BLE MACs from accumulating forever.
-    fn prune(&mut self, now: Instant, ttl: Duration) {
-        self.devices
-            .retain(|_, e| now.duration_since(e.last_seen) < ttl);
-    }
-
-    /// Drops a device's state if it came from AAP.
-    ///
-    /// After the link goes the readings are no longer current, and leaving them in
-    /// place left the UI reporting "Source: AAP" for a device that had disconnected.
-    /// BLE repopulates within a second or two if the device is still in range.
-    fn drop_aap_state(&mut self, mac: &str) {
-        if self
-            .devices
-            .get(mac)
-            .is_some_and(|e| e.state.source == DataSource::Aap)
-        {
-            self.devices.remove(mac);
-        }
+    /// Drops BLE readings older than their TTL, returning whether any went. This
+    /// is what keeps rotating BLE MACs from accumulating forever.
+    fn prune(&mut self, now: Instant) -> bool {
+        let before = self.ble.len();
+        self.ble.retain(|_, e| {
+            let ttl = if e.state.identified {
+                BLE_CACHE_TTL
+            } else {
+                DEVICE_TTL
+            };
+            now.duration_since(e.last_seen) < ttl
+        });
+        self.ble.len() != before
     }
 
     fn snapshot(&self) -> Snapshot {
         let mut known_keys: Vec<String> = self.encryption_keys.keys().cloned().collect();
         known_keys.sort();
 
+        let connected = self.connected_mac.as_deref();
+        let mut states: HashMap<String, PodState> = self
+            .ble
+            .iter()
+            // Hidden even before the first AAP packet: a BLE reading would leave
+            // the controls insensitive on a device we can command.
+            .filter(|(mac, _)| !supersedes_ble(connected, mac))
+            .map(|(mac, entry)| {
+                let mut state = entry.state.clone();
+                state.last_seen = Some(entry.last_seen);
+                (mac.clone(), state)
+            })
+            .collect();
+
+        if let (Some(mac), Some(aap)) = (connected, &self.aap) {
+            let mut state = aap.clone();
+            // Only the device on AAP has a mode we can vouch for. A cached one
+            // from an earlier session would sit there as a selected radio button
+            // for a device we cannot command.
+            state.noise_mode = self.noise_modes.get(mac).copied();
+            states.insert(mac.to_string(), state);
+        }
+
         Snapshot {
-            states: self
-                .devices
-                .iter()
-                .map(|(mac, entry)| {
-                    let mut state = entry.state.clone();
-                    // Only the device on AAP has a mode we can vouch for. A
-                    // cached one from an earlier session would sit there as a
-                    // selected radio button for a device we cannot command.
-                    if self.connected_mac.as_deref() == Some(mac.as_str()) {
-                        state.noise_mode = self.noise_modes.get(mac).copied();
-                    }
-                    (mac.clone(), state)
-                })
-                .collect(),
+            states,
             connected_mac: self.connected_mac.clone(),
             known_keys,
             device_names: self.device_names.clone(),
@@ -247,7 +272,8 @@ impl Coordinator {
 
         Ok(Arc::new(Self {
             inner: RwLock::new(Inner {
-                devices: HashMap::new(),
+                ble: HashMap::new(),
+                aap: None,
                 encryption_keys: loaded,
                 connected_mac: None,
                 device_names: HashMap::new(),
@@ -319,23 +345,22 @@ impl Coordinator {
         self.inner.read().await.connected_mac.clone()
     }
 
+    /// Number of devices a snapshot would show.
     pub async fn device_count(&self) -> usize {
-        self.inner.read().await.devices.len()
+        self.inner.read().await.snapshot().states.len()
     }
 
-    /// Stores a state under `mac`, prunes stale devices, and broadcasts.
-    async fn publish(&self, mac: String, state: PodState) {
+    /// Drops expired BLE readings, broadcasting if any went.
+    ///
+    /// Pruning also happens on every advertisement, but a cached reading has to
+    /// expire even when nothing is advertising at all - that is exactly when it is
+    /// on show.
+    pub async fn expire(&self) {
         let snapshot = {
             let mut inner = self.inner.write().await;
-            let now = Instant::now();
-            inner.devices.insert(
-                mac,
-                Entry {
-                    state,
-                    last_seen: now,
-                },
-            );
-            inner.prune(now, DEVICE_TTL);
+            if !inner.prune(Instant::now()) {
+                return;
+            }
             inner.snapshot()
         };
         self.broadcast(snapshot);
@@ -378,18 +403,9 @@ impl Coordinator {
     /// keep advertising and must still be tracked, so the decision is made per
     /// device after identification rather than globally.
     pub async fn handle_advertisement(&self, mut data: ProximityData, ble_mac: String) {
-        let connected = self.inner.read().await.connected_mac.clone();
-
         let real_mac = self.identify_and_decrypt(&mut data, &ble_mac).await;
         let identified = real_mac.is_some();
         let key_mac = real_mac.clone().unwrap_or_else(|| ble_mac.clone());
-
-        // AAP data for this device is exact and current; its own advertisements are
-        // coarser and lag behind, so letting them through would overwrite good data
-        // with worse data.
-        if supersedes_ble(connected.as_deref(), &key_mac) {
-            return;
-        }
 
         let encryption_key = self
             .inner
@@ -422,6 +438,8 @@ impl Coordinator {
             current_ble_mac: ble_mac,
             encryption_key,
             identified,
+            // Stamped from the entry in `snapshot`.
+            last_seen: None,
         };
 
         tracing::debug!(
@@ -449,7 +467,28 @@ impl Coordinator {
                 .join(" ")
         );
 
-        self.publish(key_mac, state).await;
+        let snapshot = {
+            let mut inner = self.inner.write().await;
+            let now = Instant::now();
+            // Recorded even while AAP supersedes it, so that the reading is
+            // current the moment the link drops.
+            inner.ble.insert(
+                key_mac.clone(),
+                Entry {
+                    state,
+                    last_seen: now,
+                },
+            );
+            let pruned = inner.prune(now);
+            // AAP data for this device is exact and current; its own
+            // advertisements are coarser and lag behind, and nothing a snapshot
+            // shows has changed - unless the prune dropped something.
+            if supersedes_ble(inner.connected_mac.as_deref(), &key_mac) && !pruned {
+                return;
+            }
+            inner.snapshot()
+        };
+        self.broadcast(snapshot);
     }
 
     /// Opens an AAP connection and performs the handshake sequence.
@@ -478,6 +517,7 @@ impl Coordinator {
         let snapshot = {
             let mut inner = self.inner.write().await;
             inner.connected_mac = Some(mac_addr.to_string());
+            inner.aap = None;
             inner.snapshot()
         };
         self.broadcast(snapshot);
@@ -502,16 +542,17 @@ impl Coordinator {
             // Wakes a read loop parked in recv so it can exit and drop its Arc.
             client.shutdown();
             tracing::info!(
-                "AAP disconnected from {mac} - its BLE advertisements count again",
+                "AAP disconnected from {mac} - showing its last BLE advertisement",
                 mac = mac.as_deref().unwrap_or("device")
             );
         }
         let snapshot = {
             let mut inner = self.inner.write().await;
             inner.connected_mac = None;
-            if let Some(mac) = &mac {
-                inner.drop_aap_state(mac);
-            }
+            // After the link goes its readings are no longer current; kept, they
+            // left the UI reporting "Source: AAP" for a disconnected device. The
+            // cached advertisement shows through in their place.
+            inner.aap = None;
             inner.snapshot()
         };
 
@@ -578,18 +619,17 @@ impl Coordinator {
     async fn handle_battery_info(&self, info: aap::BatteryInfo, mac_addr: &str) {
         // AAP packets carry battery only - no model, colour or orientation. Carry
         // that identity forward from whatever BLE last saw for this device, so the
-        // UI does not lose the device name the moment it connects.
+        // UI does not lose the device name the moment it connects. The previous
+        // AAP reading covers a device that has not advertised yet.
         let (encryption_key, identity) = {
             let inner = self.inner.read().await;
             let key = inner.encryption_keys.get(mac_addr).cloned();
-            let identity = inner.devices.get(mac_addr).map(|e| {
-                (
-                    e.state.device_model,
-                    e.state.model_name.clone(),
-                    e.state.color,
-                    e.state.primary_pod,
-                )
-            });
+            let identity = inner
+                .ble
+                .get(mac_addr)
+                .map(|e| &e.state)
+                .or(inner.aap.as_ref())
+                .map(|s| (s.device_model, s.model_name.clone(), s.color, s.primary_pod));
             (key, identity)
         };
         let (device_model, model_name, color, primary_pod) = identity.unwrap_or_default();
@@ -621,7 +661,17 @@ impl Coordinator {
             state.case_battery
         );
 
-        self.publish(mac_addr.to_string(), state).await;
+        let snapshot = {
+            let mut inner = self.inner.write().await;
+            // A packet read just before a disconnect must not bring back AAP
+            // state for a link that is gone.
+            if inner.connected_mac.as_deref() != Some(mac_addr) {
+                return;
+            }
+            inner.aap = Some(state);
+            inner.snapshot()
+        };
+        self.broadcast(snapshot);
     }
 
     /// Records a mode the device reported, and broadcasts if it changed.
@@ -686,8 +736,13 @@ impl Coordinator {
             inner
                 .encryption_keys
                 .insert(mac_addr.to_string(), key.to_vec());
-            if let Some(entry) = inner.devices.get_mut(mac_addr) {
+            if let Some(entry) = inner.ble.get_mut(mac_addr) {
                 entry.state.encryption_key = Some(key.to_vec());
+            }
+            if inner.connected_mac.as_deref() == Some(mac_addr) {
+                if let Some(state) = inner.aap.as_mut() {
+                    state.encryption_key = Some(key.to_vec());
+                }
             }
         }
 
@@ -739,10 +794,11 @@ mod tests {
 
     fn inner_with(devices: Vec<(&str, Duration)>) -> Inner {
         Inner {
-            devices: devices
+            ble: devices
                 .into_iter()
                 .map(|(m, age)| (m.to_string(), entry(age)))
                 .collect(),
+            aap: None,
             encryption_keys: HashMap::new(),
             connected_mac: None,
             device_names: HashMap::new(),
@@ -756,10 +812,35 @@ mod tests {
             ("fresh", Duration::from_secs(1)),
             ("stale", Duration::from_secs(300)),
         ]);
-        inner.prune(Instant::now(), DEVICE_TTL);
+        assert!(inner.prune(Instant::now()));
 
-        assert!(inner.devices.contains_key("fresh"));
-        assert!(!inner.devices.contains_key("stale"));
+        assert!(inner.ble.contains_key("fresh"));
+        assert!(!inner.ble.contains_key("stale"));
+        assert!(!inner.prune(Instant::now()), "nothing left to expire");
+    }
+
+    /// An identified device's last advertisement outlives the unidentified TTL,
+    /// so a reading is still there after the AirPods go quiet in their case.
+    #[test]
+    fn identified_readings_are_cached_for_the_cache_ttl() {
+        let now = Instant::now();
+        let mut inner = inner_with(vec![]);
+        for (mac, age) in [("recent", 10 * 60), ("expired", 31 * 60)] {
+            inner.ble.insert(
+                mac.into(),
+                Entry {
+                    state: PodState {
+                        identified: true,
+                        ..Default::default()
+                    },
+                    last_seen: now - Duration::from_secs(age),
+                },
+            );
+        }
+
+        inner.prune(now);
+        assert!(inner.ble.contains_key("recent"));
+        assert!(!inner.ble.contains_key("expired"));
     }
 
     /// The Go original had no eviction at all, so a run of rotating BLE MACs grew
@@ -772,21 +853,21 @@ mod tests {
         // 500 rotations, one every 30s - far past the TTL.
         for i in 0..500 {
             let now = start + Duration::from_secs(i * 30);
-            inner.devices.insert(
+            inner.ble.insert(
                 format!("random-mac-{i}"),
                 Entry {
                     state: PodState::default(),
                     last_seen: now,
                 },
             );
-            inner.prune(now, DEVICE_TTL);
+            inner.prune(now);
         }
 
         // Only entries inside the 120s window survive.
         assert!(
-            inner.devices.len() <= 5,
+            inner.ble.len() <= 5,
             "expected bounded map, got {} entries",
-            inner.devices.len()
+            inner.ble.len()
         );
     }
 
@@ -809,43 +890,83 @@ mod tests {
         );
     }
 
-    /// Regression: a dropped AAP link left the UI reporting Source: AAP forever,
-    /// because the stale state stayed in the map and nothing was broadcast.
-    #[test]
-    fn disconnect_drops_stale_aap_state() {
-        let mut inner = inner_with(vec![]);
-        inner.devices.insert(
-            "aa".into(),
-            Entry {
-                state: PodState {
-                    source: DataSource::Aap,
-                    ..Default::default()
-                },
-                last_seen: Instant::now(),
-            },
-        );
-
-        inner.drop_aap_state("aa");
-        assert!(!inner.devices.contains_key("aa"));
+    fn aap_state(left: u8) -> PodState {
+        PodState {
+            source: DataSource::Aap,
+            left_battery: Some(left),
+            ..Default::default()
+        }
     }
 
+    fn ble_state(left: u8) -> PodState {
+        PodState {
+            source: DataSource::Ble,
+            left_battery: Some(left),
+            identified: true,
+            ..Default::default()
+        }
+    }
+
+    /// While AAP is up the device shows its exact reading, and its cached
+    /// advertisement stays out of sight - AAP is always live.
     #[test]
-    fn disconnect_keeps_ble_state() {
+    fn aap_hides_the_connected_devices_ble_reading() {
         let mut inner = inner_with(vec![]);
-        inner.devices.insert(
+        inner.ble.insert(
             "aa".into(),
             Entry {
-                state: PodState {
-                    source: DataSource::Ble,
-                    ..Default::default()
-                },
+                state: ble_state(70),
                 last_seen: Instant::now(),
             },
         );
+        inner.connected_mac = Some("aa".into());
 
-        // A BLE reading is still the best we have; only AAP state goes stale here.
-        inner.drop_aap_state("aa");
-        assert!(inner.devices.contains_key("aa"));
+        assert!(
+            !inner.snapshot().states.contains_key("aa"),
+            "before the first AAP packet the device waits for data"
+        );
+
+        inner.aap = Some(aap_state(83));
+        let snap = inner.snapshot();
+        assert_eq!(snap.states["aa"].source, DataSource::Aap);
+        assert_eq!(snap.states["aa"].left_battery, Some(83));
+        assert_eq!(snap.states["aa"].last_seen, None);
+    }
+
+    /// The point of the cache: after a disconnect the last advertisement shows at
+    /// once, instead of nothing until the device next advertises. Regression, too:
+    /// a dropped link once left the UI reporting Source: AAP forever.
+    #[test]
+    fn disconnect_falls_back_to_the_cached_advertisement() {
+        let seen = Instant::now() - Duration::from_secs(90);
+        let mut inner = inner_with(vec![]);
+        inner.ble.insert(
+            "aa".into(),
+            Entry {
+                state: ble_state(70),
+                last_seen: seen,
+            },
+        );
+        inner.connected_mac = Some("aa".into());
+        inner.aap = Some(aap_state(83));
+
+        // What disconnect_aap does.
+        inner.connected_mac = None;
+        inner.aap = None;
+
+        let snap = inner.snapshot();
+        assert_eq!(snap.states["aa"].source, DataSource::Ble);
+        assert_eq!(snap.states["aa"].left_battery, Some(70));
+        assert_eq!(snap.states["aa"].last_seen, Some(seen));
+    }
+
+    /// AAP state belongs to the link, so a device that is no longer connected
+    /// never shows it, whatever is left in the slot.
+    #[test]
+    fn aap_state_is_never_shown_without_the_link() {
+        let mut inner = inner_with(vec![]);
+        inner.aap = Some(aap_state(83));
+        assert!(inner.snapshot().states.is_empty());
     }
 
     /// The mode is only reported over AAP, so it may only be shown for the
@@ -853,10 +974,7 @@ mod tests {
     /// every battery packet, which is what dropped it in the Go version.
     #[test]
     fn snapshot_attaches_the_mode_to_the_connected_device_only() {
-        let mut inner = inner_with(vec![
-            ("aa", Duration::from_secs(1)),
-            ("bb", Duration::from_secs(1)),
-        ]);
+        let mut inner = inner_with(vec![("bb", Duration::from_secs(1))]);
         inner
             .noise_modes
             .insert("aa".into(), aap::NoiseMode::Adaptive);
@@ -864,6 +982,7 @@ mod tests {
             .noise_modes
             .insert("bb".into(), aap::NoiseMode::Transparency);
         inner.connected_mac = Some("aa".into());
+        inner.aap = Some(aap_state(80));
 
         let snap = inner.snapshot();
         assert_eq!(snap.states["aa"].noise_mode, Some(aap::NoiseMode::Adaptive));
@@ -872,13 +991,9 @@ mod tests {
             "a device we cannot command must not show a selected mode"
         );
 
-        // A battery packet replaces the whole entry; the mode survives because it
+        // A battery packet replaces the whole state; the mode survives because it
         // never lived there.
-        inner.devices.get_mut("aa").unwrap().state = PodState {
-            source: DataSource::Aap,
-            left_battery: Some(80),
-            ..Default::default()
-        };
+        inner.aap = Some(aap_state(79));
         assert_eq!(
             inner.snapshot().states["aa"].noise_mode,
             Some(aap::NoiseMode::Adaptive)
@@ -889,8 +1004,9 @@ mod tests {
     /// the first mode in the list looking active.
     #[test]
     fn snapshot_leaves_an_unreported_mode_unset() {
-        let mut inner = inner_with(vec![("aa", Duration::from_secs(1))]);
+        let mut inner = inner_with(vec![]);
         inner.connected_mac = Some("aa".into());
+        inner.aap = Some(aap_state(80));
         assert_eq!(inner.snapshot().states["aa"].noise_mode, None);
     }
 

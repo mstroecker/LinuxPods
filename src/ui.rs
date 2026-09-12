@@ -8,6 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
@@ -25,7 +26,12 @@ pub struct BatteryWidgets {
     pub right_label: gtk::Label,
     pub case_label: gtk::Label,
     pub status_label: gtk::Label,
+    /// How old a BLE reading is. Hidden for AAP, which is always live.
+    pub last_seen_label: gtk::Label,
 }
+
+/// Anything heard within this long counts as advertising now.
+const RECENT: Duration = Duration::from_secs(60);
 
 /// Assets live alongside the crate at the repo root.
 fn asset(name: &str) -> PathBuf {
@@ -118,6 +124,38 @@ pub fn activate(
                 }
             }
         ));
+
+    // A cached reading sits unchanged, so nothing is broadcast for it and its
+    // "Last seen" would freeze. Redraw from the last snapshot to advance it.
+    glib::timeout_add_seconds_local(
+        30,
+        glib::clone!(
+            #[strong]
+            control,
+            #[strong]
+            selected,
+            #[strong]
+            last_snapshot,
+            #[strong]
+            syncing_noise,
+            #[strong]
+            dev_group,
+            #[strong]
+            device_rows,
+            #[strong]
+            coordinator,
+            #[strong]
+            runtime,
+            move || {
+                if let Some(snapshot) = last_snapshot.borrow().as_ref() {
+                    let mac = selected.borrow().clone();
+                    render_device(&control, snapshot, mac.as_deref(), &syncing_noise);
+                    update_device_rows(&dev_group, &device_rows, snapshot, &coordinator, &runtime);
+                }
+                glib::ControlFlow::Continue
+            }
+        ),
+    );
 
     glib::spawn_future_local(async move {
         while let Ok(snapshot) = updates.recv().await {
@@ -293,6 +331,11 @@ fn create_control_view() -> (gtk::Box, ControlView) {
     status_label.set_margin_top(10);
     control_box.append(&status_label);
 
+    let last_seen_label = gtk::Label::builder().visible(false).build();
+    last_seen_label.add_css_class("dim-label");
+    last_seen_label.add_css_class("caption");
+    control_box.append(&last_seen_label);
+
     // Vec -> named fields. Go indexed levelBars[0..2]; destructuring is checked.
     let mut bars = level_bars.into_iter();
     let mut labs = labels.into_iter();
@@ -304,6 +347,7 @@ fn create_control_view() -> (gtk::Box, ControlView) {
         right_label: labs.next().unwrap(),
         case_label: labs.next().unwrap(),
         status_label,
+        last_seen_label,
     };
 
     // Noise Control
@@ -488,6 +532,7 @@ fn clear_battery_display(w: &BatteryWidgets, status: &str) {
         label.set_text("--");
     }
     w.status_label.set_text(status);
+    w.last_seen_label.set_visible(false);
 }
 
 /// Mirrors ui.createSettingsView. Returns the Development group so the update loop
@@ -661,15 +706,19 @@ fn update_device_rows(
             _ => dev_row.row.set_subtitle(""),
         }
 
-        let (text, css) = match (known, connected, state.is_some()) {
-            (_, true, _) => ("Connected", "success"),
+        let (text, css) = match (known, connected, state) {
+            (_, true, _) => ("Connected".to_string(), "success"),
             // Advertising but no stored key: visible, not yet decryptable. Its MAC
             // rotates, so these entries come and go until a key is captured.
-            (false, _, _) => ("No key", "warning"),
-            (true, _, true) => ("Advertising", "dim-label"),
-            (true, _, false) => ("Idle", "dim-label"),
+            (false, _, _) => ("No key".to_string(), "warning"),
+            // A cached reading is not an advertisement in progress.
+            (true, _, Some(s)) => match s.last_seen.map(|t| t.elapsed()) {
+                Some(age) if age >= RECENT => (last_seen_text(age), "dim-label"),
+                _ => ("Advertising".to_string(), "dim-label"),
+            },
+            (true, _, None) => ("Idle".to_string(), "dim-label"),
         };
-        dev_row.status_label.set_text(text);
+        dev_row.status_label.set_text(&text);
         for class in ["success", "warning", "dim-label"] {
             dev_row.status_label.remove_css_class(class);
         }
@@ -736,6 +785,23 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
     );
 
     w.status_label.set_text(&status_line(state));
+
+    match state.last_seen {
+        Some(seen) => {
+            w.last_seen_label.set_text(&last_seen_text(seen.elapsed()));
+            w.last_seen_label.set_visible(true);
+        }
+        None => w.last_seen_label.set_visible(false),
+    }
+}
+
+/// How long ago a BLE reading was heard. Whole minutes are plenty: the cache
+/// holds readings for half an hour, and the display is redrawn every 30 seconds.
+fn last_seen_text(age: Duration) -> String {
+    if age < RECENT {
+        return "Last seen just now".to_string();
+    }
+    format!("Last seen {} min ago", age.as_secs() / 60)
 }
 
 /// The one-line summary under the battery display.
@@ -815,6 +881,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(status_line(&state), "AirPods Pro 3 • Source: AAP");
+    }
+
+    #[test]
+    fn last_seen_counts_whole_minutes() {
+        assert_eq!(last_seen_text(Duration::from_secs(5)), "Last seen just now");
+        assert_eq!(
+            last_seen_text(Duration::from_secs(60)),
+            "Last seen 1 min ago"
+        );
+        assert_eq!(
+            last_seen_text(Duration::from_secs(29 * 60 + 59)),
+            "Last seen 29 min ago"
+        );
     }
 
     fn snapshot(names: &[(&str, &str)], models: &[(&str, &str)]) -> Snapshot {

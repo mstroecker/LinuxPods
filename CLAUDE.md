@@ -42,6 +42,11 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   comes up blank until the first advertisement.
 - Both `connect_aap` and `disconnect_aap` broadcast. Disconnect also drops the device's
   AAP state, or the UI keeps showing a stale exact-looking reading.
+- BLE is cached, AAP never is. `Inner::ble` keeps the last advertisement per device -
+  also the connected one's, underneath AAP - so disconnect falls back to it at once.
+  AAP lives in its own slot tied to `connected_mac`. Identified readings expire after
+  `BLE_CACHE_TTL` (30 min) and carry `last_seen` for the UI; `expiry_task` prunes on a
+  clock, since with no device in range no advertisement ever triggers a prune.
 - Apple rotates the advertised BLE MAC every few seconds while disconnected. Devices that
   cannot be identified still need `DEVICE_TTL` pruning; their addresses never collapse.
 
