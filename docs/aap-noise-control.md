@@ -4,7 +4,7 @@
 
 AirPods noise control modes (Off, ANC, Transparency, Adaptive) can be switched via the Apple Accessory Protocol (AAP) over L2CAP PSM 4097. This document describes the verified packet format, response behavior, and integration notes.
 
-**Status:** Verified against AirPods 4 with ANC (firmware A3055) on 2026-02-15 using `debug_aap_noise_control`.
+**Status:** Verified against AirPods 4 with ANC (firmware A3055) on 2026-02-15. `cargo run --example noise_probe -- <MAC>` reproduces the exchange below.
 
 **Source:** Packet format originally from [LibrePods](https://github.com/kavishdevar/librepods/blob/main/AAP%20Definitions.md) reverse engineering, validated independently.
 
@@ -62,7 +62,7 @@ Without this packet, Adaptive mode may not be available.
 
 The AirPods do **not** reliably echo a noise control confirmation packet (`0x0D`) after a mode change. Instead, every mode change consistently produces a `0x4B` settings-changed notification. Occasionally a `0x0D` echo also arrives, but it cannot be relied upon.
 
-**Integration note:** Treat noise control commands as fire-and-forget. Update local state optimistically after sending — do not wait for a `0x0D` confirmation packet.
+**Integration note:** Treat noise control commands as fire-and-forget. Update local state optimistically after sending — do not wait for a `0x0D` confirmation packet. `Coordinator::set_noise_control` does exactly that: it records the mode as soon as the packet is away and broadcasts, and a later `0x0D` report merely confirms it.
 
 ### 0x4B Settings-Changed Notification
 
@@ -136,14 +136,17 @@ When parsing `0x09` packets, always check byte 6 to identify the specific sub-co
 To identify a noise control mode packet:
 
 ```
-len(packet) >= 8 && packet[4] == 0x09 && packet[6] == 0x0D
+packet.len() > 7 && packet[4] == 0x09 && packet[6] == 0x0D
 ```
 
-The mode value is at `packet[7]`.
+The mode value is at `packet[7]`. This is `aap::noise::is_noise_mode_packet`, and
+byte 6 is not optional: validating on the command byte alone accepts every other
+sub-command in the table above and reads its value as a mode.
 
 ## Test Results
 
-Tested with `cmd/debug_aap_noise_control` against AirPods 4 with ANC (MAC: `C4:B3:49:D8:40:52`, firmware A3055).
+Tested against AirPods 4 with ANC (firmware A3055), with the Go predecessor of
+`examples/noise_probe.rs`.
 
 ### Run 1 (initial validation)
 
