@@ -93,6 +93,7 @@ fn main() -> glib::ExitCode {
     // Background workers.
     runtime.spawn(ble_task(coordinator.clone()));
     runtime.spawn(bluez_task(coordinator.clone()));
+    runtime.spawn(expiry_task(coordinator.clone()));
     runtime.spawn(tray_task(
         coordinator.clone(),
         Arc::new(AppActions {
@@ -173,6 +174,16 @@ async fn ble_task(coordinator: Arc<Coordinator>) {
         coordinator
             .handle_advertisement(advert.data, advert.ble_mac)
             .await;
+    }
+}
+
+/// Expires cached BLE readings on a clock. Advertisements prune as they arrive,
+/// but with no device in range none arrive, and a cached reading would never go.
+async fn expiry_task(coordinator: Arc<Coordinator>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        coordinator.expire().await;
     }
 }
 
