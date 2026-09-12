@@ -71,6 +71,12 @@ pub fn activate(
     // Tall enough for the whole Control page without scrolling.
     win.set_default_size(420, 680);
 
+    // Closing hides the window instead of destroying it. It is the app's only
+    // window, so destroying it quit the whole process, the tray and the GNOME
+    // Settings battery with it. Hidden, it is exactly the `--minimized` state; the
+    // tray and the launcher bring it back.
+    win.set_hide_on_close(true);
+
     let (control, prefs, dev_group) = setup_ui(&win);
     let control = Rc::new(control);
 
@@ -234,6 +240,11 @@ fn setup_ui(
     let menu = gio::Menu::new();
     menu.append(Some("_Preferences"), Some("win.preferences"));
     menu.append(Some("_About LinuxPods"), Some("win.about"));
+    // Closing the window only hides it, so quitting needs a place of its own -
+    // not least without a tray, where this is the only way out.
+    let quit_section = gio::Menu::new();
+    quit_section.append(Some("_Quit"), Some("app.quit"));
+    menu.append_section(None, &quit_section);
     let menu_button = gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .menu_model(&menu)
