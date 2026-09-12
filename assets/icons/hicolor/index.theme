@@ -1,0 +1,22 @@
+# GTK4 finds icons by scanning this tree, but GNOME Shell's St.IconTheme is
+# forked from GTK3, which enumerates only the directories listed here. Without
+# this file the tray icon resolves in-process and still comes up empty in the
+# panel.
+[Icon Theme]
+Name=hicolor
+Comment=Fallback theme carrying the LinuxPods icons
+Directories=scalable/apps,symbolic/apps
+
+[scalable/apps]
+Size=128
+MinSize=16
+MaxSize=512
+Type=Scalable
+Context=Applications
+
+[symbolic/apps]
+Size=16
+MinSize=8
+MaxSize=512
+Type=Scalable
+Context=Applications

@@ -205,6 +205,34 @@ mod tests {
         assert!(icon.exists(), "missing tray icon: {}", icon.display());
     }
 
+    /// GTK4 resolves an icon by scanning the tree, so an in-process lookup
+    /// succeeds with no index.theme at all. GNOME Shell reads the same tree
+    /// through St.IconTheme, forked from GTK3, which enumerates only what
+    /// index.theme lists - and the panel shows a placeholder rather than
+    /// reporting anything. Installed copies merge with the system hicolor index,
+    /// which already lists these two; this file is what covers a source checkout.
+    #[test]
+    fn the_private_theme_declares_the_directories_the_icons_live_in() {
+        let index = std::path::Path::new(ICON_THEME_PATH).join("hicolor/index.theme");
+        let text = std::fs::read_to_string(&index)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", index.display()));
+
+        for dir in ["symbolic/apps", "scalable/apps"] {
+            assert!(
+                text.contains(&format!("[{dir}]")),
+                "{} has no [{dir}] section",
+                index.display()
+            );
+            assert!(
+                text.lines()
+                    .find(|l| l.starts_with("Directories="))
+                    .is_some_and(|l| l.contains(dir)),
+                "{} omits {dir} from Directories=",
+                index.display()
+            );
+        }
+    }
+
     #[test]
     fn formats_battery_labels() {
         assert_eq!(battery_label("Left", Some(80), false), "  Left : 80%");
