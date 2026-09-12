@@ -11,6 +11,14 @@ use ksni::{Handle, MenuItem, Tray, TrayMethods};
 use crate::aap::NoiseMode;
 use crate::podstate::{DataSource, Snapshot};
 
+/// Icons ship with the crate rather than only with `make install`, which a
+/// `cargo run` never performs. Handing the host this directory is what keeps the
+/// tray from falling back to a missing-image glyph in a source checkout.
+const ICON_THEME_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons");
+
+/// Symbolic, so the panel recolours it to match its own foreground.
+const ICON_NAME: &str = "com.linuxpods.app-symbolic";
+
 /// Actions the tray hands back to the application.
 pub trait TrayActions: Send + Sync + 'static {
     fn show_window(&self);
@@ -87,7 +95,11 @@ impl Tray for Indicator {
     }
 
     fn icon_name(&self) -> String {
-        "audio-headphones-symbolic".into()
+        ICON_NAME.into()
+    }
+
+    fn icon_theme_path(&self) -> String {
+        ICON_THEME_PATH.into()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
@@ -181,6 +193,17 @@ pub async fn apply_snapshot(handle: &Handle<Indicator>, snapshot: &Snapshot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tray resolves its icon by name under the theme path, and a name that
+    /// resolves to nothing shows up as a blank spot in the panel rather than as
+    /// an error anyone would see in a log.
+    #[test]
+    fn the_tray_icon_exists_where_the_host_will_look_for_it() {
+        let icon = std::path::Path::new(ICON_THEME_PATH)
+            .join("hicolor/symbolic/apps")
+            .join(format!("{ICON_NAME}.svg"));
+        assert!(icon.exists(), "missing tray icon: {}", icon.display());
+    }
 
     #[test]
     fn formats_battery_labels() {
