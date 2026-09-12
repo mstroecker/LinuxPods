@@ -39,11 +39,13 @@ PREFIX    ?= $(HOME)/.local
 BINDIR     = $(PREFIX)/bin
 AUTOSTART  = $(HOME)/.config/autostart
 APPDIR     = $(PREFIX)/share/applications
+ICONDIR    = $(PREFIX)/share/icons/hicolor
 DESKTOP    = com.linuxpods.app.desktop
 
-# The binary looks its assets up under CARGO_MANIFEST_DIR, baked in at compile
-# time, so the installed copy still reads them from this checkout. Moving or
-# deleting the source tree leaves it without icons.
+# The binary looks its artwork up under CARGO_MANIFEST_DIR, baked in at compile
+# time, so the installed copy still reads it from this checkout. Moving or
+# deleting the source tree leaves it without the battery images. The icons below
+# are installed into the theme, so those keep working either way.
 define DESKTOP_ENTRY
 [Desktop Entry]
 Type=Application
@@ -52,7 +54,7 @@ Name=LinuxPods
 Comment=Manage Apple AirPods on Linux
 Exec=$(BINDIR)/linuxpods --minimized
 TryExec=$(BINDIR)/linuxpods
-Icon=$(CURDIR)/assets/tray_icon3.png
+Icon=com.linuxpods.app
 Terminal=false
 Categories=AudioVideo;Audio;
 X-GNOME-Autostart-enabled=true
@@ -62,6 +64,11 @@ export DESKTOP_ENTRY
 # Install the binary, the autostart entry and the launcher entry
 install: build-release
 	install -Dm755 target/release/linuxpods $(BINDIR)/linuxpods
+	install -Dm644 assets/icons/hicolor/scalable/apps/com.linuxpods.app.svg \
+		$(ICONDIR)/scalable/apps/com.linuxpods.app.svg
+	install -Dm644 assets/icons/hicolor/symbolic/apps/com.linuxpods.app-symbolic.svg \
+		$(ICONDIR)/symbolic/apps/com.linuxpods.app-symbolic.svg
+	-@gtk-update-icon-cache -qtf $(ICONDIR) 2>/dev/null || true
 	mkdir -p $(AUTOSTART) $(APPDIR)
 	@printf '%s\n' "$$DESKTOP_ENTRY" > $(AUTOSTART)/$(DESKTOP)
 	@sed -e 's/ --minimized//' -e '/^X-GNOME-Autostart-enabled/d' \
@@ -74,6 +81,7 @@ install: build-release
 		echo "LinuxPods started in the tray (PID $$!)"; \
 	fi
 	@echo "Installed:  $(BINDIR)/linuxpods"
+	@echo "Icons:      $(ICONDIR)/{scalable,symbolic}/apps"
 	@echo "Autostart:  $(AUTOSTART)/$(DESKTOP)"
 	@echo "Launcher:   $(APPDIR)/$(DESKTOP)"
 
@@ -81,6 +89,9 @@ install: build-release
 uninstall:
 	-@pkill -f '^$(BINDIR)/linuxpods' 2>/dev/null || true
 	rm -f $(BINDIR)/linuxpods
+	rm -f $(ICONDIR)/scalable/apps/com.linuxpods.app.svg
+	rm -f $(ICONDIR)/symbolic/apps/com.linuxpods.app-symbolic.svg
+	-@gtk-update-icon-cache -qtf $(ICONDIR) 2>/dev/null || true
 	rm -f $(AUTOSTART)/$(DESKTOP)
 	rm -f $(APPDIR)/$(DESKTOP)
 	-@update-desktop-database $(APPDIR) 2>/dev/null || true

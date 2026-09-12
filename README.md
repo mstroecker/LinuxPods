@@ -141,8 +141,9 @@ make uninstall
 that starts it in the tray on login, adds a launcher entry that opens it with the window,
 and starts it straight away. `PREFIX` overrides the install location.
 
-Assets are resolved from the checkout they were built in, so keep the source tree around -
-a moved or deleted tree leaves the installed binary without its icons.
+The tray and launcher icons are installed into the hicolor theme, so those are independent
+of the checkout. The battery artwork is still resolved from the checkout it was built in, so
+keep the source tree around.
 
 ## Usage
 
