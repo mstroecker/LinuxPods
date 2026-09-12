@@ -9,7 +9,7 @@ A native GNOME desktop application for managing Apple AirPods on Linux.
 
 What the AirPods can do, grouped by how LinuxPods reaches it.
 
-✅ fully working &nbsp;·&nbsp; 🚧 partial &nbsp;·&nbsp; 📋 planned &nbsp;·&nbsp; ❌ not planned
+✅ fully working &nbsp;·&nbsp; 🚧 partial &nbsp;·&nbsp; 📋 planned &nbsp;·&nbsp; ❓ unsure
 
 ### Over BLE
 
@@ -62,19 +62,38 @@ only channel that can *send* commands.
 | Low battery notifications | 📋 |
 | Persisted UI preferences | 📋 |
 
-### Not reachable from Linux
+### Unexplored
 
-These depend on Apple's audio pipeline, the U1 chip, or iCloud, so they are out of scope
-rather than unimplemented.
+Nobody has tried these, and for most of them it is genuinely unknown whether AAP carries
+the command. They are open questions, not settled impossibilities.
 
 | Feature | Status |
 | --- | --- |
-| Ear tip fit test | ❌ |
-| Spatial audio and head tracking | ❌ |
-| Find My and Precision Finding | ❌ |
-| Hearing aid and hearing test | ❌ |
-| Automatic device switching between Apple devices | ❌ |
-| Announce notifications | ❌ |
+| Ear tip fit test | ❓ |
+| Head tracking data | ❓ |
+| Spatial audio rendering | ❓ |
+| Play a sound to locate the AirPods | ❓ |
+| Hearing aid mode and hearing test | ❓ |
+| Announce notifications | ❓ |
+| Precision Finding | ❓ |
+| Automatic switching between Apple devices | ❓ |
+
+What is actually unclear in each case:
+
+- **Head tracking** - the buds carry an IMU and third-party work suggests the data is
+  available over AAP. Reading it is probably tractable.
+- **Spatial audio** - the head tracking is the easy half. Apple renders the audio on the
+  source device, so Linux would need its own HRTF renderer rather than an AAP command.
+- **Ear tip fit test** and **hearing aid mode** - the processing runs on the buds, so
+  these are plausibly settings AAP can reach. Whether the protocol exposes them is unknown.
+- **Announce notifications** - not really an AirPods feature. Text-to-speech played over
+  the existing audio connection would do it, with no protocol work at all.
+- **Play a sound to locate** - very likely an AAP command; just unidentified so far.
+- **Precision Finding** - needs the U1 ultra-wideband chip, which host machines do not
+  have. The plain locate sound above is the reachable part.
+- **Automatic switching** - coordinated through iCloud between Apple devices, so a Linux
+  box has nothing to join. Whether the buds can be told to switch *to* this machine over
+  AAP is a separate and open question.
 
 ## Supported devices
 
