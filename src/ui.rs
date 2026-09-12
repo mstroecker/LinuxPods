@@ -260,10 +260,10 @@ pub fn activate(
                 .or_else(|| macs.first().cloned());
             *selected.borrow_mut() = chosen.clone();
 
-            if let Some(mac) = &chosen {
-                if let Some(idx) = macs.iter().position(|m| m == mac) {
-                    control.device_dropdown.set_selected(idx as u32);
-                }
+            if let Some(mac) = &chosen
+                && let Some(idx) = macs.iter().position(|m| m == mac)
+            {
+                control.device_dropdown.set_selected(idx as u32);
             }
             syncing.set(false);
 
