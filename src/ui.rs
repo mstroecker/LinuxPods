@@ -4,7 +4,7 @@
 //! main context. That is the only path into the UI: GTK types are !Send, so a
 //! background task can never touch a widget directly.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -12,6 +12,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
+use crate::aap::NoiseMode;
 use crate::ble::decode_connection_state;
 use crate::podstate::{Coordinator, DataSource, PodState, Snapshot};
 
@@ -48,6 +49,34 @@ pub fn activate(
     let control = Rc::new(control);
     win.present();
 
+    // Set while the radio buttons are being brought in line with a snapshot, so
+    // the toggle that causes does not go straight back out as a command.
+    let syncing_noise = Rc::new(Cell::new(false));
+
+    // Switching mode is a command: it goes out over the tokio runtime, and the
+    // interface waits for the coordinator's snapshot to confirm it rather than
+    // reporting success itself. A failed command therefore corrects itself on the
+    // next update instead of leaving the wrong row selected for good.
+    for (mode, button) in &control.noise_buttons {
+        let mode = *mode;
+        let coord = coordinator.clone();
+        let rt = runtime.clone();
+        let syncing = syncing_noise.clone();
+        button.connect_toggled(move |b| {
+            // Activating one button in a group deactivates the previous one, so
+            // this fires twice per change; only the new mode is interesting.
+            if !b.is_active() || syncing.get() {
+                return;
+            }
+            let coord = coord.clone();
+            rt.spawn(async move {
+                if let Err(e) = coord.set_noise_control(mode).await {
+                    tracing::warn!("failed to set noise control: {e:#}");
+                }
+            });
+        });
+    }
+
     // Updates arrive over an async channel consumed on the main context. GTK types
     // are !Send, so this is the only legal way in - enforced at compile time.
     let device_rows: Rc<RefCell<HashMap<String, DeviceRow>>> =
@@ -71,6 +100,8 @@ pub fn activate(
             last_snapshot,
             #[strong]
             syncing,
+            #[strong]
+            syncing_noise,
             move |dropdown| {
                 if syncing.get() {
                     return;
@@ -82,7 +113,7 @@ pub fn activate(
                 if let Some(mac) = mac {
                     *selected.borrow_mut() = Some(mac.clone());
                     if let Some(snapshot) = last_snapshot.borrow().as_ref() {
-                        render_device(&control, snapshot, Some(&mac));
+                        render_device(&control, snapshot, Some(&mac), &syncing_noise);
                     }
                 }
             }
@@ -120,7 +151,7 @@ pub fn activate(
             }
             syncing.set(false);
 
-            render_device(&control, &snapshot, chosen.as_deref());
+            render_device(&control, &snapshot, chosen.as_deref(), &syncing_noise);
             update_device_rows(&dev_group, &device_rows, &snapshot, &coordinator, &runtime);
             *last_snapshot.borrow_mut() = Some(snapshot);
         }
@@ -179,6 +210,8 @@ pub struct ControlView {
     /// unchanged.
     pub device_labels: RefCell<Vec<String>>,
     pub noise_group: adw::PreferencesGroup,
+    /// One radio button per mode, in `NoiseMode::ALL` order.
+    pub noise_buttons: Vec<(NoiseMode, gtk::CheckButton)>,
     pub features_group: adw::PreferencesGroup,
 }
 
@@ -278,49 +311,29 @@ fn create_control_view() -> (gtk::Box, ControlView) {
         .title("Noise Control")
         .build();
 
-    let options = [
-        ("transparency", "Transparency", "Hear the world around you"),
-        (
-            "adaptive",
-            "Adaptive",
-            "Automatically adjusts to your environment",
-        ),
-        (
-            "noise_cancelling",
-            "Noise Cancelling",
-            "Block out background noise",
-        ),
-        ("off", "Off", "Noise control disabled"),
-    ];
-
-    let mut first_button: Option<gtk::CheckButton> = None;
-    for (i, (id, title, desc)) in options.iter().enumerate() {
+    // The modes, their labels and their order all come from the protocol layer,
+    // so this list cannot drift from the tray's.
+    //
+    // None starts out active: until the device reports its mode there is nothing
+    // to select, and showing the first row as chosen would claim a mode the
+    // AirPods may well not be in. The handlers are attached in `activate`, which
+    // is where the coordinator to send the command to lives.
+    let mut noise_buttons: Vec<(NoiseMode, gtk::CheckButton)> = Vec::new();
+    for mode in NoiseMode::ALL {
         let row = adw::ActionRow::builder()
-            .title(*title)
-            .subtitle(*desc)
+            .title(mode.label())
+            .subtitle(mode.description())
             .build();
 
         let radio_button = gtk::CheckButton::new();
-        if i == 0 {
-            radio_button.set_active(true);
-            first_button = Some(radio_button.clone());
-        } else {
-            radio_button.set_group(first_button.as_ref());
+        if let Some((_, first)) = noise_buttons.first() {
+            radio_button.set_group(Some(first));
         }
-
-        // The Go version captured `opt` by reference in a loop closure - a classic
-        // footgun. Rust forces the move to be explicit.
-        let id = id.to_string();
-        let title = title.to_string();
-        radio_button.connect_toggled(move |b| {
-            if b.is_active() {
-                println!("Noise Control changed to: {title} ({id})");
-            }
-        });
 
         row.add_prefix(&radio_button);
         row.set_activatable_widget(Some(&radio_button));
         noise_control_group.add(&row);
+        noise_buttons.push((mode, radio_button));
     }
     control_box.append(&noise_control_group);
 
@@ -356,6 +369,7 @@ fn create_control_view() -> (gtk::Box, ControlView) {
         device_macs: RefCell::new(Vec::new()),
         device_labels: RefCell::new(Vec::new()),
         noise_group: noise_control_group,
+        noise_buttons,
         features_group: conversation_group,
     };
 
@@ -414,7 +428,12 @@ fn device_labels(macs: &[String], snapshot: &Snapshot) -> Vec<String> {
 }
 
 /// Draws one device, and gates the control sections on how the data arrived.
-fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
+fn render_device(
+    view: &ControlView,
+    snapshot: &Snapshot,
+    mac: Option<&str>,
+    syncing_noise: &Rc<Cell<bool>>,
+) {
     let state = mac.and_then(|m| snapshot.states.get(m));
     let connected = mac.is_some() && mac == snapshot.connected_mac.as_deref();
 
@@ -426,6 +445,7 @@ fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
             let interactive = state.source == DataSource::Aap;
             view.noise_group.set_sensitive(interactive);
             view.features_group.set_sensitive(interactive);
+            sync_noise_buttons(view, syncing_noise, state.noise_mode);
         }
         // Known device, nothing heard from it yet: show it as empty rather than
         // hiding it, so the switcher and the display agree. Distinguish a device
@@ -440,8 +460,21 @@ fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
             clear_battery_display(&view.battery, status);
             view.noise_group.set_sensitive(false);
             view.features_group.set_sensitive(false);
+            sync_noise_buttons(view, syncing_noise, None);
         }
     }
+}
+
+/// Selects the row for `mode`, or clears the group when nothing has reported one.
+///
+/// The guard keeps the resulting `toggled` from being read as a user choice and
+/// sent straight back to the device.
+fn sync_noise_buttons(view: &ControlView, syncing: &Rc<Cell<bool>>, mode: Option<NoiseMode>) {
+    syncing.set(true);
+    for (m, button) in &view.noise_buttons {
+        button.set_active(mode == Some(*m));
+    }
+    syncing.set(false);
 }
 
 /// Resets the display, with the reason shown in the status line.

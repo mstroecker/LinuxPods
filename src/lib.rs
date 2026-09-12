@@ -4,7 +4,7 @@
 //! from integration tests and probes, not just the GUI binary.
 
 // Several ported helpers mirror the Go API surface but are not wired up yet
-// (noise control, key/colour decoding, battery removal). Kept deliberately.
+// (key/colour decoding, battery removal). Kept deliberately.
 #![allow(dead_code)]
 
 pub mod aap;

@@ -12,14 +12,19 @@ use adw::prelude::*;
 use futures_util::StreamExt;
 use gtk::glib;
 
-use indicator::{Indicator, NoiseMode, TrayActions};
+use indicator::{Indicator, TrayActions};
+use linuxpods::aap::NoiseMode;
 use podstate::Coordinator;
 
 const APP_ID: &str = "com.linuxpods.app";
 
-/// Bridges tray clicks onto the GTK main context.
+/// Bridges tray clicks onto the GTK main context, and noise control onto tokio.
 struct AppActions {
     window: async_channel::Sender<WindowCommand>,
+    coordinator: Arc<Coordinator>,
+    /// Needed because ksni calls back from its own thread, which is not
+    /// necessarily inside the runtime.
+    runtime: tokio::runtime::Handle,
 }
 
 enum WindowCommand {
@@ -37,9 +42,12 @@ impl TrayActions for AppActions {
     }
 
     fn set_noise_mode(&self, mode: NoiseMode) {
-        // Protocol for setting noise control is not implemented yet; the Go
-        // version only logged here too.
-        tracing::info!("Noise mode changed from tray: {mode:?}");
+        let coordinator = self.coordinator.clone();
+        self.runtime.spawn(async move {
+            if let Err(e) = coordinator.set_noise_control(mode).await {
+                tracing::warn!("failed to set noise control from tray: {e:#}");
+            }
+        });
     }
 }
 
@@ -74,7 +82,11 @@ fn main() -> glib::ExitCode {
     runtime.spawn(bluez_task(coordinator.clone()));
     runtime.spawn(tray_task(
         coordinator.clone(),
-        Arc::new(AppActions { window: window_tx }),
+        Arc::new(AppActions {
+            window: window_tx,
+            coordinator: coordinator.clone(),
+            runtime: runtime.handle().clone(),
+        }),
     ));
 
     let app = adw::Application::builder().application_id(APP_ID).build();

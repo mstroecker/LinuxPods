@@ -8,33 +8,8 @@ use std::sync::Arc;
 use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{Handle, MenuItem, Tray, TrayMethods};
 
-use crate::podstate::Snapshot;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoiseMode {
-    Transparency,
-    Adaptive,
-    NoiseCancelling,
-    Off,
-}
-
-impl NoiseMode {
-    const ALL: [NoiseMode; 4] = [
-        Self::Transparency,
-        Self::Adaptive,
-        Self::NoiseCancelling,
-        Self::Off,
-    ];
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Transparency => "Transparency",
-            Self::Adaptive => "Adaptive",
-            Self::NoiseCancelling => "Noise Cancelling",
-            Self::Off => "Off",
-        }
-    }
-}
+use crate::aap::NoiseMode;
+use crate::podstate::{DataSource, Snapshot};
 
 /// Actions the tray hands back to the application.
 pub trait TrayActions: Send + Sync + 'static {
@@ -50,7 +25,12 @@ pub struct Indicator {
     left_charging: bool,
     right_charging: bool,
     case_charging: bool,
-    noise_mode: NoiseMode,
+    /// `None` until the connected device reports one: no mode is shown as
+    /// checked rather than a guess.
+    noise_mode: Option<NoiseMode>,
+    /// Switching mode is a command, so the entries are only selectable while an
+    /// AAP link is up; over BLE the tray is read-only.
+    on_aap: bool,
     actions: Arc<dyn TrayActions>,
 }
 
@@ -63,7 +43,8 @@ impl Indicator {
             left_charging: false,
             right_charging: false,
             case_charging: false,
-            noise_mode: NoiseMode::Transparency,
+            noise_mode: None,
+            on_aap: false,
             actions,
         }
     }
@@ -141,9 +122,13 @@ impl Tray for Indicator {
             items.push(
                 CheckmarkItem {
                     label: mode.label().into(),
-                    checked: self.noise_mode == mode,
+                    checked: self.noise_mode == Some(mode),
+                    enabled: self.on_aap,
+                    // The checkmark deliberately does not move here. The
+                    // coordinator records the mode as soon as the packet is
+                    // away and broadcasts, so the menu follows a command that
+                    // actually went out - and stays put on one that failed.
                     activate: Box::new(move |this: &mut Self| {
-                        this.noise_mode = mode;
                         this.actions.set_noise_mode(mode);
                     }),
                     ..Default::default()
@@ -187,6 +172,8 @@ pub async fn apply_snapshot(handle: &Handle<Indicator>, snapshot: &Snapshot) {
             tray.left_charging = state.left_charging;
             tray.right_charging = state.right_charging;
             tray.case_charging = state.case_charging;
+            tray.noise_mode = state.noise_mode;
+            tray.on_aap = state.source == DataSource::Aap;
         })
         .await;
 }
