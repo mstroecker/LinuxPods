@@ -61,6 +61,12 @@ state for the same device. The noise control mode is *not* carried forward - it 
 its own map on the coordinator, because it arrives on its own schedule and the device
 entry may not exist yet when the startup dump reports it.
 
+**Off needs sub-command 0x34 first.** Recent firmware refuses a bare `0x0D 01` with an
+error chime - confirmed on Pro 3 and Pro Gen 2, while the other three modes work
+unconditionally. `set_noise_control` sends `0x34 01` immediately before Off, and only for
+Off: it is a persistent device setting that syncs to the user's Apple devices, so it is
+not something to enable on every connection.
+
 **Noise control is fire-and-forget.** `04 00 04 00 09 00 0D [mode] 00 00 00` sets the
 mode; the only consistent answer is a `0x4B` settings-changed notification naming neither
 the sub-command nor the mode, and the `0x0D` echo arrives for perhaps one mode in four.

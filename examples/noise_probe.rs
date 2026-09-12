@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use linuxpods::aap::noise::{NoiseMode, is_noise_mode_packet, parse_noise_mode_packet};
+use linuxpods::aap::noise::{NoiseMode, is_noise_mode_packet, parse_noise_mode_packet, set_packet};
 use linuxpods::aap::{Client, is_battery_packet, parse_battery_packet};
 
 /// How long to listen after each command. The 0x0D echo, when it comes at all,
@@ -110,8 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, mode) in NoiseMode::ALL.into_iter().enumerate() {
         println!("\n--- {} ---", mode.label());
-        let packet = linuxpods::aap::noise::set_packet(mode);
-        println!("  sent {}", hex(&packet));
+        println!("  sent {}", hex(&set_packet(mode)));
         client.set_noise_mode(mode).await?;
 
         let received = listen(&client, RESPONSE_WINDOW, "recv").await;
@@ -124,6 +123,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Off is the one mode recent firmware gates behind a setting of its own: the
+    // bare command above should have produced an error chime and no change. Ask
+    // again with that setting enabled, back to back and with no delay, exactly
+    // as the coordinator does it.
+    println!("\n--- Off, with allow-off enabled ---");
+    client.set_allow_off_listening_mode(true).await?;
+    println!(
+        "  sent {}",
+        hex(&linuxpods::aap::noise::allow_off_packet(true))
+    );
+    client.set_noise_mode(NoiseMode::Off).await?;
+    println!("  sent {}", hex(&set_packet(NoiseMode::Off)));
+    listen(&client, RESPONSE_WINDOW, "recv").await;
+
     println!("\ndone - the modes should each have been audible");
+    println!("Off: chime then no change on the first attempt, silence and a real");
+    println!("switch on the second, is the 0x34 setting doing its job.");
     Ok(())
 }

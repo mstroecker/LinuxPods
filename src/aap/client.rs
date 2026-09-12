@@ -166,6 +166,19 @@ impl Client {
             .await
     }
 
+    /// Permits, or forbids, Off as a listening mode.
+    ///
+    /// Recent firmware refuses a bare Off command with an error chime; this is
+    /// the setting that gates it. Persistent on the device and idempotent, so it
+    /// is worth sending only when Off is actually wanted.
+    pub async fn set_allow_off_listening_mode(&self, allowed: bool) -> Result<()> {
+        self.send_packet(
+            &noise::allow_off_packet(allowed),
+            "allow off listening mode",
+        )
+        .await
+    }
+
     /// Sends a packet, verifying the whole thing was written.
     async fn send_packet(&self, packet: &[u8], kind: &str) -> Result<()> {
         let socket = self.socket.as_ref().context("not connected")?;

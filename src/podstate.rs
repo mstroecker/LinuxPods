@@ -653,6 +653,17 @@ impl Coordinator {
             .client()
             .await
             .context("no active AAP connection - connect to AirPods first")?;
+        // Recent firmware treats Off as opt-in: a bare Off command gets an error
+        // chime and no mode change. Enabling the setting is a change to the
+        // device that outlives this session, so it is sent only when Off is what
+        // was asked for - not flipped on at every connection. Idempotent, so
+        // repeating it costs nothing.
+        if mode == aap::NoiseMode::Off {
+            client
+                .set_allow_off_listening_mode(true)
+                .await
+                .context("failed to allow Off as a listening mode")?;
+        }
         client.set_noise_mode(mode).await?;
 
         let snapshot = {

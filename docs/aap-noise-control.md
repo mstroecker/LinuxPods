@@ -4,7 +4,7 @@
 
 AirPods noise control modes (Off, ANC, Transparency, Adaptive) can be switched via the Apple Accessory Protocol (AAP) over L2CAP PSM 4097. This document describes the verified packet format, response behavior, and integration notes.
 
-**Status:** Verified against AirPods 4 with ANC (firmware A3055) on 2026-02-15. `cargo run --example noise_probe -- <MAC>` reproduces the exchange below.
+**Status:** Verified against AirPods 4 with ANC (firmware A3055) on 2026-02-15, and against AirPods Pro 3 and AirPods Pro Gen 2 on 2026-09-12. `cargo run --example noise_probe -- <MAC>` reproduces the exchange below.
 
 **Source:** Packet format originally from [LibrePods](https://github.com/kavishdevar/librepods/blob/main/AAP%20Definitions.md) reverse engineering, validated independently.
 
@@ -55,6 +55,33 @@ Feature Enable: 04 00 04 00 4D 00 FF 00 00 00 00 00 00 00
 ```
 
 Without this packet, Adaptive mode may not be available.
+
+### Off has a prerequisite of its own
+
+Recent firmware treats Off as opt-in. A bare `0x0D 01` is refused: the AirPods
+play an error chime and stay in the mode they were in. Confirmed on AirPods Pro 3
+(0x2720) and AirPods Pro Gen 2 (0x2420), where the other three modes work
+unconditionally.
+
+Sub-command `0x34`, "Allow Off Option for Listening Mode", is the gate:
+
+```
+Allow Off:  04 00 04 00 09 00 34 01 00 00 00
+Forbid Off: 04 00 04 00 09 00 34 02 00 00 00
+```
+
+Note that disabled is `0x02`, not `0x00` - the convention for the boolean
+settings in this family.
+
+Apple gates Off because loud sound reduction does not apply while noise control
+is off, and the setting is the same switch the user sees on an iPhone: it
+persists on the device and syncs back to their other Apple devices. So
+`Coordinator::set_noise_control` sends it only when Off is the mode being asked
+for, immediately before the mode command, rather than enabling it on every
+connection. The two go out back to back with no delay, which is enough.
+
+Identifier and values from [LibrePods' control command
+table](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.md).
 
 ## Response Behavior
 
@@ -117,6 +144,8 @@ The `0x09` command byte is a family of settings sub-commands, not exclusive to n
 |-------------------|-------|
 | `0x0D` | **Noise control mode** |
 | `0x17` | Unknown |
+| `0x1A` | Listening mode configs - bitmask of the modes in the press-and-hold cycle |
+| `0x34` | **Allow Off as a listening mode** - the prerequisite for `0x0D 01` |
 | `0x18` | Unknown |
 | `0x1B` | Unknown |
 | `0x1F` | Unknown (data: `50 50`) |
@@ -187,7 +216,9 @@ All four 0x4B packets were **byte-identical**: `04 00 04 00 4B 00 02 00 01 09`. 
 
 ## References
 
-- [LibrePods AAP Definitions](https://github.com/kavishdevar/librepods/blob/main/AAP%20Definitions.md)
+- [LibrePods AAP Definitions](https://github.com/kavishdevar/librepods/blob/main/docs/AAP%20Definitions.md)
+- [LibrePods control commands](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.md) -
+  the 0x09 sub-command table, including 0x34
 - [LibrePods GNOME Extension](https://github.com/Anoryth/librepods-gnome)
 - [kAirPods (KDE)](https://github.com/can1357/kAirPods)
 - [AAP Protocol Definition (Kaitai Struct)](https://github.com/tyalie/AAP-Protocol-Defintion)
