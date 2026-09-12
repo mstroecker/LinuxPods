@@ -57,7 +57,16 @@ decrypted, not from reading the suffix, and the union costs one bit (2^-23 per w
 byte 4 = `0x1D` - and rejects correct decryptions, silently disabling 1% accuracy.
 
 **AAP packets carry battery only.** Model, colour and orientation carry forward from BLE
-state for the same device.
+state for the same device. The noise control mode is *not* carried forward - it lives in
+its own map on the coordinator, because it arrives on its own schedule and the device
+entry may not exist yet when the startup dump reports it.
+
+**Noise control is fire-and-forget.** `04 00 04 00 09 00 0D [mode] 00 00 00` sets the
+mode; the only consistent answer is a `0x4B` settings-changed notification naming neither
+the sub-command nor the mode, and the `0x0D` echo arrives for perhaps one mode in four.
+Record the mode optimistically and let a later report confirm it. Validate reports on
+byte 4 **and** byte 6: the `0x09` family carries a dozen other sub-commands, all of them
+in the startup dump.
 
 **A zero `cid` immediately after `SeqPacket::connect` means the socket is unusable** -
 connect returns `Ok` without waiting for the BR/EDR ACL link, every send then fails
@@ -95,3 +104,4 @@ A `Co-Authored-By:` trailer is fine.
 
 - `docs/ble-proximity-pairing.md` - proximity pairing, decrypted layout, suffix validation
 - `docs/aap-key-retrieval.md` - retrieving IRK and ENC_KEY over AAP
+- `docs/aap-noise-control.md` - mode packet, the 0x4B notification, the 0x09 family

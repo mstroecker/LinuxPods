@@ -40,7 +40,7 @@ only channel that can *send* commands.
 | Exact (1%) battery, live | ✅ |
 | Charging state | ✅ |
 | Encryption key retrieval, which unlocks 1% over BLE | ✅ |
-| Noise control - Transparency, Adaptive, ANC, Off | 🚧 |
+| Noise control - Transparency, Adaptive, ANC, Off | ✅ |
 | Conversation Awareness | 🚧 |
 | Device rename | 📋 |
 | Press-and-hold gesture configuration | 📋 |
@@ -169,6 +169,8 @@ when a key is stored. Both protocols are documented in full:
 - [`docs/ble-proximity-pairing.md`](docs/ble-proximity-pairing.md) - advertisement layout,
   decryption, and how a device is identified behind a randomized address
 - [`docs/aap-key-retrieval.md`](docs/aap-key-retrieval.md) - retrieving the IRK and ENC_KEY
+- [`docs/aap-noise-control.md`](docs/aap-noise-control.md) - switching noise control mode,
+  and why the device's answer is no acknowledgement
 
 ## Development
 
@@ -192,17 +194,18 @@ AAP connected to AA:BB:CC:DD:EE:FF (cid 2822, attempt 1)
 
 Add `linuxpods=trace` to also see Apple manufacturer data that is not proximity pairing.
 
-Two examples exercise the protocol layers without the interface. `key_request <MAC>`
-connects over L2CAP and retrieves the proximity pairing keys; `decrypt_probe` decrypts
-captured payloads offline, bypassing validation, which is how the payload layouts were
-worked out.
+Examples exercise the protocol layers without the interface. `key_request <MAC>`
+connects over L2CAP and retrieves the proximity pairing keys; `noise_probe <MAC>` cycles
+the noise control modes and classifies every packet that comes back; `apple_sniff` logs
+Apple manufacturer data as it arrives; `decrypt_probe` decrypts captured payloads
+offline, bypassing validation, which is how the payload layouts were worked out.
 
 ```
 src/
 ├── main.rs        # GTK main loop on the main thread, tokio runtime alongside it
 ├── lib.rs         # Library target, so the layers can be driven from tests
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
-├── aap/           # Apple Accessory Protocol: client, battery, keys
+├── aap/           # Apple Accessory Protocol: client, battery, keys, noise control
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
 ├── bluez.rs       # BatteryProvider1 and the device connection watch
 ├── keystore.rs    # Key storage under XDG data dir
