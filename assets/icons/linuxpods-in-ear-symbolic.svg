@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  An ear, for "this pod is in an ear". Symbolic: drawn with fills only, since GTK
+  recolours a symbolic icon by forcing the fill of every path - a stroked outline
+  would come out as a solid blob. 16px grid, gaps of at least a pixel.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g fill="#222222">
+    <!-- Helix: over the top from the front of the ear, down the back. -->
+    <path d="M 2.5 6.5 A 5.5 5.5 0 1 1 11.889 10.389 L 10.475 8.975 A 3.5 3.5 0 1 0 4.5 6.5 Z"/>
+    <circle cx="3.5" cy="6.5" r="1"/>
+    <!-- Lobe: from the back of the helix down and forward. It starts half a pixel
+         inside the helix, so antialiasing leaves no seam where the two meet. -->
+    <path d="M 12.224 10.080 L 7.675 14.238 L 6.325 12.762 L 10.874 8.605 Z"/>
+    <circle cx="7" cy="13.5" r="1"/>
+    <!-- Antihelix: the inner curl. -->
+    <path d="M 5.75 6.5 A 2.25 2.25 0 1 1 8 8.75 L 8 7.25 A 0.75 0.75 0 1 0 7.25 6.5 Z"/>
+    <circle cx="6.5" cy="6.5" r="0.75"/>
+    <circle cx="8" cy="8" r="0.75"/>
+  </g>
+</svg>

@@ -16,17 +16,56 @@ use crate::aap::NoiseMode;
 use crate::ble::decode_connection_state;
 use crate::podstate::{Coordinator, DataSource, PodState, Snapshot};
 
-/// Mirrors ui.BatteryWidgets.
+/// One column of the battery display: a pod, or the case.
+pub struct BatteryColumn {
+    pub level: gtk::LevelBar,
+    pub label: gtk::Label,
+    /// Shown while charging, drawn at the current level.
+    pub charging: gtk::Image,
+    /// Shown while the pod is in an ear; the case never reports it.
+    pub in_ear: gtk::Image,
+}
+
+impl BatteryColumn {
+    /// Shows a level, or `--` when unknown, and whichever icons apply.
+    fn show(&self, level: Option<u8>, charging: bool, in_ear: bool) {
+        match level {
+            Some(v) => {
+                self.level.set_value(f64::from(v) / 100.0);
+                self.label.set_text(&format!("{v}%"));
+            }
+            None => {
+                self.level.set_value(0.0);
+                self.label.set_text("--");
+            }
+        }
+        if charging {
+            self.charging.set_icon_name(Some(&charging_icon(level)));
+        }
+        self.charging.set_visible(charging);
+        self.in_ear.set_visible(in_ear);
+    }
+}
+
 pub struct BatteryWidgets {
-    pub left_level: gtk::LevelBar,
-    pub right_level: gtk::LevelBar,
-    pub case_level: gtk::LevelBar,
-    pub left_label: gtk::Label,
-    pub right_label: gtk::Label,
-    pub case_label: gtk::Label,
+    pub left: BatteryColumn,
+    pub right: BatteryColumn,
+    pub case: BatteryColumn,
     pub status_label: gtk::Label,
     /// How old a BLE reading is. Hidden for AAP, which is always live.
     pub last_seen_label: gtk::Label,
+}
+
+/// The charging icon for a level, as GNOME Shell draws a charging battery: the
+/// level in steps of ten, with a bolt. The theme has no bare bolt, and a fixed
+/// full battery would contradict the percentage beside it.
+fn charging_icon(level: Option<u8>) -> String {
+    match level.map(|v| (v.min(100) + 5) / 10 * 10) {
+        Some(100) => "battery-level-100-charged-symbolic".to_string(),
+        Some(step) => format!("battery-level-{step}-charging-symbolic"),
+        // Charging with no level to show: a generic charging battery.
+        None => "battery-full-charging-symbolic".to_string(),
+    }
 }
 
 /// Anything heard within this long counts as advertising now.
@@ -34,6 +73,10 @@ const RECENT: Duration = Duration::from_secs(60);
 
 /// Icon name of the app icon, installed into hicolor by `make install`.
 const APP_ICON: &str = "com.linuxpods.app";
+
+/// Drawn for this app and bundled: the theme has no icon for an earbud being
+/// worn, and headphones read as "audio device" rather than "in an ear".
+const IN_EAR_ICON: &str = "linuxpods-in-ear-symbolic";
 
 const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
 
@@ -357,10 +400,7 @@ fn create_control_view() -> (adw::PreferencesPage, ControlView) {
         .valign(gtk::Align::Start)
         .build();
 
-    let mut level_bars = Vec::with_capacity(3);
-    let mut labels = Vec::with_capacity(3);
-
-    for name in BATTERY_IMAGES {
+    let [left, right, case] = BATTERY_IMAGES.map(|name| {
         let column_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(10)
@@ -371,20 +411,43 @@ fn create_control_view() -> (adw::PreferencesPage, ControlView) {
         image.set_pixel_size(64);
         column_box.append(&image);
 
-        let battery_level = gtk::LevelBar::new();
-        battery_level.set_mode(gtk::LevelBarMode::Continuous);
-        battery_level.set_value(0.0);
-        battery_level.set_size_request(100, 20);
-        column_box.append(&battery_level);
-        level_bars.push(battery_level);
+        let level = gtk::LevelBar::new();
+        level.set_mode(gtk::LevelBarMode::Continuous);
+        level.set_value(0.0);
+        level.set_size_request(100, 20);
+        column_box.append(&level);
 
-        let percent_label = gtk::Label::new(Some("--"));
-        percent_label.add_css_class("dim-label");
-        column_box.append(&percent_label);
-        labels.push(percent_label);
+        // The percentage, then what the pod is doing. Symbolic icons rather than
+        // emoji, so they take the theme's colour and dim along with the text.
+        let label = gtk::Label::new(Some("--"));
+        let charging = gtk::Image::builder()
+            .tooltip_text("Charging")
+            .visible(false)
+            .build();
+        let in_ear = gtk::Image::builder()
+            .icon_name(IN_EAR_ICON)
+            .tooltip_text("In ear")
+            .visible(false)
+            .build();
+        let reading = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(4)
+            .halign(gtk::Align::Center)
+            .build();
+        reading.add_css_class("dim-label");
+        reading.append(&label);
+        reading.append(&charging);
+        reading.append(&in_ear);
+        column_box.append(&reading);
 
         battery_box.append(&column_box);
-    }
+        BatteryColumn {
+            level,
+            label,
+            charging,
+            in_ear,
+        }
+    });
 
     control_box.append(&battery_box);
 
@@ -398,16 +461,10 @@ fn create_control_view() -> (adw::PreferencesPage, ControlView) {
     last_seen_label.add_css_class("caption");
     control_box.append(&last_seen_label);
 
-    // Vec -> named fields. Go indexed levelBars[0..2]; destructuring is checked.
-    let mut bars = level_bars.into_iter();
-    let mut labs = labels.into_iter();
     let widgets = BatteryWidgets {
-        left_level: bars.next().unwrap(),
-        right_level: bars.next().unwrap(),
-        case_level: bars.next().unwrap(),
-        left_label: labs.next().unwrap(),
-        right_label: labs.next().unwrap(),
-        case_label: labs.next().unwrap(),
+        left,
+        right,
+        case,
         status_label,
         last_seen_label,
     };
@@ -602,13 +659,8 @@ fn show_noise_mode(view: &ControlView, mode: Option<NoiseMode>) {
 
 /// Resets the display, with the reason shown in the status line.
 fn clear_battery_display(w: &BatteryWidgets, status: &str) {
-    for (level, label) in [
-        (&w.left_level, &w.left_label),
-        (&w.right_level, &w.right_label),
-        (&w.case_level, &w.case_label),
-    ] {
-        level.set_value(0.0);
-        label.set_text("--");
+    for column in [&w.left, &w.right, &w.case] {
+        column.show(None, false, false);
     }
     w.status_label.set_text(status);
     w.last_seen_label.set_visible(false);
@@ -802,50 +854,16 @@ fn update_device_rows(
     });
 }
 
-/// Mirrors ui.updateBatteryDisplay.
+/// Draws a reading into the battery display and the status line.
 fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
-    fn set(level: &gtk::LevelBar, label: &gtk::Label, value: Option<u8>, suffix: &str) {
-        match value {
-            Some(v) => {
-                level.set_value(f64::from(v) / 100.0);
-                label.set_text(&format!("{v}%{suffix}"));
-            }
-            None => {
-                level.set_value(0.0);
-                label.set_text("--");
-            }
-        }
-    }
-
-    let flags = |charging: bool, in_ear: bool| {
-        let mut s = String::new();
-        if charging {
-            s.push_str(" ⚡");
-        }
-        if in_ear {
-            s.push_str(" 👂");
-        }
-        s
-    };
-
-    set(
-        &w.left_level,
-        &w.left_label,
-        state.left_battery,
-        &flags(state.left_charging, state.left_in_ear),
-    );
-    set(
-        &w.right_level,
-        &w.right_label,
+    w.left
+        .show(state.left_battery, state.left_charging, state.left_in_ear);
+    w.right.show(
         state.right_battery,
-        &flags(state.right_charging, state.right_in_ear),
+        state.right_charging,
+        state.right_in_ear,
     );
-    set(
-        &w.case_level,
-        &w.case_label,
-        state.case_battery,
-        &flags(state.case_charging, false),
-    );
+    w.case.show(state.case_battery, state.case_charging, false);
 
     w.status_label.set_text(&status_line(state));
 
@@ -910,8 +928,14 @@ mod tests {
     #[test]
     fn bundled_resources_resolve() {
         register_resources();
-        let icon = format!("icons/scalable/apps/{APP_ICON}.svg");
-        for name in BATTERY_IMAGES.into_iter().chain([icon.as_str()]) {
+        let icons = [
+            format!("icons/scalable/apps/{APP_ICON}.svg"),
+            format!("icons/scalable/status/{IN_EAR_ICON}.svg"),
+        ];
+        for name in BATTERY_IMAGES
+            .into_iter()
+            .chain(icons.iter().map(String::as_str))
+        {
             let path = format!("{RESOURCE_PREFIX}/{name}");
             assert!(
                 gio::resources_get_info(&path, gio::ResourceLookupFlags::NONE).is_ok(),
@@ -946,6 +970,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(status_line(&state), "AirPods Pro 3 • Source: AAP");
+    }
+
+    #[test]
+    fn charging_icon_follows_the_level_in_steps_of_ten() {
+        assert_eq!(charging_icon(Some(4)), "battery-level-0-charging-symbolic");
+        assert_eq!(
+            charging_icon(Some(26)),
+            "battery-level-30-charging-symbolic"
+        );
+        assert_eq!(
+            charging_icon(Some(94)),
+            "battery-level-90-charging-symbolic"
+        );
+        // Rounds up to full, which the theme draws as charged.
+        assert_eq!(
+            charging_icon(Some(95)),
+            "battery-level-100-charged-symbolic"
+        );
+        assert_eq!(
+            charging_icon(Some(100)),
+            "battery-level-100-charged-symbolic"
+        );
+        assert_eq!(charging_icon(None), "battery-full-charging-symbolic");
     }
 
     /// Every mode survives the trip through its action target, and the empty
