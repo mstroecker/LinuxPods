@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The prefix is the application's resource base path, derived from its ID.
+  GtkApplication adds <prefix>/icons to the icon theme on startup, which is how
+  the About dialog finds the app icon without an install.
+-->
+<gresources>
+  <gresource prefix="/com/linuxpods/app">
+    <file>left_airpod_pro3.png</file>
+    <file>right_airpod_pro3.png</file>
+    <file>airpod_case.png</file>
+    <file alias="icons/scalable/apps/com.linuxpods.app.svg">icons/hicolor/scalable/apps/com.linuxpods.app.svg</file>
+  </gresource>
+</gresources>

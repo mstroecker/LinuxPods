@@ -42,10 +42,9 @@ APPDIR     = $(PREFIX)/share/applications
 ICONDIR    = $(PREFIX)/share/icons/hicolor
 DESKTOP    = com.linuxpods.app.desktop
 
-# The binary looks its artwork up under CARGO_MANIFEST_DIR, baked in at compile
-# time, so the installed copy still reads it from this checkout. Moving or
-# deleting the source tree leaves it without the battery images. The icons below
-# are installed into the theme, so those keep working either way.
+# The battery artwork is compiled into the binary, so the installed copy does not
+# depend on this checkout. The icons below go into the theme because the shell
+# draws the launcher and the tray, and cannot read resources inside the binary.
 define DESKTOP_ENTRY
 [Desktop Entry]
 Type=Application
