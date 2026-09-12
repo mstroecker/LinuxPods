@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use futures_util::StreamExt;
-use gtk::glib;
+use gtk::{gio, glib};
 
 use indicator::{Indicator, TrayActions};
 use linuxpods::aap::NoiseMode;
@@ -108,6 +108,13 @@ fn main() -> glib::ExitCode {
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     let handle = runtime.handle().clone();
+
+    // Closing the window only hides it (see ui::activate), so quitting is an
+    // action of its own, for the main menu and Ctrl+Q.
+    app.add_action_entries([gio::ActionEntry::builder("quit")
+        .activate(|app: &adw::Application, _, _| app.quit())
+        .build()]);
+    app.set_accels_for_action("app.quit", &["<Control>q"]);
 
     // Activation runs again whenever the app is launched while already running -
     // from the launcher entry, say - and the window from the first run is the one
