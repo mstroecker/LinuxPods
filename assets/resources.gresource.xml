@@ -10,6 +10,7 @@
     <file>right_airpod_pro3.png</file>
     <file>airpod_case.png</file>
     <file alias="icons/scalable/apps/com.linuxpods.app.svg">icons/hicolor/scalable/apps/com.linuxpods.app.svg</file>
+    <file alias="icons/scalable/apps/com.linuxpods.app-symbolic.svg">icons/hicolor/symbolic/apps/com.linuxpods.app-symbolic.svg</file>
     <file alias="icons/scalable/status/linuxpods-in-ear-symbolic.svg">icons/linuxpods-in-ear-symbolic.svg</file>
   </gresource>
 </gresources>
