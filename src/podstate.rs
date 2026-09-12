@@ -615,12 +615,11 @@ impl Coordinator {
                 }
             }
 
-            if aap::is_key_packet(&packet) {
-                if let Ok(keys) = aap::parse_proximity_keys(&packet) {
-                    if let Some(enc) = aap::find_encryption_key(&keys) {
-                        self.store_encryption_key(&mac_addr, enc).await;
-                    }
-                }
+            if aap::is_key_packet(&packet)
+                && let Ok(keys) = aap::parse_proximity_keys(&packet)
+                && let Some(enc) = aap::find_encryption_key(&keys)
+            {
+                self.store_encryption_key(&mac_addr, enc).await;
             }
         }
     }
@@ -748,10 +747,10 @@ impl Coordinator {
             if let Some(entry) = inner.ble.get_mut(mac_addr) {
                 entry.state.encryption_key = Some(key.to_vec());
             }
-            if inner.connected_mac.as_deref() == Some(mac_addr) {
-                if let Some(state) = inner.aap.as_mut() {
-                    state.encryption_key = Some(key.to_vec());
-                }
+            if inner.connected_mac.as_deref() == Some(mac_addr)
+                && let Some(state) = inner.aap.as_mut()
+            {
+                state.encryption_key = Some(key.to_vec());
             }
         }
 
