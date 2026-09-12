@@ -76,6 +76,11 @@ pub struct PodState {
     /// carried-forward value would sit there stale for the whole AAP session.
     pub connection_state: Option<u8>,
 
+    /// Active noise control mode. `None` until the connected device reports one:
+    /// BLE advertisements do not carry it, and a default would show the wrong
+    /// mode as selected in the interface.
+    pub noise_mode: Option<aap::NoiseMode>,
+
     pub device_model: u16,
     pub model_name: String,
     pub color: u8,
@@ -151,6 +156,14 @@ struct Inner {
     encryption_keys: HashMap<String, Vec<u8>>,
     connected_mac: Option<String>,
     device_names: HashMap<String, String>,
+    /// Noise control mode per real MAC, held outside the device entries.
+    ///
+    /// It arrives on its own schedule - the startup dump can precede the first
+    /// battery packet, so the entry that would hold it may not exist yet - and
+    /// keeping it here spares every battery packet from carrying the mode
+    /// forward the way the model and colour have to. Only AAP reports it, so
+    /// the map is bounded by the number of devices connected this session.
+    noise_modes: HashMap<String, aap::NoiseMode>,
 }
 
 impl Inner {
@@ -184,7 +197,16 @@ impl Inner {
             states: self
                 .devices
                 .iter()
-                .map(|(k, v)| (k.clone(), v.state.clone()))
+                .map(|(mac, entry)| {
+                    let mut state = entry.state.clone();
+                    // Only the device on AAP has a mode we can vouch for. A
+                    // cached one from an earlier session would sit there as a
+                    // selected radio button for a device we cannot command.
+                    if self.connected_mac.as_deref() == Some(mac.as_str()) {
+                        state.noise_mode = self.noise_modes.get(mac).copied();
+                    }
+                    (mac.clone(), state)
+                })
                 .collect(),
             connected_mac: self.connected_mac.clone(),
             known_keys,
@@ -229,6 +251,7 @@ impl Coordinator {
                 encryption_keys: loaded,
                 connected_mac: None,
                 device_names: HashMap::new(),
+                noise_modes: HashMap::new(),
             }),
             keystore: Mutex::new(keystore),
             aap_client: Mutex::new(None),
@@ -388,6 +411,9 @@ impl Coordinator {
             right_in_ear: data.right_in_ear,
             lid_open: data.lid_open,
             connection_state: Some(data.connection_state),
+            // BLE carries no noise control mode; `snapshot` attaches the one
+            // reported over AAP for the connected device.
+            noise_mode: None,
             device_model: data.device_model,
             model_name: decode_model_name(data.device_model),
             color: data.color,
@@ -530,6 +556,15 @@ impl Coordinator {
                 }
             }
 
+            // The device's own report: its startup dump, or a mode changed from
+            // another device such as an iPhone.
+            if aap::is_noise_mode_packet(&packet) {
+                match aap::parse_noise_mode_packet(&packet) {
+                    Ok(mode) => self.handle_noise_mode(mode, &mac_addr).await,
+                    Err(e) => tracing::warn!("AAP noise control parse error: {e}"),
+                }
+            }
+
             if aap::is_key_packet(&packet) {
                 if let Ok(keys) = aap::parse_proximity_keys(&packet) {
                     if let Some(enc) = aap::find_encryption_key(&keys) {
@@ -587,6 +622,50 @@ impl Coordinator {
         );
 
         self.publish(mac_addr.to_string(), state).await;
+    }
+
+    /// Records a mode the device reported, and broadcasts if it changed.
+    ///
+    /// The startup dump repeats, and an unchanged mode is not worth waking the
+    /// window, tray and battery provider for.
+    async fn handle_noise_mode(&self, mode: aap::NoiseMode, mac_addr: &str) {
+        let snapshot = {
+            let mut inner = self.inner.write().await;
+            if inner.noise_modes.get(mac_addr) == Some(&mode) {
+                return;
+            }
+            inner.noise_modes.insert(mac_addr.to_string(), mode);
+            inner.snapshot()
+        };
+        tracing::info!("Noise control mode reported by {mac_addr}: {mode}");
+        self.broadcast(snapshot);
+    }
+
+    /// Switches the connected device's noise control mode.
+    ///
+    /// The new mode is recorded optimistically. The device answers with a
+    /// settings-changed notification that names neither the sub-command nor the
+    /// mode, and the 0x0D echo carrying it back arrives only sometimes, so
+    /// waiting for confirmation would leave the interface on the old mode for
+    /// three modes out of four. A later report simply confirms what we set.
+    pub async fn set_noise_control(&self, mode: aap::NoiseMode) -> Result<()> {
+        let client = self
+            .client()
+            .await
+            .context("no active AAP connection - connect to AirPods first")?;
+        client.set_noise_mode(mode).await?;
+
+        let snapshot = {
+            let mut inner = self.inner.write().await;
+            let Some(mac) = inner.connected_mac.clone() else {
+                return Ok(());
+            };
+            inner.noise_modes.insert(mac, mode);
+            inner.snapshot()
+        };
+        tracing::info!("Noise control set to {mode}");
+        self.broadcast(snapshot);
+        Ok(())
     }
 
     /// Persists a newly received ENC_KEY and refreshes the affected state.
@@ -656,6 +735,7 @@ mod tests {
             encryption_keys: HashMap::new(),
             connected_mac: None,
             device_names: HashMap::new(),
+            noise_modes: HashMap::new(),
         }
     }
 
@@ -755,6 +835,52 @@ mod tests {
         // A BLE reading is still the best we have; only AAP state goes stale here.
         inner.drop_aap_state("aa");
         assert!(inner.devices.contains_key("aa"));
+    }
+
+    /// The mode is only reported over AAP, so it may only be shown for the
+    /// device that link is up to. Attached in `snapshot` rather than carried on
+    /// every battery packet, which is what dropped it in the Go version.
+    #[test]
+    fn snapshot_attaches_the_mode_to_the_connected_device_only() {
+        let mut inner = inner_with(vec![
+            ("aa", Duration::from_secs(1)),
+            ("bb", Duration::from_secs(1)),
+        ]);
+        inner
+            .noise_modes
+            .insert("aa".into(), aap::NoiseMode::Adaptive);
+        inner
+            .noise_modes
+            .insert("bb".into(), aap::NoiseMode::Transparency);
+        inner.connected_mac = Some("aa".into());
+
+        let snap = inner.snapshot();
+        assert_eq!(snap.states["aa"].noise_mode, Some(aap::NoiseMode::Adaptive));
+        assert_eq!(
+            snap.states["bb"].noise_mode, None,
+            "a device we cannot command must not show a selected mode"
+        );
+
+        // A battery packet replaces the whole entry; the mode survives because it
+        // never lived there.
+        inner.devices.get_mut("aa").unwrap().state = PodState {
+            source: DataSource::Aap,
+            left_battery: Some(80),
+            ..Default::default()
+        };
+        assert_eq!(
+            inner.snapshot().states["aa"].noise_mode,
+            Some(aap::NoiseMode::Adaptive)
+        );
+    }
+
+    /// A device that has not reported a mode yet gets no selection, rather than
+    /// the first mode in the list looking active.
+    #[test]
+    fn snapshot_leaves_an_unreported_mode_unset() {
+        let mut inner = inner_with(vec![("aa", Duration::from_secs(1))]);
+        inner.connected_mac = Some("aa".into());
+        assert_eq!(inner.snapshot().states["aa"].noise_mode, None);
     }
 
     #[test]
