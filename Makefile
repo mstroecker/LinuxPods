@@ -64,6 +64,10 @@ export DESKTOP_ENTRY
 # Install the binary, the autostart entry and the launcher entry
 install: build-release
 	install -Dm755 target/release/linuxpods $(BINDIR)/linuxpods
+	# assets/icons/hicolor/index.theme is deliberately not installed: it exists
+	# for source checkouts, and here the icons merge with the system hicolor
+	# index, which already declares scalable/apps and symbolic/apps. A second
+	# index.theme in this base dir would shadow that for every other app's icons.
 	install -Dm644 assets/icons/hicolor/scalable/apps/com.linuxpods.app.svg \
 		$(ICONDIR)/scalable/apps/com.linuxpods.app.svg
 	install -Dm644 assets/icons/hicolor/symbolic/apps/com.linuxpods.app-symbolic.svg \
