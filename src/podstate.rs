@@ -512,6 +512,15 @@ impl Coordinator {
             .await
             .context("failed to enable features")?;
 
+        // Ask for the proximity keys on every connection, not only when none is
+        // stored: re-pairing regenerates them, and a stale key would silently drop
+        // BLE to 10% steps. The reply is stored by `aap_read_loop` like any key
+        // packet, and waits in the socket until that loop starts. Without a key
+        // only BLE accuracy suffers, so a failure does not fail the connection.
+        if let Err(e) = client.request_proximity_keys().await {
+            tracing::warn!("failed to request encryption keys: {e:#}");
+        }
+
         *self.aap_client.lock().await = Some(Arc::new(client));
 
         let snapshot = {

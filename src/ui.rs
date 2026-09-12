@@ -565,24 +565,16 @@ fn create_control_view() -> ControlView {
 }
 
 /// Shown instead of the Control page until a device has a stored key. The page
-/// and the switcher follow the keystore, and a key is stored only when
-/// requested, so a newly connected pair would otherwise sit behind empty bars.
+/// and the switcher follow the keystore, and a key arrives only over AAP - it is
+/// requested on every connection - so until a pair has connected once there is
+/// nothing to show. Connecting is the whole setup, so there is no button.
 fn create_empty_state() -> adw::StatusPage {
-    let open_prefs = gtk::Button::builder()
-        .label("Open Preferences")
-        .action_name("win.preferences")
-        .halign(gtk::Align::Center)
-        .build();
-    open_prefs.add_css_class("pill");
-    open_prefs.add_css_class("suggested-action");
-
     adw::StatusPage::builder()
         .icon_name(APP_SYMBOLIC_ICON)
-        .title("No AirPods Set Up")
+        .title("Connect Your AirPods")
         .description(
-            "Connect your AirPods to this computer, then request their keys in Preferences",
+            "Connect your AirPods to this computer over Bluetooth, and they will show up here",
         )
-        .child(&open_prefs)
         .build()
 }
 

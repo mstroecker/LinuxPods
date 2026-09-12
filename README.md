@@ -157,12 +157,13 @@ Launch with `cargo run`, or `./target/release/linuxpods` after a release build.
 The window shows the three battery levels, charging state and in-ear detection, along
 with which source the reading came from. With more than one pair known, the header bar
 switches between them. **Preferences**, in the main menu, lists every known device with
-its encryption key status, and is where keys are requested.
+its encryption key status.
 
-To get 1% accuracy over BLE, connect the AirPods to this machine and use
-**Preferences → Development → Request Keys**. The keys are written to
-`~/.local/share/linuxpods/keys.json` and persist, so this is needed only once per device.
-From then on the app reads exact levels even when the AirPods are connected elsewhere.
+Setup is connecting the AirPods to this machine once. On every connection LinuxPods asks
+them for their encryption keys and writes them to `~/.local/share/linuxpods/keys.json`,
+which is what unlocks 1% accuracy over BLE. From then on the app reads exact levels even
+when the AirPods are connected elsewhere. Asking again on each connection picks up the new
+keys after a re-pair; **Preferences → Development → Request Keys** does the same by hand.
 
 ## How it works
 
