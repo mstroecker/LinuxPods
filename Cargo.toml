@@ -15,8 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 # UI
-gtk = { package = "gtk4", version = "0.11" }
-adw = { package = "libadwaita", version = "0.9", features = ["v1_4"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_4"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 
 # Async runtime + plumbing
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }

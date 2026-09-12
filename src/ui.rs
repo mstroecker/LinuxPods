@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 
 use crate::aap::NoiseMode;
 use crate::ble::decode_connection_state;
@@ -33,6 +33,15 @@ pub struct BatteryWidgets {
 /// Anything heard within this long counts as advertising now.
 const RECENT: Duration = Duration::from_secs(60);
 
+/// Icon name of the app icon, installed into hicolor by `make install`.
+const APP_ICON: &str = "com.linuxpods.app";
+
+const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
+
+/// Window action for noise control. Its state names the mode shown, by
+/// `noise_target`, and is `""` while no mode has been reported.
+const NOISE_ACTION: &str = "noise-mode";
+
 /// Assets live alongside the crate at the repo root.
 fn asset(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -50,50 +59,65 @@ pub fn activate(
     let updates = coordinator.subscribe();
     let win = adw::ApplicationWindow::new(app);
     win.set_title(Some("LinuxPods"));
-    win.set_default_size(400, 500);
+    // Tall enough for the whole Control page without scrolling.
+    win.set_default_size(420, 680);
 
-    let (control, dev_group) = setup_ui(&win);
+    // The app icon only joins the icon theme on install; a source checkout needs
+    // the search path for the About dialog to find it.
+    gtk::IconTheme::for_display(&WidgetExt::display(&win)).add_search_path(asset("icons"));
+
+    let (control, prefs, dev_group) = setup_ui(&win);
     let control = Rc::new(control);
 
-    // Set while the radio buttons are being brought in line with a snapshot, so
-    // the toggle that causes does not go straight back out as a command.
-    let syncing_noise = Rc::new(Cell::new(false));
+    // The primary menu's entries. Preferences is built once and kept, since the
+    // update loop fills its Development group whether it is open or not.
+    win.add_action_entries([
+        gio::ActionEntry::builder("preferences")
+            .activate(move |win: &adw::ApplicationWindow, _, _| prefs.present(Some(win)))
+            .build(),
+        gio::ActionEntry::builder("about")
+            .activate(|win: &adw::ApplicationWindow, _, _| show_about(win))
+            .build(),
+    ]);
+    app.set_accels_for_action("win.preferences", &["<Control>comma"]);
 
     // Switching mode is a command: it goes out over the tokio runtime, and the
-    // interface waits for the coordinator's snapshot to confirm it rather than
-    // reporting success itself. A failed command therefore corrects itself on the
-    // next update instead of leaving the wrong row selected for good.
-    for (mode, button) in &control.noise_buttons {
-        let mode = *mode;
-        let coord = coordinator.clone();
-        let rt = runtime.clone();
-        let syncing = syncing_noise.clone();
-        button.connect_toggled(move |b| {
-            // Activating one button in a group deactivates the previous one, so
-            // this fires twice per change; only the new mode is interesting.
-            if !b.is_active() || syncing.get() {
-                return;
+    // action's state follows the coordinator's snapshot rather than the click. A
+    // failed command therefore leaves the previous mode selected instead of
+    // claiming one the AirPods never switched to.
+    //
+    // Handling `activate` keeps GIO from changing the state on its own, and a
+    // state set from a snapshot is never an activation, so nothing needs guarding
+    // against a snapshot echoing back out as a command.
+    let coord = coordinator.clone();
+    let rt = runtime.clone();
+    control.noise_action.connect_activate(move |_, target| {
+        let Some(mode) = target
+            .and_then(|t| t.str())
+            .and_then(noise_mode_from_target)
+        else {
+            return;
+        };
+        let coord = coord.clone();
+        rt.spawn(async move {
+            if let Err(e) = coord.set_noise_control(mode).await {
+                tracing::warn!("failed to set noise control: {e:#}");
             }
-            let coord = coord.clone();
-            rt.spawn(async move {
-                if let Err(e) = coord.set_noise_control(mode).await {
-                    tracing::warn!("failed to set noise control: {e:#}");
-                }
-            });
         });
-    }
+    });
+    win.add_action(&control.noise_action);
 
     // Updates arrive over an async channel consumed on the main context. GTK types
     // are !Send, so this is the only legal way in - enforced at compile time.
     let device_rows: Rc<RefCell<HashMap<String, DeviceRow>>> =
         Rc::new(RefCell::new(HashMap::new()));
 
-    // Which device the Control tab is showing, and the snapshot behind it, so a
+    // Which device the Control page is showing, and the snapshot behind it, so a
     // switcher change can redraw without waiting for the next update.
     let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let last_snapshot: Rc<RefCell<Option<Snapshot>>> = Rc::new(RefCell::new(None));
     // Guards against the programmatic set_selected() below re-entering this handler.
-    let syncing = Rc::new(std::cell::Cell::new(false));
+    let syncing = Rc::new(Cell::new(false));
 
     control
         .device_dropdown
@@ -106,8 +130,6 @@ pub fn activate(
             last_snapshot,
             #[strong]
             syncing,
-            #[strong]
-            syncing_noise,
             move |dropdown| {
                 if syncing.get() {
                     return;
@@ -119,7 +141,7 @@ pub fn activate(
                 if let Some(mac) = mac {
                     *selected.borrow_mut() = Some(mac.clone());
                     if let Some(snapshot) = last_snapshot.borrow().as_ref() {
-                        render_device(&control, snapshot, Some(&mac), &syncing_noise);
+                        render_device(&control, snapshot, Some(&mac));
                     }
                 }
             }
@@ -137,8 +159,6 @@ pub fn activate(
             #[strong]
             last_snapshot,
             #[strong]
-            syncing_noise,
-            #[strong]
             dev_group,
             #[strong]
             device_rows,
@@ -149,7 +169,7 @@ pub fn activate(
             move || {
                 if let Some(snapshot) = last_snapshot.borrow().as_ref() {
                     let mac = selected.borrow().clone();
-                    render_device(&control, snapshot, mac.as_deref(), &syncing_noise);
+                    render_device(&control, snapshot, mac.as_deref());
                     update_device_rows(&dev_group, &device_rows, snapshot, &coordinator, &runtime);
                 }
                 glib::ControlFlow::Continue
@@ -189,7 +209,7 @@ pub fn activate(
             }
             syncing.set(false);
 
-            render_device(&control, &snapshot, chosen.as_deref(), &syncing_noise);
+            render_device(&control, &snapshot, chosen.as_deref());
             update_device_rows(&dev_group, &device_rows, &snapshot, &coordinator, &runtime);
             *last_snapshot.borrow_mut() = Some(snapshot);
         }
@@ -198,47 +218,74 @@ pub fn activate(
     win
 }
 
-/// Mirrors ui.setupUI.
-fn setup_ui(win: &adw::ApplicationWindow) -> (ControlView, adw::PreferencesGroup) {
-    let header_bar = adw::HeaderBar::new();
-
-    let view_stack = adw::ViewStack::new();
-
-    let view_switcher = adw::ViewSwitcher::builder()
-        .stack(&view_stack)
-        .policy(adw::ViewSwitcherPolicy::Wide)
+/// The window holds the Control page alone. Preferences and About open from the
+/// primary menu, as dialogs, rather than sitting beside it as tabs.
+///
+/// Returns the preferences dialog, and its Development group for the update loop
+/// to populate.
+fn setup_ui(
+    win: &adw::ApplicationWindow,
+) -> (ControlView, adw::PreferencesDialog, adw::PreferencesGroup) {
+    let menu = gio::Menu::new();
+    menu.append(Some("_Preferences"), Some("win.preferences"));
+    menu.append(Some("_About LinuxPods"), Some("win.about"));
+    let menu_button = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .primary(true)
+        .tooltip_text("Main Menu")
         .build();
-    header_bar.set_title_widget(Some(&view_switcher));
 
-    let (control_box, control) = create_control_view();
-    view_stack.add_titled_with_icon(
-        &control_box,
-        Some("control"),
-        "Control",
-        "audio-headphones-symbolic",
-    );
+    let (control_page, control) = create_control_view();
+    let (prefs, dev_group) = create_preferences_dialog();
 
-    let (settings_box, dev_group) = create_settings_view();
-    view_stack.add_titled_with_icon(
-        &settings_box,
-        Some("settings"),
-        "Settings",
-        "preferences-system-symbolic",
-    );
+    // The device switcher takes the title's place when there is a choice to
+    // make, the way a view switcher would; with a single device the header shows
+    // the app name as usual.
+    let window_title = adw::WindowTitle::new("LinuxPods", "");
+    control
+        .device_dropdown
+        .bind_property("visible", &window_title, "visible")
+        .invert_boolean()
+        .sync_create()
+        .build();
+    let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    title_box.append(&window_title);
+    title_box.append(&control.device_dropdown);
+
+    let header_bar = adw::HeaderBar::new();
+    header_bar.set_title_widget(Some(&title_box));
+    header_bar.pack_end(&menu_button);
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header_bar);
-    toolbar_view.set_content(Some(&view_stack));
+    toolbar_view.set_content(Some(&control_page));
 
     win.set_content(Some(&toolbar_view));
 
-    (control, dev_group)
+    (control, prefs, dev_group)
 }
 
-/// Everything in the Control tab the update loop needs to touch.
+/// Built on demand: nothing in it changes while it is open.
+fn show_about(win: &adw::ApplicationWindow) {
+    adw::AboutDialog::builder()
+        .application_name("LinuxPods")
+        .application_icon(APP_ICON)
+        .comments("Manage Apple AirPods on Linux")
+        .version(env!("CARGO_PKG_VERSION"))
+        .developer_name("Marcel Ströcker")
+        .website(WEBSITE)
+        .issue_url(format!("{WEBSITE}/issues"))
+        .license_type(gtk::License::Gpl30)
+        .build()
+        .present(Some(win));
+}
+
+/// Everything on the Control page the update loop needs to touch.
 pub struct ControlView {
     pub battery: BatteryWidgets,
-    /// The device switcher; hidden unless more than one device is identified.
+    /// The device switcher, in the header bar in place of the title; hidden
+    /// unless more than one device is identified.
     pub device_dropdown: gtk::DropDown,
     pub device_list: gtk::StringList,
     /// MAC per row in `device_list`, kept parallel so the display string can differ.
@@ -247,40 +294,45 @@ pub struct ControlView {
     /// newly decoded model name refreshes the switcher even though the MAC list is
     /// unchanged.
     pub device_labels: RefCell<Vec<String>>,
-    pub noise_group: adw::PreferencesGroup,
-    /// One radio button per mode, in `NoiseMode::ALL` order.
-    pub noise_buttons: Vec<(NoiseMode, gtk::CheckButton)>,
+    /// `win.noise-mode`, enabled only while the device shown is on AAP. The Noise
+    /// Control group's sensitivity is bound to it.
+    pub noise_action: gio::SimpleAction,
     pub features_group: adw::PreferencesGroup,
 }
 
-/// Mirrors ui.createControlView.
-fn create_control_view() -> (gtk::Box, ControlView) {
+/// The Control page. An `AdwPreferencesPage` for its scrolling, width clamp and
+/// group spacing, although only the lower half is a list of settings.
+fn create_control_view() -> (adw::PreferencesPage, ControlView) {
+    let page = adw::PreferencesPage::new();
+
+    // Battery display and status line. Not rows, so they share a plain box in an
+    // untitled group rather than a boxed list.
     let control_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(20)
-        .margin_top(20)
-        .margin_bottom(20)
-        .margin_start(20)
-        .margin_end(20)
         .build();
+    let status_group = adw::PreferencesGroup::new();
+    status_group.add(&control_box);
+    page.add(&status_group);
 
-    // Device switcher. Only shown when more than one device is identified, so the
-    // common single-device case looks unchanged.
-    //
-    // A flat dropdown centered over the battery display rather than a boxed list
-    // row: it reads as a scope selector for what is directly below it, costs half
-    // the height of an AdwComboRow, and gives the device name the full width
-    // instead of sharing it with a title. What it selects is evident from where it
-    // sits, so the explanation lives in a tooltip rather than a subtitle.
+    // Device switcher, placed in the header bar by `setup_ui`. Only shown when
+    // more than one device is identified, so the common single-device case keeps
+    // the plain title. It scopes the whole page, and the header is where GNOME
+    // apps put that kind of selector. What it selects is evident from where it
+    // sits, so the explanation lives in a tooltip.
     let device_list = gtk::StringList::new(&[]);
     let device_dropdown = gtk::DropDown::builder()
         .model(&device_list)
-        .halign(gtk::Align::Center)
         .tooltip_text("Which AirPods these readings are from")
         .visible(false)
         .build();
-    device_dropdown.add_css_class("flat");
-    control_box.append(&device_dropdown);
+    // Flat, so it reads as the title until hovered. A dropdown in a header bar
+    // stays raised, and `flat` on the dropdown itself matches nothing in
+    // Adwaita's stylesheet: the rules style the button inside it, the
+    // `dropdown > button` node GTK documents.
+    if let Some(button) = device_dropdown.first_child() {
+        button.add_css_class("flat");
+    }
 
     let battery_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -355,31 +407,42 @@ fn create_control_view() -> (gtk::Box, ControlView) {
         .title("Noise Control")
         .build();
 
+    // The empty state selects nothing: until the device reports its mode, showing
+    // a row as chosen would claim a mode the AirPods may well not be in. The
+    // handler is attached in `activate`, which is where the coordinator to send
+    // the command to lives.
+    let noise_action = gio::SimpleAction::new_stateful(
+        NOISE_ACTION,
+        Some(glib::VariantTy::STRING),
+        &"".to_variant(),
+    );
+    noise_action.set_enabled(false);
+    // Dims the rows along with the radio buttons.
+    noise_action
+        .bind_property("enabled", &noise_control_group, "sensitive")
+        .sync_create()
+        .build();
+
     // The modes, their labels and their order all come from the protocol layer,
     // so this list cannot drift from the tray's.
-    //
-    // None starts out active: until the device reports its mode there is nothing
-    // to select, and showing the first row as chosen would claim a mode the
-    // AirPods may well not be in. The handlers are attached in `activate`, which
-    // is where the coordinator to send the command to lives.
-    let mut noise_buttons: Vec<(NoiseMode, gtk::CheckButton)> = Vec::new();
     for mode in NoiseMode::ALL {
         let row = adw::ActionRow::builder()
             .title(mode.label())
             .subtitle(mode.description())
             .build();
 
+        // With an action and a target, a check button draws as a radio and is
+        // active exactly when the action's state equals its target - which is
+        // what groups the four, so no set_group is needed.
         let radio_button = gtk::CheckButton::new();
-        if let Some((_, first)) = noise_buttons.first() {
-            radio_button.set_group(Some(first));
-        }
+        radio_button
+            .set_detailed_action_name(&format!("win.{NOISE_ACTION}::{}", noise_target(mode)));
 
         row.add_prefix(&radio_button);
         row.set_activatable_widget(Some(&radio_button));
         noise_control_group.add(&row);
-        noise_buttons.push((mode, radio_button));
     }
-    control_box.append(&noise_control_group);
+    page.add(&noise_control_group);
 
     // Features
     let conversation_group = adw::PreferencesGroup::builder().title("Features").build();
@@ -404,7 +467,7 @@ fn create_control_view() -> (gtk::Box, ControlView) {
     });
 
     conversation_group.add(&conversation_row);
-    control_box.append(&conversation_group);
+    page.add(&conversation_group);
 
     let view = ControlView {
         battery: widgets,
@@ -412,12 +475,28 @@ fn create_control_view() -> (gtk::Box, ControlView) {
         device_list,
         device_macs: RefCell::new(Vec::new()),
         device_labels: RefCell::new(Vec::new()),
-        noise_group: noise_control_group,
-        noise_buttons,
+        noise_action,
         features_group: conversation_group,
     };
 
-    (control_box, view)
+    (page, view)
+}
+
+/// The action target naming a mode. Stable identifiers, not labels, so the
+/// wording can change without touching the bindings.
+fn noise_target(mode: NoiseMode) -> &'static str {
+    match mode {
+        NoiseMode::Off => "off",
+        NoiseMode::NoiseCancelling => "noise-cancelling",
+        NoiseMode::Transparency => "transparency",
+        NoiseMode::Adaptive => "adaptive",
+    }
+}
+
+fn noise_mode_from_target(target: &str) -> Option<NoiseMode> {
+    NoiseMode::ALL
+        .into_iter()
+        .find(|m| noise_target(*m) == target)
 }
 
 /// Repopulates the switcher, preserving the current selection where possible.
@@ -472,12 +551,7 @@ fn device_labels(macs: &[String], snapshot: &Snapshot) -> Vec<String> {
 }
 
 /// Draws one device, and gates the control sections on how the data arrived.
-fn render_device(
-    view: &ControlView,
-    snapshot: &Snapshot,
-    mac: Option<&str>,
-    syncing_noise: &Rc<Cell<bool>>,
-) {
+fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
     let state = mac.and_then(|m| snapshot.states.get(m));
     let connected = mac.is_some() && mac == snapshot.connected_mac.as_deref();
 
@@ -487,9 +561,9 @@ fn render_device(
             // Noise control and features need an AAP connection; over BLE we can
             // read state but not command the device, so they are disabled.
             let interactive = state.source == DataSource::Aap;
-            view.noise_group.set_sensitive(interactive);
+            view.noise_action.set_enabled(interactive);
             view.features_group.set_sensitive(interactive);
-            sync_noise_buttons(view, syncing_noise, state.noise_mode);
+            show_noise_mode(view, state.noise_mode);
         }
         // Known device, nothing heard from it yet: show it as empty rather than
         // hiding it, so the switcher and the display agree. Distinguish a device
@@ -502,23 +576,18 @@ fn render_device(
                 "No recent data"
             };
             clear_battery_display(&view.battery, status);
-            view.noise_group.set_sensitive(false);
+            view.noise_action.set_enabled(false);
             view.features_group.set_sensitive(false);
-            sync_noise_buttons(view, syncing_noise, None);
+            show_noise_mode(view, None);
         }
     }
 }
 
 /// Selects the row for `mode`, or clears the group when nothing has reported one.
-///
-/// The guard keeps the resulting `toggled` from being read as a user choice and
-/// sent straight back to the device.
-fn sync_noise_buttons(view: &ControlView, syncing: &Rc<Cell<bool>>, mode: Option<NoiseMode>) {
-    syncing.set(true);
-    for (m, button) in &view.noise_buttons {
-        button.set_active(mode == Some(*m));
-    }
-    syncing.set(false);
+/// Setting the state is not an activation, so nothing goes out to the device.
+fn show_noise_mode(view: &ControlView, mode: Option<NoiseMode>) {
+    let target = mode.map_or("", noise_target);
+    view.noise_action.set_state(&target.to_variant());
 }
 
 /// Resets the display, with the reason shown in the status line.
@@ -535,22 +604,12 @@ fn clear_battery_display(w: &BatteryWidgets, status: &str) {
     w.last_seen_label.set_visible(false);
 }
 
-/// Mirrors ui.createSettingsView. Returns the Development group so the update loop
-/// can populate it - in Go this was captured by the callback closure instead.
-fn create_settings_view() -> (gtk::Box, adw::PreferencesGroup) {
-    let settings_box = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(20)
-        .margin_top(20)
-        .margin_bottom(20)
-        .margin_start(20)
-        .margin_end(20)
-        .build();
+/// The Preferences dialog. Returns the Development group so the update loop can
+/// populate it.
+fn create_preferences_dialog() -> (adw::PreferencesDialog, adw::PreferencesGroup) {
+    let page = adw::PreferencesPage::new();
 
-    let settings_group = adw::PreferencesGroup::builder()
-        .title("General")
-        .description("Application preferences")
-        .build();
+    let settings_group = adw::PreferencesGroup::builder().title("General").build();
 
     for (title, subtitle, active) in [
         (
@@ -576,23 +635,17 @@ fn create_settings_view() -> (gtk::Box, adw::PreferencesGroup) {
         row.set_activatable_widget(Some(&sw));
         settings_group.add(&row);
     }
-    settings_box.append(&settings_group);
+    page.add(&settings_group);
 
     let dev_group = adw::PreferencesGroup::builder()
         .title("Development")
         .description("Encryption keys for decrypting BLE advertisements")
         .build();
-    settings_box.append(&dev_group);
+    page.add(&dev_group);
 
-    let about_group = adw::PreferencesGroup::builder().title("About").build();
-    let about_row = adw::ActionRow::builder()
-        .title("LinuxPods")
-        .subtitle("Version 0.1.0")
-        .build();
-    about_group.add(&about_row);
-    settings_box.append(&about_group);
-
-    (settings_box, dev_group)
+    let dialog = adw::PreferencesDialog::new();
+    dialog.add(&page);
+    (dialog, dev_group)
 }
 
 /// Mirrors the DeviceRow struct declared inside createSettingsView.
@@ -881,6 +934,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(status_line(&state), "AirPods Pro 3 • Source: AAP");
+    }
+
+    /// Every mode survives the trip through its action target, and the empty
+    /// state - no mode reported yet - selects none of them.
+    #[test]
+    fn noise_targets_round_trip() {
+        for mode in NoiseMode::ALL {
+            assert_eq!(noise_mode_from_target(noise_target(mode)), Some(mode));
+        }
+        assert_eq!(noise_mode_from_target(""), None);
     }
 
     #[test]
