@@ -1,11 +1,12 @@
 //! Noise control mode over AAP: sub-command 0x0D of the 0x09 settings family.
 //!
-//! Format: 04 00 04 00 09 00 0D [mode] 00 00 00
+//! Format: 04 00 04 00 09 00 [sub-command] [value] 00 00 00
 //!
-//! The same packet serves both directions - we send it to switch mode, and the
+//! The mode packet serves both directions - we send it to switch mode, and the
 //! device sends it in its startup dump and whenever the mode is changed from
-//! another device. See `docs/aap-noise-control.md` for the verified layout and
-//! why the response cannot be used as an acknowledgement.
+//! another device. Off additionally needs sub-command 0x34, the setting that
+//! permits it at all. See `docs/aap-noise-control.md` for the verified layout
+//! and why the response cannot be used as an acknowledgement.
 
 /// Command byte position, shared by every AAP packet.
 const CMD: usize = 4;
@@ -19,6 +20,16 @@ const CMD_SETTINGS: u8 = 0x09;
 /// Noise control within that family. The family carries a dozen other
 /// sub-commands, so this has to be checked too - see [`is_noise_mode_packet`].
 const SUB_NOISE_CONTROL: u8 = 0x0D;
+
+/// Whether Off is allowed as a listening mode at all. Recent firmware refuses
+/// [`NoiseMode::Off`] with an error chime unless this is enabled - see
+/// [`allow_off_packet`].
+const SUB_ALLOW_OFF: u8 = 0x34;
+
+/// The enable/disable values shared by the boolean settings in this family.
+/// Note that disabled is 0x02, not 0x00.
+const ENABLED: u8 = 0x01;
+const DISABLED: u8 = 0x02;
 
 /// The four noise control modes an AirPods pair can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,8 +104,9 @@ pub enum NoiseParseError {
     UnknownMode(u8),
 }
 
-/// The packet that switches the device to `mode`.
-pub fn set_packet(mode: NoiseMode) -> [u8; 11] {
+/// One single-byte setting in the 0x09 family. Every command in it has this
+/// shape; the trailing three bytes are unused.
+fn settings_packet(sub_cmd: u8, value: u8) -> [u8; 11] {
     [
         0x04,
         0x00,
@@ -102,12 +114,28 @@ pub fn set_packet(mode: NoiseMode) -> [u8; 11] {
         0x00,
         CMD_SETTINGS,
         0x00,
-        SUB_NOISE_CONTROL,
-        mode.as_byte(),
+        sub_cmd,
+        value,
         0x00,
         0x00,
         0x00,
     ]
+}
+
+/// The packet that switches the device to `mode`.
+pub fn set_packet(mode: NoiseMode) -> [u8; 11] {
+    settings_packet(SUB_NOISE_CONTROL, mode.as_byte())
+}
+
+/// The packet that permits, or forbids, Off as a listening mode.
+///
+/// Recent firmware treats Off as opt-in: without this the AirPods answer
+/// `set_packet(NoiseMode::Off)` with an error chime and stay in the mode they
+/// were in. Apple gates it because loud sound reduction does not apply with
+/// noise control off. It is a persistent device setting - the same switch the
+/// user sees in iOS - so enabling it is not something to do unasked.
+pub fn allow_off_packet(allowed: bool) -> [u8; 11] {
+    settings_packet(SUB_ALLOW_OFF, if allowed { ENABLED } else { DISABLED })
 }
 
 /// True for a mode report.
@@ -154,6 +182,31 @@ mod tests {
             hex(set_packet(NoiseMode::Adaptive)),
             "0400040009000d04000000"
         );
+    }
+
+    /// From LibrePods' control command table: 0x34, enabled 0x01 / disabled 0x02.
+    #[test]
+    fn builds_the_allow_off_packets() {
+        assert_eq!(
+            allow_off_packet(true),
+            [
+                0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x34, 0x01, 0x00, 0x00, 0x00
+            ]
+        );
+        assert_eq!(
+            allow_off_packet(false),
+            [
+                0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x34, 0x02, 0x00, 0x00, 0x00
+            ]
+        );
+    }
+
+    /// It shares the 0x09 command byte with a mode report, so a loose check
+    /// would read its value byte as a mode - 0x01 being Off, that reads as the
+    /// mode the device just refused to enter.
+    #[test]
+    fn allow_off_is_not_a_mode_report() {
+        assert!(!is_noise_mode_packet(&allow_off_packet(true)));
     }
 
     #[test]
