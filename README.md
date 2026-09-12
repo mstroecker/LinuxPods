@@ -130,9 +130,25 @@ cargo run                # or: make run
 The first build compiles the GTK4 and libadwaita bindings and takes a couple of minutes.
 Later builds are incremental.
 
+## Installing
+
+```bash
+make install      # ~/.local/bin, autostart entry, launcher entry - no sudo
+make uninstall
+```
+
+`make install` puts a release build in `~/.local/bin/linuxpods`, writes an autostart entry
+that starts it in the tray on login, adds a launcher entry that opens it with the window,
+and starts it straight away. `PREFIX` overrides the install location.
+
+Assets are resolved from the checkout they were built in, so keep the source tree around -
+a moved or deleted tree leaves the installed binary without its icons.
+
 ## Usage
 
 Launch with `cargo run`, or `./target/release/linuxpods` after a release build.
+`--minimized` starts in the system tray without showing the window; the tray's
+**Open LinuxPods** brings it up.
 
 The **Control** tab shows the three battery levels, charging state and in-ear detection,
 along with which source the reading came from. The **Settings** tab lists every known
