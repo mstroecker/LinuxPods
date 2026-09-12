@@ -101,8 +101,11 @@ packet arrives; this deadlocked the Request Keys button.
 **UI.** Widget updates arrive only from the snapshot stream. Read a selection *before*
 mutating the widget - splicing a `StringList` makes `GtkDropDown` emit `selected-notify`,
 clobbering the user's choice. Noise Control and Features are commands, so they stay
-insensitive unless the device is on AAP; BLE is receive-only. Assets resolve at runtime
-from `CARGO_MANIFEST_DIR` and fail silently when missing, so a test asserts they exist.
+insensitive unless the device is on AAP; BLE is receive-only. Artwork and the app icon
+are compiled into a GResource by `build.rs` (`assets/resources.gresource.xml`); a missing
+resource fails silently, so a test asserts every name the UI loads is in the bundle. The
+tray still points the shell at `assets/icons` in the checkout: the shell draws it and
+cannot read resources inside the binary.
 
 ## Commits and pull requests
 

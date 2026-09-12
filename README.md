@@ -145,9 +145,8 @@ make uninstall
 that starts it in the tray on login, adds a launcher entry that opens it with the window,
 and starts it straight away. `PREFIX` overrides the install location.
 
-The tray and launcher icons are installed into the hicolor theme, so those are independent
-of the checkout. The battery artwork is still resolved from the checkout it was built in, so
-keep the source tree around.
+The tray and launcher icons are installed into the hicolor theme and the battery artwork is
+compiled into the binary, so the installed copy does not depend on the source tree.
 
 ## Usage
 
@@ -155,12 +154,13 @@ Launch with `cargo run`, or `./target/release/linuxpods` after a release build.
 `--minimized` starts in the system tray without showing the window; the tray's
 **Open LinuxPods** brings it up.
 
-The **Control** tab shows the three battery levels, charging state and in-ear detection,
-along with which source the reading came from. The **Settings** tab lists every known
-device with its encryption key status, and is where keys are requested.
+The window shows the three battery levels, charging state and in-ear detection, along
+with which source the reading came from. With more than one pair known, the header bar
+switches between them. **Preferences**, in the main menu, lists every known device with
+its encryption key status, and is where keys are requested.
 
 To get 1% accuracy over BLE, connect the AirPods to this machine and use
-**Settings → Development → Request Keys**. The keys are written to
+**Preferences → Development → Request Keys**. The keys are written to
 `~/.local/share/linuxpods/keys.json` and persist, so this is needed only once per device.
 From then on the app reads exact levels even when the AirPods are connected elsewhere.
 

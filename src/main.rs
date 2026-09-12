@@ -103,6 +103,9 @@ fn main() -> glib::ExitCode {
         }),
     ));
 
+    // The window's artwork and the About dialog's icon load from the bundle.
+    ui::register_resources();
+
     let app = adw::Application::builder().application_id(APP_ID).build();
     let handle = runtime.handle().clone();
 

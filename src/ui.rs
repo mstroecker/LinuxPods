@@ -6,7 +6,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -42,11 +41,21 @@ const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
 /// `noise_target`, and is `""` while no mode has been reported.
 const NOISE_ACTION: &str = "noise-mode";
 
-/// Assets live alongside the crate at the repo root.
-fn asset(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join(name)
+/// Prefix of the resources `build.rs` compiles from `assets/`.
+const RESOURCE_PREFIX: &str = "/com/linuxpods/app";
+
+/// Left pod, right pod, case - the order of the battery display's columns.
+const BATTERY_IMAGES: [&str; 3] = [
+    "left_airpod_pro3.png",
+    "right_airpod_pro3.png",
+    "airpod_case.png",
+];
+
+/// Registers the resources compiled into the binary. Call once, before the
+/// window is built.
+pub fn register_resources() {
+    gio::resources_register_include!("linuxpods.gresource")
+        .expect("the bundled GResource is valid");
 }
 
 /// Builds the window and wires it to the coordinator. The caller presents it,
@@ -61,10 +70,6 @@ pub fn activate(
     win.set_title(Some("LinuxPods"));
     // Tall enough for the whole Control page without scrolling.
     win.set_default_size(420, 680);
-
-    // The app icon only joins the icon theme on install; a source checkout needs
-    // the search path for the About dialog to find it.
-    gtk::IconTheme::for_display(&WidgetExt::display(&win)).add_search_path(asset("icons"));
 
     let (control, prefs, dev_group) = setup_ui(&win);
     let control = Rc::new(control);
@@ -341,23 +346,17 @@ fn create_control_view() -> (adw::PreferencesPage, ControlView) {
         .valign(gtk::Align::Start)
         .build();
 
-    let image_paths = [
-        "left_airpod_pro3.png",
-        "right_airpod_pro3.png",
-        "airpod_case.png",
-    ];
-
     let mut level_bars = Vec::with_capacity(3);
     let mut labels = Vec::with_capacity(3);
 
-    for path in image_paths {
+    for name in BATTERY_IMAGES {
         let column_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(10)
             .halign(gtk::Align::Center)
             .build();
 
-        let image = gtk::Image::from_file(asset(path));
+        let image = gtk::Image::from_resource(&format!("{RESOURCE_PREFIX}/{name}"));
         image.set_pixel_size(64);
         column_box.append(&image);
 
@@ -894,17 +893,19 @@ fn status_line(state: &PodState) -> String {
 mod tests {
     use super::*;
 
-    /// The asset path is resolved at runtime and a missing file fails silently -
-    /// gtk::Image::from_file just renders nothing. Moving the crate broke this once.
+    /// A missing resource fails silently - gtk::Image::from_resource renders
+    /// nothing, and the About dialog shows a placeholder for the app icon - so
+    /// every name the UI loads must be in the bundle.
     #[test]
-    fn assets_resolve_from_the_crate_root() {
-        for name in [
-            "left_airpod_pro3.png",
-            "right_airpod_pro3.png",
-            "airpod_case.png",
-        ] {
-            let path = asset(name);
-            assert!(path.exists(), "missing asset: {}", path.display());
+    fn bundled_resources_resolve() {
+        register_resources();
+        let icon = format!("icons/scalable/apps/{APP_ICON}.svg");
+        for name in BATTERY_IMAGES.into_iter().chain([icon.as_str()]) {
+            let path = format!("{RESOURCE_PREFIX}/{name}");
+            assert!(
+                gio::resources_get_info(&path, gio::ResourceLookupFlags::NONE).is_ok(),
+                "missing resource: {path}"
+            );
         }
     }
 
