@@ -3,7 +3,7 @@
 A native GNOME desktop application for managing Apple AirPods on Linux.
 
 <p align="center">
-  <img src="docs/images/control-tab.png" alt="LinuxPods Control tab: battery levels for both pods and the case, noise control modes and Conversation Awareness" width="360">
+  <img src="docs/images/control-tab.png" alt="LinuxPods window: device switcher in the header bar, battery levels for both pods and the case, noise control modes and Conversation Awareness" width="360">
 </p>
 
 > [!WARNING]
