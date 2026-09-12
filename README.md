@@ -7,18 +7,39 @@ A native GNOME desktop application for managing Apple AirPods on Linux.
 
 ## Features
 
-What the AirPods can do, and how much of it LinuxPods supports.
+What the AirPods can do, grouped by how LinuxPods reaches it.
+
+✅ fully working &nbsp;·&nbsp; 🚧 partial &nbsp;·&nbsp; 📋 planned &nbsp;·&nbsp; ❌ not planned
+
+### Over BLE
+
+Read passively from advertisements. No connection needed, so these keep working while the
+AirPods are connected to something else - an iPhone, say. Receive-only: nothing here can
+be changed, only observed.
 
 | Feature | Status |
 | --- | --- |
 | Battery level - left pod, right pod, case | ✅ |
+| Exact (1%) battery, once a stored key decrypts the advertisement | ✅ |
 | Charging state, per pod and case | ✅ |
 | In-ear detection | ✅ |
 | Case lid open/closed | ✅ |
 | Playback state - idle, music, call, ringing | ✅ |
 | Model and colour identification | ✅ |
-| Exact (1%) battery over BLE, via decryption | ✅ |
 | Identification behind a randomized BLE MAC | ✅ |
+
+Without a key the levels arrive in ~10% steps, and every 30-60 seconds rather than live.
+
+### Over AAP
+
+Needs an L2CAP connection to this machine, so it covers one pair at a time. This is the
+only channel that can *send* commands.
+
+| Feature | Status |
+| --- | --- |
+| Exact (1%) battery, live | ✅ |
+| Charging state | ✅ |
+| Encryption key retrieval, which unlocks 1% over BLE | ✅ |
 | Noise control - Transparency, Adaptive, ANC, Off | 🚧 |
 | Conversation Awareness | 🚧 |
 | Device rename | 📋 |
@@ -26,22 +47,34 @@ What the AirPods can do, and how much of it LinuxPods supports.
 | Personalized and adaptive volume | 📋 |
 | Loud sound reduction | 📋 |
 | Firmware version | 📋 |
+
+🚧 means the interface is built but the command behind it is still unknown.
+
+### Linux integration
+
+| Feature | Status |
+| --- | --- |
+| Battery in GNOME Settings → Power, via `org.bluez.BatteryProvider1` | ✅ |
+| System tray battery and quick actions (StatusNotifierItem) | ✅ |
+| Several pairs tracked at once, with a switcher | ✅ |
+| Keys stored under the XDG data directory and reused across sessions | ✅ |
+| Native libadwaita interface following the GNOME HIG | ✅ |
+| Low battery notifications | 📋 |
+| Persisted UI preferences | 📋 |
+
+### Not reachable from Linux
+
+These depend on Apple's audio pipeline, the U1 chip, or iCloud, so they are out of scope
+rather than unimplemented.
+
+| Feature | Status |
+| --- | --- |
 | Ear tip fit test | ❌ |
 | Spatial audio and head tracking | ❌ |
 | Find My and Precision Finding | ❌ |
 | Hearing aid and hearing test | ❌ |
 | Automatic device switching between Apple devices | ❌ |
 | Announce notifications | ❌ |
-
-✅ fully working &nbsp;·&nbsp; 🚧 partial &nbsp;·&nbsp; 📋 planned &nbsp;·&nbsp; ❌ not planned
-
-🚧 means the interface is built but the AAP command behind it is still unknown.
-❌ means the feature depends on something Linux has no access to - Apple's audio
-pipeline, the U1 chip, or iCloud - rather than on work nobody has done yet.
-
-Alongside those, LinuxPods reads **multiple pairs at once**, keeps working **while the
-AirPods are connected to something else** such as an iPhone, and surfaces the battery in
-the **system tray** and in **GNOME Settings → Power**.
 
 ## Supported devices
 
@@ -111,9 +144,8 @@ Coordinator (state per device, keyed by real MAC)
 Each subscriber gets its own channel and receives the current state immediately on
 subscribing, so the interface is populated before the first advertisement arrives.
 
-AAP runs over an L2CAP socket on PSM 4097 and updates in under a second. BLE scanning is
-passive, arrives every 30-60 seconds, and is decrypted with AES-128 when a key is stored.
-The protocols are documented in full:
+AAP runs over an L2CAP socket on PSM 4097; BLE advertisements are decrypted with AES-128
+when a key is stored. Both protocols are documented in full:
 
 - [`docs/ble-proximity-pairing.md`](docs/ble-proximity-pairing.md) - advertisement layout,
   decryption, and how a device is identified behind a randomized address
