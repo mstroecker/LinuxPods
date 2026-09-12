@@ -109,7 +109,7 @@ What is actually unclear in each case:
 
 ## Requirements
 
-GTK4, libadwaita, BlueZ, and Rust 1.85 or newer (edition 2024) to build.
+GTK4, libadwaita, BlueZ, and Rust 1.92 or newer (edition 2024) to build.
 
 ```bash
 # Arch Linux

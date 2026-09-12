@@ -5,7 +5,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 ## Project
 
 LinuxPods manages Apple AirPods on Linux: a GTK4/libadwaita GNOME app with battery
-monitoring, a system tray and GNOME Settings integration. Rust, edition 2024, 1.85+.
+monitoring, a system tray and GNOME Settings integration. Rust, edition 2024, 1.92+.
 Dependencies and versions are in `Cargo.toml`; build targets are in the `Makefile`.
 
 **Verify the binary is fresh before testing against hardware.** `cargo test` builds test
