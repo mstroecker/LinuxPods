@@ -202,6 +202,10 @@ impl Client {
             .recv(&mut buf)
             .await
             .context("failed to read packet")?;
+        // SOCK_SEQPACKET reports a closed channel - the device hanging up, or our
+        // own shutdown - as a zero-length read, not an error. An AAP packet is never
+        // empty; returning one spun the read loop on a dead socket.
+        anyhow::ensure!(n > 0, "connection closed");
         buf.truncate(n);
         Ok(buf)
     }
