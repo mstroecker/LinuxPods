@@ -61,8 +61,14 @@ impl Indicator {
     }
 
     /// Spawns the tray and returns a handle for later updates.
+    ///
+    /// The spec has an item own `org.kde.StatusNotifierItem-PID-ID`, which a
+    /// Flatpak sandbox cannot grant: it rejects the wildcard such a name needs.
+    /// There the item registers under its unique connection name instead.
     pub async fn start(self) -> anyhow::Result<Handle<Indicator>> {
-        TrayMethods::spawn(self)
+        let sandboxed = std::path::Path::new("/.flatpak-info").exists();
+        TrayMethods::disable_dbus_name(self, sandboxed)
+            .spawn()
             .await
             .map_err(|e| anyhow::anyhow!("failed to start tray: {e}"))
     }
@@ -101,8 +107,16 @@ impl Tray for Indicator {
         ICON_NAME.into()
     }
 
+    /// Empty unless the checkout still exists. The AppIndicator extension looks
+    /// the icon up in this path alone when one is given, with no fallback to the
+    /// default theme - so a path that is gone (the build dir of a Flatpak, a
+    /// moved checkout) hides the installed icon behind a placeholder.
     fn icon_theme_path(&self) -> String {
-        ICON_THEME_PATH.into()
+        if std::path::Path::new(ICON_THEME_PATH).is_dir() {
+            ICON_THEME_PATH.into()
+        } else {
+            String::new()
+        }
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
