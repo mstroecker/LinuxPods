@@ -23,10 +23,12 @@ const ICON_NAME: &str = "com.linuxpods.app-symbolic";
 pub trait TrayActions: Send + Sync + 'static {
     fn show_window(&self);
     fn quit(&self);
-    fn set_noise_mode(&self, mode: NoiseMode);
+    fn set_noise_mode(&self, mac: String, mode: NoiseMode);
 }
 
 pub struct Indicator {
+    /// The device shown, which is the one noise control commands go to.
+    mac: Option<String>,
     left: Option<u8>,
     right: Option<u8>,
     case: Option<u8>,
@@ -45,6 +47,7 @@ pub struct Indicator {
 impl Indicator {
     pub fn new(actions: Arc<dyn TrayActions>) -> Self {
         Self {
+            mac: None,
             left: None,
             right: None,
             case: None,
@@ -141,7 +144,9 @@ impl Tray for Indicator {
                     // away and broadcasts, so the menu follows a command that
                     // actually went out - and stays put on one that failed.
                     activate: Box::new(move |this: &mut Self| {
-                        this.actions.set_noise_mode(mode);
+                        if let Some(mac) = this.mac.clone() {
+                            this.actions.set_noise_mode(mac, mode);
+                        }
                     }),
                     ..Default::default()
                 }
@@ -178,6 +183,7 @@ pub async fn apply_snapshot(handle: &Handle<Indicator>, snapshot: &Snapshot) {
     };
     handle
         .update(move |tray: &mut Indicator| {
+            tray.mac = (!state.real_mac.is_empty()).then(|| state.real_mac.clone());
             tray.left = state.left_battery;
             tray.right = state.right_battery;
             tray.case = state.case_battery;

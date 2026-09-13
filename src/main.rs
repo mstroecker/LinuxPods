@@ -7,6 +7,7 @@
 use linuxpods::{ble, bluez, indicator, podstate, ui};
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -43,10 +44,10 @@ impl TrayActions for AppActions {
         let _ = self.window.send_blocking(WindowCommand::Quit);
     }
 
-    fn set_noise_mode(&self, mode: NoiseMode) {
+    fn set_noise_mode(&self, mac: String, mode: NoiseMode) {
         let coordinator = self.coordinator.clone();
         self.runtime.spawn(async move {
-            if let Err(e) = coordinator.set_noise_control(mode).await {
+            if let Err(e) = coordinator.set_noise_control(&mac, mode).await {
                 tracing::warn!("failed to set noise control from tray: {e:#}");
             }
         });
@@ -227,9 +228,18 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
         .set_device_names(provider.device_aliases().await)
         .await;
 
-    // Attach to AirPods that are already connected.
-    if let Ok(device_path) = provider.discover_airpods().await {
-        attach_device(&mut provider, &coordinator, &device_path).await;
+    // The AirPods attached so far, by BlueZ object path, with their MAC. Kept
+    // rather than looked up on disconnect, by when the device may be gone.
+    let mut attached: HashMap<String, String> = HashMap::new();
+
+    // Attach to AirPods that are already connected - every pair, not just one.
+    match provider.connected_airpods().await {
+        Ok(paths) => {
+            for device_path in paths {
+                attach_device(&mut provider, &coordinator, &mut attached, &device_path).await;
+            }
+        }
+        Err(e) => tracing::warn!("failed to list connected devices: {e:#}"),
     }
 
     let updates = coordinator.subscribe();
@@ -246,27 +256,35 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
 
                 coordinator.set_device_names(provider.device_aliases().await).await;
 
-                // Only react to AirPods, not every Bluetooth device on the system.
-                if !alias.contains("AirPods") {
-                    continue;
-                }
-
                 if event.connected {
+                    // Only react to AirPods, not every Bluetooth device on the system.
+                    if !alias.contains("AirPods") {
+                        continue;
+                    }
                     tracing::info!("AirPods connected: {}", event.device_path);
-                    attach_device(&mut provider, &coordinator, &event.device_path).await;
-                } else {
+                    attach_device(&mut provider, &coordinator, &mut attached, &event.device_path)
+                        .await;
+                } else if let Some(mac) = attached.remove(&event.device_path) {
+                    // Only this device's link goes; any other pair keeps its own.
                     tracing::info!("AirPods disconnected: {}", event.device_path);
-                    coordinator.disconnect_aap().await;
+                    coordinator.disconnect_aap(&mac).await;
+                    if let Err(e) = provider.remove_battery(&mac).await {
+                        tracing::warn!("failed to remove battery object for {mac}: {e:#}");
+                    }
                 }
             }
 
-            // Mirror the lowest earbud level into GNOME Settings.
+            // Mirror each attached pair's lowest earbud into GNOME Settings, from
+            // whichever source has it - AAP, or BLE when the link failed.
             Ok(snapshot) = updates.recv() => {
-                let Some(level) = snapshot.primary().and_then(|s| s.lowest_earbud()) else {
-                    continue;
-                };
-                if let Err(e) = provider.update_percentage(level).await {
-                    tracing::debug!("update BlueZ battery: {e}");
+                for mac in attached.values() {
+                    let Some(level) = snapshot.states.get(mac).and_then(|s| s.lowest_earbud())
+                    else {
+                        continue;
+                    };
+                    if let Err(e) = provider.update_percentage(mac, level).await {
+                        tracing::debug!("update BlueZ battery for {mac}: {e}");
+                    }
                 }
             }
 
@@ -275,33 +293,30 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
     }
 }
 
-/// Registers the battery object and opens an AAP connection for one device.
+/// Registers a battery object and opens an AAP connection for one device.
 async fn attach_device(
     provider: &mut bluez::BatteryProvider,
     coordinator: &Arc<Coordinator>,
+    attached: &mut HashMap<String, String>,
     device_path: &str,
 ) {
-    if !provider.has_battery() {
-        match provider.add_battery(0, device_path).await {
+    let Ok(mac) = provider.device_address(device_path).await else {
+        tracing::warn!("could not read address for {device_path}");
+        return;
+    };
+    attached.insert(device_path.to_string(), mac.clone());
+
+    if !provider.has_battery(&mac) {
+        match provider.add_battery(&mac, device_path).await {
             Ok(()) => tracing::info!("Battery provider registered for {device_path}"),
             Err(e) => tracing::warn!("failed to add battery object: {e:#}"),
         }
     }
 
-    let Ok(mac) = provider.device_address(device_path).await else {
-        tracing::warn!("could not read address for {device_path}");
-        return;
-    };
-
-    match coordinator.connect_aap(&mac).await {
-        Ok(()) => {
-            let coord = coordinator.clone();
-            tokio::spawn(async move { coord.aap_read_loop(mac).await });
-        }
-        Err(e) => {
-            tracing::warn!("failed to connect AAP: {e:#}");
-            tracing::warn!("Falling back to BLE for battery monitoring (approximate)");
-        }
+    // Starts the link's read loop as well.
+    if let Err(e) = coordinator.connect_aap(&mac).await {
+        tracing::warn!("failed to connect AAP to {mac}: {e:#}");
+        tracing::warn!("Falling back to BLE for battery monitoring (approximate)");
     }
 }
 

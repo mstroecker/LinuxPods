@@ -173,13 +173,13 @@ address collapse onto a single device.
 
 ```
 Coordinator (state per device, keyed by real MAC)
-    ├─ AAP client ─────────> exact battery for the connected device
+    ├─ AAP links ──────────> exact battery for every connected pair, one link each
     ├─ BLE scanner ────────> advertisements from every other device
-    ├─ Per-device choice ──> AAP supersedes BLE only for the device it is connected to
+    ├─ Per-device choice ──> AAP supersedes BLE only for the devices it is connected to
     └─ Broadcasts snapshots to every subscriber:
         ├─ UI ─────────────> battery widgets, device switcher
         ├─ System tray ────> tray menu
-        └─ BlueZ provider ─> GNOME Settings battery
+        └─ BlueZ provider ─> GNOME Settings battery, one per connected pair
 ```
 
 Each subscriber gets its own channel and receives the current state immediately on

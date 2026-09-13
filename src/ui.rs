@@ -139,32 +139,6 @@ pub fn activate(
     ]);
     app.set_accels_for_action("win.preferences", &["<Control>comma"]);
 
-    // Switching mode is a command: it goes out over the tokio runtime, and the
-    // action's state follows the coordinator's snapshot rather than the click. A
-    // failed command therefore leaves the previous mode selected instead of
-    // claiming one the AirPods never switched to.
-    //
-    // Handling `activate` keeps GIO from changing the state on its own, and a
-    // state set from a snapshot is never an activation, so nothing needs guarding
-    // against a snapshot echoing back out as a command.
-    let coord = coordinator.clone();
-    let rt = runtime.clone();
-    control.noise_action.connect_activate(move |_, target| {
-        let Some(mode) = target
-            .and_then(|t| t.str())
-            .and_then(noise_mode_from_target)
-        else {
-            return;
-        };
-        let coord = coord.clone();
-        rt.spawn(async move {
-            if let Err(e) = coord.set_noise_control(mode).await {
-                tracing::warn!("failed to set noise control: {e:#}");
-            }
-        });
-    });
-    win.add_action(&control.noise_action);
-
     // Updates arrive over an async channel consumed on the main context. GTK types
     // are !Send, so this is the only legal way in - enforced at compile time.
     let device_rows: Rc<RefCell<HashMap<String, DeviceRow>>> =
@@ -176,6 +150,37 @@ pub fn activate(
     let last_snapshot: Rc<RefCell<Option<Snapshot>>> = Rc::new(RefCell::new(None));
     // Guards against the programmatic set_selected() below re-entering this handler.
     let syncing = Rc::new(Cell::new(false));
+
+    // Switching mode is a command: it goes out over the tokio runtime, and the
+    // action's state follows the coordinator's snapshot rather than the click. A
+    // failed command therefore leaves the previous mode selected instead of
+    // claiming one the AirPods never switched to.
+    //
+    // Handling `activate` keeps GIO from changing the state on its own, and a
+    // state set from a snapshot is never an activation, so nothing needs guarding
+    // against a snapshot echoing back out as a command.
+    let coord = coordinator.clone();
+    let rt = runtime.clone();
+    let noise_target_device = selected.clone();
+    control.noise_action.connect_activate(move |_, target| {
+        let Some(mode) = target
+            .and_then(|t| t.str())
+            .and_then(noise_mode_from_target)
+        else {
+            return;
+        };
+        // The device on show: with several pairs connected, each has its own link.
+        let Some(mac) = noise_target_device.borrow().clone() else {
+            return;
+        };
+        let coord = coord.clone();
+        rt.spawn(async move {
+            if let Err(e) = coord.set_noise_control(&mac, mode).await {
+                tracing::warn!("failed to set noise control: {e:#}");
+            }
+        });
+    });
+    win.add_action(&control.noise_action);
 
     control
         .device_dropdown
@@ -256,7 +261,13 @@ pub fn activate(
             // AAP-connected device, else the first known one.
             let chosen = current
                 .filter(|m| macs.contains(m))
-                .or_else(|| snapshot.connected_mac.clone().filter(|m| macs.contains(m)))
+                .or_else(|| {
+                    snapshot
+                        .connected_macs
+                        .iter()
+                        .find(|m| macs.contains(m))
+                        .cloned()
+                })
                 .or_else(|| macs.first().cloned());
             *selected.borrow_mut() = chosen.clone();
 
@@ -649,7 +660,7 @@ fn device_labels(macs: &[String], snapshot: &Snapshot) -> Vec<String> {
 /// Draws one device, and gates the control sections on how the data arrived.
 fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
     let state = mac.and_then(|m| snapshot.states.get(m));
-    let connected = mac.is_some() && mac == snapshot.connected_mac.as_deref();
+    let connected = mac.is_some_and(|m| snapshot.is_connected(m));
 
     match state {
         Some(state) => {
@@ -755,8 +766,6 @@ fn update_device_rows(
     coordinator: &std::sync::Arc<Coordinator>,
     runtime: &tokio::runtime::Handle,
 ) {
-    let connected_mac = snapshot.connected_mac.as_deref();
-
     // Known devices first, in stable key order, then anything else we have heard
     // advertising. Unknown entries are the whole point of a Development section:
     // they are how you spot a device whose key you have not captured yet.
@@ -800,6 +809,7 @@ fn update_device_rows(
             // the !Send widgets legal.
             let coord = coordinator.clone();
             let rt = runtime.clone();
+            let mac = mac_addr.clone();
             request_button.connect_clicked(glib::clone!(
                 #[weak]
                 request_button,
@@ -809,8 +819,9 @@ fn update_device_rows(
 
                     let (tx, rx) = async_channel::bounded(1);
                     let coord = coord.clone();
+                    let mac = mac.clone();
                     rt.spawn(async move {
-                        let _ = tx.send(coord.request_encryption_keys().await).await;
+                        let _ = tx.send(coord.request_encryption_keys(&mac).await).await;
                     });
 
                     glib::spawn_future_local(async move {
@@ -849,7 +860,7 @@ fn update_device_rows(
         }
 
         let dev_row = &rows[mac_addr];
-        let connected = Some(mac_addr.as_str()) == connected_mac;
+        let connected = snapshot.is_connected(mac_addr);
 
         // Show the rotating BLE address alongside the real one when they differ.
         let title = match state {

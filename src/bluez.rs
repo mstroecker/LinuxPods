@@ -67,7 +67,14 @@ impl BatteryProvider1 {
 /// Owns the D-Bus connection and the registered provider.
 pub struct BatteryProvider {
     conn: Connection,
-    battery_path: Option<OwnedObjectPath>,
+    /// One battery object per attached device, keyed by MAC.
+    batteries: HashMap<String, OwnedObjectPath>,
+}
+
+/// Where one device's battery object lives, under the provider root.
+fn battery_path(mac: &str) -> Result<OwnedObjectPath> {
+    let path = format!("{PROVIDER_PATH}/{BATTERY_NAME}_{}", mac.replace(':', "_"));
+    OwnedObjectPath::try_from(path.as_str()).with_context(|| format!("invalid battery path {path}"))
 }
 
 impl BatteryProvider {
@@ -95,13 +102,14 @@ impl BatteryProvider {
 
         Ok(Self {
             conn,
-            battery_path: None,
+            batteries: HashMap::new(),
         })
     }
 
-    /// Adds the battery object. Registering the interface emits InterfacesAdded.
-    pub async fn add_battery(&mut self, percentage: u8, device_path: &str) -> Result<()> {
-        let battery_path = OwnedObjectPath::try_from(format!("{PROVIDER_PATH}/{BATTERY_NAME}"))?;
+    /// Adds one device's battery object, at 0% until its first reading.
+    /// Registering the interface emits InterfacesAdded.
+    pub async fn add_battery(&mut self, mac: &str, device_path: &str) -> Result<()> {
+        let battery_path = battery_path(mac)?;
         let device = OwnedObjectPath::try_from(device_path.to_string())
             .with_context(|| format!("invalid device path {device_path}"))?;
 
@@ -110,7 +118,7 @@ impl BatteryProvider {
             .at(
                 &battery_path,
                 BatteryProvider1 {
-                    percentage,
+                    percentage: 0,
                     device,
                     source: SOURCE.to_string(),
                 },
@@ -118,14 +126,14 @@ impl BatteryProvider {
             .await
             .context("failed to export battery object")?;
 
-        self.battery_path = Some(battery_path);
+        self.batteries.insert(mac.to_string(), battery_path);
         Ok(())
     }
 
-    /// Updates the percentage, emitting PropertiesChanged.
-    pub async fn update_percentage(&self, percentage: u8) -> Result<()> {
-        let Some(path) = &self.battery_path else {
-            anyhow::bail!("battery device {BATTERY_NAME} not registered");
+    /// Updates one device's percentage, emitting PropertiesChanged.
+    pub async fn update_percentage(&self, mac: &str, percentage: u8) -> Result<()> {
+        let Some(path) = self.batteries.get(mac) else {
+            anyhow::bail!("no battery object registered for {mac}");
         };
 
         let iface_ref = self
@@ -147,9 +155,9 @@ impl BatteryProvider {
         Ok(())
     }
 
-    /// Removes the battery object, emitting InterfacesRemoved.
-    pub async fn remove_battery(&mut self) -> Result<()> {
-        if let Some(path) = self.battery_path.take() {
+    /// Removes one device's battery object, emitting InterfacesRemoved.
+    pub async fn remove_battery(&mut self, mac: &str) -> Result<()> {
+        if let Some(path) = self.batteries.remove(mac) {
             self.conn
                 .object_server()
                 .remove::<BatteryProvider1, _>(&path)
@@ -163,8 +171,8 @@ impl BatteryProvider {
         &self.conn
     }
 
-    /// Finds a connected device whose alias contains "AirPods".
-    pub async fn discover_airpods(&self) -> Result<String> {
+    /// Every connected device whose alias contains "AirPods".
+    pub async fn connected_airpods(&self) -> Result<Vec<String>> {
         let om = zbus::fdo::ObjectManagerProxy::builder(&self.conn)
             .destination(BLUEZ_SERVICE)?
             .path("/")?
@@ -176,23 +184,19 @@ impl BatteryProvider {
             .await
             .context("failed to get managed objects")?;
 
-        for (path, interfaces) in objects {
-            let Some(props) = interfaces.get("org.bluez.Device1") else {
-                continue;
-            };
-            if !is_airpods(props) {
-                continue;
-            }
-            let connected = props
-                .get("Connected")
-                .and_then(|v| bool::try_from(v.clone()).ok())
-                .unwrap_or(false);
-            if connected {
-                return Ok(path.to_string());
-            }
-        }
-
-        anyhow::bail!("no connected AirPods device found")
+        Ok(objects
+            .into_iter()
+            .filter(|(_, interfaces)| {
+                interfaces.get("org.bluez.Device1").is_some_and(|props| {
+                    is_airpods(props)
+                        && props
+                            .get("Connected")
+                            .and_then(|v| bool::try_from(v.clone()).ok())
+                            .unwrap_or(false)
+                })
+            })
+            .map(|(path, _)| path.to_string())
+            .collect())
     }
 
     pub async fn device_address(&self, device_path: &str) -> Result<String> {
@@ -256,7 +260,10 @@ impl BatteryProvider {
 
     /// Unregisters the provider. Called on shutdown.
     pub async fn close(&mut self) -> Result<()> {
-        let _ = self.remove_battery().await;
+        let macs: Vec<String> = self.batteries.keys().cloned().collect();
+        for mac in macs {
+            let _ = self.remove_battery(&mac).await;
+        }
         let manager = BatteryProviderManager1Proxy::new(&self.conn).await?;
         let path = ObjectPath::try_from(PROVIDER_PATH)?;
         manager.unregister_battery_provider(&path).await?;
@@ -311,8 +318,8 @@ impl BatteryProvider {
         }))
     }
 
-    pub fn has_battery(&self) -> bool {
-        self.battery_path.is_some()
+    pub fn has_battery(&self, mac: &str) -> bool {
+        self.batteries.contains_key(mac)
     }
 }
 
@@ -381,6 +388,19 @@ mod tests {
         );
 
         assert_eq!(device_name_entry(&props(None)), None);
+    }
+
+    /// One object per device, and a MAC's colons are not legal in an object path.
+    #[test]
+    fn battery_paths_are_per_device() {
+        assert_eq!(
+            battery_path("AA:BB:CC:DD:EE:FF").unwrap().as_str(),
+            "/com/github/mstroecker/linuxpods/battery/airpods_battery_AA_BB_CC_DD_EE_FF"
+        );
+        assert_ne!(
+            battery_path("AA:BB:CC:DD:EE:FF").unwrap(),
+            battery_path("11:22:33:44:55:66").unwrap()
+        );
     }
 
     #[test]
