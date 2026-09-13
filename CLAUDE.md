@@ -54,7 +54,10 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
 
 **Keys are requested on every AAP connection**, not only when none is stored. Re-pairing
 regenerates them, and a stale key fails suffix validation without a word, dropping BLE
-to 10% steps. The request is one packet; `aap_read_loop` stores whatever key comes back.
+to 10% steps. The request is one packet; `aap_read_loop` stores the key that comes back if it is
+16 bytes and differs from the one held - the length check keeps a malformed key from
+replacing a working one on disk, and skipping an unchanged key avoids a keystore
+write per connection.
 
 **BLE validation is by MAC suffix.** Bytes 7-9 of the decrypted payload hold the last
 three bytes of the real MAC; a match both validates and identifies. A connected device

@@ -773,7 +773,12 @@ fn update_device_rows(
         let state = snapshot.states.get(mac_addr);
         let mut rows = device_rows.borrow_mut();
         if !rows.contains_key(mac_addr) {
-            let row = adw::ActionRow::builder().title(mac_addr).build();
+            // Title and subtitle carry device data, which must never be read as
+            // Pango markup - libadwaita's default.
+            let row = adw::ActionRow::builder()
+                .title(mac_addr)
+                .use_markup(false)
+                .build();
 
             let status_label = gtk::Label::new(Some("Idle"));
             status_label.add_css_class("dim-label");

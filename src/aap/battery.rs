@@ -66,7 +66,8 @@ impl std::fmt::Display for Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Battery {
     pub component: Component,
-    pub level: u8,
+    /// `None` when the device reports a level above 100, which means unavailable.
+    pub level: Option<u8>,
     pub status: Status,
 }
 
@@ -111,9 +112,10 @@ pub fn parse_battery_packet(packet: &[u8]) -> Result<BatteryInfo, BatteryParseEr
             return Err(BatteryParseError::Incomplete(offset));
         }
 
+        let level = packet[offset + 2];
         let battery = Battery {
             component: Component::from(packet[offset]),
-            level: packet[offset + 2],
+            level: (level <= 100).then_some(level),
             status: Status::from(packet[offset + 3]),
         };
 
@@ -161,15 +163,27 @@ mod tests {
         let info = parse_battery_packet(&p).unwrap();
 
         let left = info.left.unwrap();
-        assert_eq!(left.level, 80);
+        assert_eq!(left.level, Some(80));
         assert_eq!(left.status, Status::Discharging);
         assert!(!left.is_charging());
 
         let right = info.right.unwrap();
-        assert_eq!(right.level, 75);
+        assert_eq!(right.level, Some(75));
         assert!(right.is_charging());
 
-        assert_eq!(info.case.unwrap().level, 42);
+        assert_eq!(info.case.unwrap().level, Some(42));
+    }
+
+    /// Levels above 100 mean unavailable, as they do over BLE. The component and
+    /// its status still count.
+    #[test]
+    fn treats_levels_above_100_as_unknown() {
+        let info = parse_battery_packet(&packet(&[(4, 100, 2), (2, 101, 1), (8, 255, 2)])).unwrap();
+        assert_eq!(info.left.unwrap().level, Some(100));
+        let right = info.right.unwrap();
+        assert_eq!(right.level, None);
+        assert!(right.is_charging());
+        assert_eq!(info.case.unwrap().level, None);
     }
 
     #[test]

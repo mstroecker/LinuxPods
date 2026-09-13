@@ -103,8 +103,6 @@ pub struct PodState {
     pub real_mac: String,
     pub current_ble_mac: String,
 
-    pub encryption_key: Option<Vec<u8>>,
-
     /// True when this state is attributable to a known device: always for AAP, and
     /// for BLE only when a stored key decrypted the advertisement. Unidentified
     /// advertisements are deliberately kept out of the main UI.
@@ -407,14 +405,6 @@ impl Coordinator {
         let identified = real_mac.is_some();
         let key_mac = real_mac.clone().unwrap_or_else(|| ble_mac.clone());
 
-        let encryption_key = self
-            .inner
-            .read()
-            .await
-            .encryption_keys
-            .get(&key_mac)
-            .cloned();
-
         let state = PodState {
             source: DataSource::Ble,
             left_battery: data.left_battery,
@@ -436,7 +426,6 @@ impl Coordinator {
             primary_pod: data.primary_pod(),
             real_mac: real_mac.unwrap_or_default(),
             current_ble_mac: ble_mac,
-            encryption_key,
             identified,
             // Stamped from the entry in `snapshot`.
             last_seen: None,
@@ -615,11 +604,13 @@ impl Coordinator {
                 }
             }
 
-            if aap::is_key_packet(&packet)
-                && let Ok(keys) = aap::parse_proximity_keys(&packet)
-                && let Some(enc) = aap::find_encryption_key(&keys)
-            {
-                self.store_encryption_key(&mac_addr, enc).await;
+            if aap::is_key_packet(&packet) {
+                match aap::parse_proximity_keys(&packet)
+                    .and_then(|keys| aap::find_encryption_key(&keys))
+                {
+                    Ok(key) => self.store_encryption_key(&mac_addr, &key).await,
+                    Err(e) => tracing::warn!("AAP key packet rejected: {e}"),
+                }
             }
         }
     }
@@ -629,29 +620,26 @@ impl Coordinator {
         // that identity forward from whatever BLE last saw for this device, so the
         // UI does not lose the device name the moment it connects. The previous
         // AAP reading covers a device that has not advertised yet.
-        let (encryption_key, identity) = {
+        let identity = {
             let inner = self.inner.read().await;
-            let key = inner.encryption_keys.get(mac_addr).cloned();
-            let identity = inner
+            inner
                 .ble
                 .get(mac_addr)
                 .map(|e| &e.state)
                 .or(inner.aap.as_ref())
-                .map(|s| (s.device_model, s.model_name.clone(), s.color, s.primary_pod));
-            (key, identity)
+                .map(|s| (s.device_model, s.model_name.clone(), s.color, s.primary_pod))
         };
         let (device_model, model_name, color, primary_pod) = identity.unwrap_or_default();
 
         let state = PodState {
             source: DataSource::Aap,
-            left_battery: info.left.map(|b| b.level),
-            right_battery: info.right.map(|b| b.level),
-            case_battery: info.case.map(|b| b.level),
+            left_battery: info.left.and_then(|b| b.level),
+            right_battery: info.right.and_then(|b| b.level),
+            case_battery: info.case.and_then(|b| b.level),
             left_charging: info.left.is_some_and(|b| b.is_charging()),
             right_charging: info.right.is_some_and(|b| b.is_charging()),
             case_charging: info.case.is_some_and(|b| b.is_charging()),
             real_mac: mac_addr.to_string(),
-            encryption_key,
             identified: true,
             device_model,
             model_name,
@@ -737,21 +725,25 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Persists a newly received ENC_KEY and refreshes the affected state.
+    /// Persists a newly received ENC_KEY and broadcasts the new key list.
+    ///
+    /// Keys are requested on every connection, so this is usually the key already
+    /// held. That is skipped rather than rewriting the keystore each time - which
+    /// also keeps a device repeating its key packet from keeping the disk busy.
     async fn store_encryption_key(&self, mac_addr: &str, key: &[u8]) {
         {
             let mut inner = self.inner.write().await;
+            if inner
+                .encryption_keys
+                .get(mac_addr)
+                .is_some_and(|k| k.as_slice() == key)
+            {
+                tracing::debug!("Encryption key for {mac_addr} unchanged");
+                return;
+            }
             inner
                 .encryption_keys
                 .insert(mac_addr.to_string(), key.to_vec());
-            if let Some(entry) = inner.ble.get_mut(mac_addr) {
-                entry.state.encryption_key = Some(key.to_vec());
-            }
-            if inner.connected_mac.as_deref() == Some(mac_addr)
-                && let Some(state) = inner.aap.as_mut()
-            {
-                state.encryption_key = Some(key.to_vec());
-            }
         }
 
         let mut ks = self.keystore.lock().await;

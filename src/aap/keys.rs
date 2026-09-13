@@ -5,6 +5,8 @@
 //!   4:   key marker 0x31  5: unknown   6: key count
 //! Then per key: [type] [unknown] [len] [unknown] [data...]
 
+use crate::ble::decrypt::KEY_LEN;
+
 /// Identity-Resolving Key / Encryption Key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyType {
@@ -43,8 +45,8 @@ pub struct ProximityKey {
 pub enum KeyParseError {
     #[error("packet too short (need at least 7 bytes, got {0})")]
     TooShort(usize),
-    #[error("not a key packet (byte[4]=0x{0:02X}, expected 0x31)")]
-    NotKeyPacket(u8),
+    #[error("not a key packet")]
+    NotKeyPacket,
     #[error("no keys in packet (key count = 0)")]
     NoKeys,
     #[error("suspicious key count: {0} (expected 1-10)")]
@@ -53,21 +55,26 @@ pub enum KeyParseError {
     TruncatedHeader(usize),
     #[error("packet too short for key {0} data")]
     TruncatedData(usize),
+    #[error("no ENC_KEY in key packet")]
+    NoEncryptionKey,
+    #[error("ENC_KEY must be {KEY_LEN} bytes, got {0}")]
+    BadEncryptionKeyLen(usize),
 }
 
+const HEADER: [u8; 4] = [0x04, 0x00, 0x04, 0x00];
 const KEY_MARKER: u8 = 0x31;
 const MAX_KEYS: usize = 10;
 
 pub fn is_key_packet(packet: &[u8]) -> bool {
-    packet.len() >= 7 && packet[4] == KEY_MARKER
+    packet.len() >= 7 && packet[..4] == HEADER && packet[4] == KEY_MARKER
 }
 
 pub fn parse_proximity_keys(packet: &[u8]) -> Result<Vec<ProximityKey>, KeyParseError> {
     if packet.len() < 7 {
         return Err(KeyParseError::TooShort(packet.len()));
     }
-    if packet[4] != KEY_MARKER {
-        return Err(KeyParseError::NotKeyPacket(packet[4]));
+    if !is_key_packet(packet) {
+        return Err(KeyParseError::NotKeyPacket);
     }
 
     let key_count = packet[6] as usize;
@@ -105,10 +112,19 @@ pub fn parse_proximity_keys(packet: &[u8]) -> Result<Vec<ProximityKey>, KeyParse
 }
 
 /// The ENC_KEY is what actually decrypts BLE advertisements.
-pub fn find_encryption_key(keys: &[ProximityKey]) -> Option<&[u8]> {
-    keys.iter()
+///
+/// The length is checked here, not only at decryption: the key comes from the
+/// device and is persisted, so one of any other length would replace a working
+/// key on disk and then never decrypt anything.
+pub fn find_encryption_key(keys: &[ProximityKey]) -> Result<[u8; KEY_LEN], KeyParseError> {
+    let key = keys
+        .iter()
         .find(|k| k.key_type == KeyType::EncKey)
-        .map(|k| k.data.as_slice())
+        .ok_or(KeyParseError::NoEncryptionKey)?;
+    key.data
+        .as_slice()
+        .try_into()
+        .map_err(|_| KeyParseError::BadEncryptionKeyLen(key.data.len()))
 }
 
 pub fn find_irk(keys: &[ProximityKey]) -> Option<&[u8]> {
@@ -135,6 +151,10 @@ mod tests {
         assert!(is_key_packet(&packet(&[(0x04, &[0u8; 16])])));
         assert!(!is_key_packet(&[0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01]));
         assert!(!is_key_packet(&[0x04; 3]));
+        // The marker alone is not enough; the header has to match too.
+        assert!(!is_key_packet(&[
+            0x05, 0x00, 0x04, 0x00, KEY_MARKER, 0x00, 0x01
+        ]));
     }
 
     #[test]
@@ -146,14 +166,31 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].key_type, KeyType::Irk);
         assert_eq!(keys[1].key_type, KeyType::EncKey);
-        assert_eq!(find_encryption_key(&keys), Some(&enc[..]));
+        assert_eq!(find_encryption_key(&keys), Ok(enc));
         assert_eq!(find_irk(&keys), Some(&irk[..]));
     }
 
     #[test]
-    fn returns_none_when_enc_key_absent() {
+    fn reports_a_missing_enc_key() {
         let keys = parse_proximity_keys(&packet(&[(0x01, &[0xAAu8; 16])])).unwrap();
-        assert_eq!(find_encryption_key(&keys), None);
+        assert_eq!(
+            find_encryption_key(&keys),
+            Err(KeyParseError::NoEncryptionKey)
+        );
+    }
+
+    /// Stored, a key of any other length would overwrite a working one and then
+    /// fail every decryption.
+    #[test]
+    fn rejects_an_enc_key_of_the_wrong_length() {
+        for len in [0, 15, 17, 32] {
+            let data = vec![0xBB; len];
+            let keys = parse_proximity_keys(&packet(&[(0x04, data.as_slice())])).unwrap();
+            assert_eq!(
+                find_encryption_key(&keys),
+                Err(KeyParseError::BadEncryptionKeyLen(len))
+            );
+        }
     }
 
     #[test]
@@ -164,7 +201,7 @@ mod tests {
         );
         assert_eq!(
             parse_proximity_keys(&[0x04, 0x00, 0x04, 0x00, 0x99, 0x00, 0x01]),
-            Err(KeyParseError::NotKeyPacket(0x99))
+            Err(KeyParseError::NotKeyPacket)
         );
         assert_eq!(
             parse_proximity_keys(&[0x04, 0x00, 0x04, 0x00, KEY_MARKER, 0x00, 0x00]),
