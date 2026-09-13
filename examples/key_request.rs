@@ -1,8 +1,8 @@
 //! Exercises the Request Keys path end to end, without the GUI.
 //!
-//! Connects over AAP, starts the coordinator's read loop, then issues a key
-//! request while that loop is parked in recv - the exact situation that used to
-//! deadlock on the aap_client mutex.
+//! Connects over AAP, which starts the coordinator's read loop, then issues a
+//! key request while that loop is parked in recv - the exact situation that
+//! used to deadlock on the aap_client mutex.
 //!
 //! Usage: cargo run --example key_request -- <MAC>
 
@@ -23,17 +23,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     coordinator.connect_aap(&mac).await?;
     println!("connected");
 
-    // Read loop parks in recv, holding the client.
-    let coord = coordinator.clone();
-    let loop_mac = mac.clone();
-    tokio::spawn(async move { coord.aap_read_loop(loop_mac).await });
-
+    // Let the read loop park in recv.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     println!("requesting encryption keys (read loop is parked in recv)...");
     match tokio::time::timeout(
         Duration::from_secs(5),
-        coordinator.request_encryption_keys(),
+        coordinator.request_encryption_keys(&mac),
     )
     .await
     {

@@ -40,11 +40,17 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   single shared `async_channel::Receiver` is MPMC, so UI, tray and provider would compete
   for each snapshot instead of all seeing it; without the immediate delivery the window
   comes up blank until the first advertisement.
+- Every connected pair has its own AAP link (`Inner::links`): client, reading, and a
+  read loop `connect_aap` starts with that client. The loop never looks its client up
+  by MAC - a loop outliving its link would read the replacement's socket under the old
+  identity, which once stored one device's key under another's MAC. Commands
+  (`set_noise_control`, `request_encryption_keys`, `disconnect_aap`) name their device,
+  and GNOME Settings gets one `BatteryProvider1` object per attached pair.
 - Both `connect_aap` and `disconnect_aap` broadcast. Disconnect also drops the device's
   AAP state, or the UI keeps showing a stale exact-looking reading.
 - BLE is cached, AAP never is. `Inner::ble` keeps the last advertisement per device -
   also the connected one's, underneath AAP - so disconnect falls back to it at once.
-  AAP lives in its own slot tied to `connected_mac`. Identified readings expire after
+  AAP lives in the device's link and goes with it. Identified readings expire after
   `BLE_CACHE_TTL` (30 min) and carry `last_seen` for the UI; `expiry_task` prunes on a
   clock, since with no device in range no advertisement ever triggers a prune.
 - Apple rotates the advertised BLE MAC every few seconds while disconnected. Devices that
@@ -90,7 +96,7 @@ in the startup dump.
 connect returns `Ok` without waiting for the BR/EDR ACL link, every send then fails
 `ENOTCONN`, and the socket stays dead even once `cid` becomes nonzero. Discard and retry.
 
-**Never hold the `aap_client` mutex across `read_packet().await`.** The read parks until a
+**Never hold the `inner` lock across `read_packet().await`** - clone the link's client out. The read parks until a
 packet arrives; this deadlocked the Request Keys button.
 
 ## Patterns
