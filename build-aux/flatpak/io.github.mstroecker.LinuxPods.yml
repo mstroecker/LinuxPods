@@ -1,0 +1,46 @@
+app-id: io.github.mstroecker.LinuxPods
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: linuxpods
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # AAP runs over an L2CAP socket, which needs AF_BLUETOOTH
+  - --allow=bluetooth
+  - --share=network
+  # BLE scanning, device connection watch and BatteryProvider1
+  - --system-talk-name=org.bluez
+  # Tray via StatusNotifierItem. No --own-name: in a sandbox ksni registers
+  # under the unique connection name instead.
+  - --talk-name=org.kde.StatusNotifierWatcher
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/linuxpods/cargo
+  # Test build only: lets cargo fetch crates. Flathub needs vendored sources
+  # (flatpak-cargo-generator) instead.
+  build-args:
+    - --share=network
+modules:
+  - name: linuxpods
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/linuxpods /app/bin/linuxpods
+      - install -Dm644 assets/icons/hicolor/scalable/apps/io.github.mstroecker.LinuxPods.svg
+        /app/share/icons/hicolor/scalable/apps/io.github.mstroecker.LinuxPods.svg
+      - install -Dm644 assets/icons/hicolor/symbolic/apps/io.github.mstroecker.LinuxPods-symbolic.svg
+        /app/share/icons/hicolor/symbolic/apps/io.github.mstroecker.LinuxPods-symbolic.svg
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git
+          - .flatpak-builder
+          - build-aux/flatpak/build

@@ -1,6 +1,10 @@
 # Rust build output
 /target
 
+# Flatpak build output
+.flatpak-builder/
+/build-aux/flatpak/build/
+
 # IDE specific files
 .vscode/
 .idea/
