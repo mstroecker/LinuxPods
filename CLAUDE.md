@@ -27,7 +27,8 @@ src/
 ```
 
 **Threading.** GTK owns the main thread, tokio carries BLE/AAP/D-Bus. GTK types are
-`!Send`, so the two meet over `async-channel` consumed with `glib::spawn_future_local`.
+`!Send`, so the two meet over channels - a `tokio::sync::watch` for snapshots,
+`async-channel` for commands - consumed with `glib::spawn_future_local`.
 Never touch a widget from a tokio task.
 
 **State.** `Coordinator` merges AAP (exact, needs L2CAP) and BLE (10% steps, or exact
@@ -36,10 +37,13 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
 - `supersedes_ble` is per-device, never global - a global pause blanks out every other
   pair. It runs *after* decryption, since an advertisement carries only a random MAC
   until then.
-- `subscribe()` returns a channel per consumer and delivers the current state at once. A
-  single shared `async_channel::Receiver` is MPMC, so UI, tray and provider would compete
-  for each snapshot instead of all seeing it; without the immediate delivery the window
-  comes up blank until the first advertisement.
+- `subscribe()` returns a `watch::Receiver`: one latest-wins value every consumer sees,
+  so UI, tray and provider never compete for a snapshot, and a slow one skips stale
+  snapshots instead of queueing them (per-consumer unbounded queues grew without limit
+  under an advertisement flood). It is marked changed so the current state arrives at
+  once - otherwise the window comes up blank until the first advertisement. Never hold
+  `borrow()` across an await; every broadcast waits for it. The UI loop pauses
+  `RENDER_INTERVAL` per pass, since tokio's coop budget does not reach glib's executor.
 - Every connected pair has its own AAP link (`Inner::links`): client, reading, and a
   read loop `connect_aap` starts with that client. The loop never looks its client up
   by MAC - a loop outliving its link would read the replacement's socket under the old
@@ -53,8 +57,10 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   AAP lives in the device's link and goes with it. Identified readings expire after
   `BLE_CACHE_TTL` (30 min) and carry `last_seen` for the UI; `expiry_task` prunes on a
   clock, since with no device in range no advertisement ever triggers a prune.
-- Apple rotates the advertised BLE MAC every few seconds while disconnected. Devices that
-  cannot be identified still need `DEVICE_TTL` pruning; their addresses never collapse.
+- Apple rotates the advertised BLE MAC every few seconds while disconnected, so an
+  advertisement no stored key decrypts cannot be attributed to anything. It is dropped on
+  arrival - not stored, not broadcast; storing those is what a BLE spam flood fed on.
+  The scanner's `BLE parsable:` log still records it.
 
 ## Protocol
 
