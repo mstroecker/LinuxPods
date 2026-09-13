@@ -17,7 +17,7 @@ use crate::podstate::{DataSource, Snapshot};
 const ICON_THEME_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons");
 
 /// Symbolic, so the panel recolours it to match its own foreground.
-const ICON_NAME: &str = "com.linuxpods.app-symbolic";
+const ICON_NAME: &str = "io.github.mstroecker.LinuxPods-symbolic";
 
 /// Actions the tray hands back to the application.
 pub trait TrayActions: Send + Sync + 'static {
