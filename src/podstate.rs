@@ -15,30 +15,27 @@
 //! it next advertises - which, lid closed in the case, can be a long wait. AAP
 //! state is only ever the live link's and goes with it.
 //!
-//! # Why entries expire
+//! # What is kept
 //!
-//! When no stored key decrypts an advertisement, its state is keyed by the
-//! *randomized* BLE MAC - and those rotate for privacy, several per minute per
-//! device. Without eviction the map grows for as long as the app runs. Every entry
-//! carries a `last_seen` and [`Inner::prune`] drops stale ones: identified devices
-//! after [`BLE_CACHE_TTL`], the rest after [`DEVICE_TTL`].
+//! Only advertisements a stored key decrypts. That identifies the device, so its
+//! state is keyed by the real MAC and the map stays bounded by the stored keys;
+//! [`Inner::prune`] drops readings after [`BLE_CACHE_TTL`]. The rest are dropped on
+//! arrival: keyed by a randomized MAC that rotates several times a minute, they
+//! could never be attributed to anything, and keeping them - an entry and a
+//! broadcast each - is exactly what a BLE spam flood feeds on.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 use crate::aap;
 use crate::ble::decode_model_name;
 use crate::ble::decrypt::decrypt_for_device;
 use crate::ble::parser::{PodSide, ProximityData};
 use crate::keystore::Keystore;
-
-/// How long an unidentified device may go unseen before its state is dropped.
-/// Bounds the map against rotating BLE MACs.
-pub const DEVICE_TTL: Duration = Duration::from_secs(120);
 
 /// How long the last advertisement of an identified device stays on show. Keyed
 /// by the real MAC, these do not rotate, so the map stays bounded by the number of
@@ -103,11 +100,6 @@ pub struct PodState {
     pub real_mac: String,
     pub current_ble_mac: String,
 
-    /// True when this state is attributable to a known device: always for AAP, and
-    /// for BLE only when a stored key decrypted the advertisement. Unidentified
-    /// advertisements are deliberately kept out of the main UI.
-    pub identified: bool,
-
     /// When the advertisement behind a BLE reading arrived; it may be a cached
     /// one up to [`BLE_CACHE_TTL`] old. `None` for AAP, which is always live.
     pub last_seen: Option<Instant>,
@@ -152,14 +144,20 @@ impl Snapshot {
         self.connected_macs.iter().any(|m| m == mac)
     }
 
-    /// The device that has been on AAP longest, else any identified device. The
-    /// longest link rather than the newest, so a second pair connecting does not
-    /// take over the tray and the battery reading.
+    /// The device that has been on AAP longest, else the lowest MAC with a reading.
+    /// The longest link rather than the newest, so a second pair connecting does
+    /// not take over the tray; the lowest MAC rather than whichever the `HashMap`
+    /// yields first, since that order changes from one snapshot to the next.
     pub fn primary(&self) -> Option<&PodState> {
         self.connected_macs
             .iter()
             .find_map(|m| self.states.get(m))
-            .or_else(|| self.states.values().find(|s| s.identified))
+            .or_else(|| {
+                self.states
+                    .iter()
+                    .min_by_key(|(mac, _)| *mac)
+                    .map(|(_, s)| s)
+            })
     }
 }
 
@@ -207,18 +205,11 @@ impl Inner {
         self.links.contains_key(advertising_mac)
     }
 
-    /// Drops BLE readings older than their TTL, returning whether any went. This
-    /// is what keeps rotating BLE MACs from accumulating forever.
+    /// Drops BLE readings older than [`BLE_CACHE_TTL`], returning whether any went.
     fn prune(&mut self, now: Instant) -> bool {
         let before = self.ble.len();
-        self.ble.retain(|_, e| {
-            let ttl = if e.state.identified {
-                BLE_CACHE_TTL
-            } else {
-                DEVICE_TTL
-            };
-            now.duration_since(e.last_seen) < ttl
-        });
+        self.ble
+            .retain(|_, e| now.duration_since(e.last_seen) < BLE_CACHE_TTL);
         self.ble.len() != before
     }
 
@@ -267,10 +258,8 @@ impl Inner {
 pub struct Coordinator {
     inner: RwLock<Inner>,
     keystore: Mutex<Keystore>,
-    /// One sender per consumer. A single shared channel would NOT work here:
-    /// async_channel is MPMC, so each snapshot would go to exactly one of the
-    /// UI / BlueZ provider / tray rather than all three.
-    subscribers: std::sync::Mutex<Vec<async_channel::Sender<Snapshot>>>,
+    /// The latest snapshot, which every subscriber sees - see [`Coordinator::subscribe`].
+    updates: watch::Sender<Snapshot>,
 }
 
 impl Coordinator {
@@ -290,55 +279,46 @@ impl Coordinator {
             }
         };
 
+        let inner = Inner {
+            ble: HashMap::new(),
+            links: HashMap::new(),
+            encryption_keys: loaded,
+            device_names: HashMap::new(),
+            noise_modes: HashMap::new(),
+        };
+        let (updates, _) = watch::channel(inner.snapshot());
+
         Ok(Arc::new(Self {
-            inner: RwLock::new(Inner {
-                ble: HashMap::new(),
-                links: HashMap::new(),
-                encryption_keys: loaded,
-                device_names: HashMap::new(),
-                noise_modes: HashMap::new(),
-            }),
+            inner: RwLock::new(inner),
             keystore: Mutex::new(keystore),
-            subscribers: std::sync::Mutex::new(Vec::new()),
+            updates,
         }))
     }
 
-    /// Registers a new consumer. Every subscriber receives every snapshot.
+    /// Registers a new consumer, which sees the latest snapshot.
     ///
-    /// Unbounded so a slow consumer can never stall a protocol read loop.
+    /// A watch channel holds one value that every receiver sees, so the UI, tray
+    /// and battery provider never compete for a snapshot, and one that falls
+    /// behind skips stale snapshots rather than queueing them - an unbounded queue
+    /// per consumer grew without limit under a flood of advertisements. Sending
+    /// never waits, so no consumer can stall a protocol read loop either.
     ///
-    /// The current state is delivered immediately. Without that a subscriber which
-    /// starts before the first advertisement sees nothing at all - the window came
-    /// up blank whenever no device was connected or in range, even though the keys
-    /// were already loaded from disk.
-    pub fn subscribe(&self) -> async_channel::Receiver<Snapshot> {
-        let (tx, rx) = async_channel::unbounded();
-
-        // try_read rather than blocking: subscribe() is called from the GTK main
-        // context, and at startup there is no contention anyway.
-        if let Ok(inner) = self.inner.try_read() {
-            let _ = tx.try_send(inner.snapshot());
-        }
-
-        self.subscribers
-            .lock()
-            .expect("subscriber list poisoned")
-            .push(tx);
+    /// Marked changed, so the current state arrives at once. Without that a
+    /// subscriber which starts before the first advertisement sees nothing at all -
+    /// the window came up blank whenever no device was connected or in range, even
+    /// though the keys were already loaded from disk.
+    ///
+    /// Never hold the receiver's `borrow()` across an await: it is a read lock,
+    /// and every broadcast waits for it.
+    pub fn subscribe(&self) -> watch::Receiver<Snapshot> {
+        let mut rx = self.updates.subscribe();
+        rx.mark_changed();
         rx
     }
 
-    /// Fans a snapshot out to every subscriber, dropping any that have gone away.
-    ///
-    /// Uses try_send so no await happens while the std mutex is held; the channels
-    /// are unbounded, so the only failure mode is a closed receiver.
+    /// Replaces the snapshot every subscriber sees.
     fn broadcast(&self, snapshot: Snapshot) {
-        let mut subs = self.subscribers.lock().expect("subscriber list poisoned");
-        subs.retain(|tx| {
-            !matches!(
-                tx.try_send(snapshot.clone()),
-                Err(async_channel::TrySendError::Closed(_))
-            )
-        });
+        self.updates.send_replace(snapshot);
     }
 
     /// Replaces the BlueZ alias map and broadcasts if anything changed.
@@ -413,13 +393,16 @@ impl Coordinator {
 
     /// Handles one BLE advertisement.
     ///
+    /// One that no stored key decrypts is dropped here - see the module docs. The
+    /// scanner's `BLE parsable:` log still records it.
+    ///
     /// An AAP connection only supersedes BLE *for that one device*. Other AirPods
     /// keep advertising and must still be tracked, so the decision is made per
     /// device after identification rather than globally.
     pub async fn handle_advertisement(&self, mut data: ProximityData, ble_mac: String) {
-        let real_mac = self.identify_and_decrypt(&mut data, &ble_mac).await;
-        let identified = real_mac.is_some();
-        let key_mac = real_mac.clone().unwrap_or_else(|| ble_mac.clone());
+        let Some(real_mac) = self.identify_and_decrypt(&mut data, &ble_mac).await else {
+            return;
+        };
 
         let state = PodState {
             source: DataSource::Ble,
@@ -440,9 +423,8 @@ impl Coordinator {
             model_name: decode_model_name(data.device_model),
             color: data.color,
             primary_pod: data.primary_pod(),
-            real_mac: real_mac.unwrap_or_default(),
+            real_mac: real_mac.clone(),
             current_ble_mac: ble_mac,
-            identified,
             // Stamped from the entry in `snapshot`.
             last_seen: None,
         };
@@ -478,7 +460,7 @@ impl Coordinator {
             // Recorded even while AAP supersedes it, so that the reading is
             // current the moment the link drops.
             inner.ble.insert(
-                key_mac.clone(),
+                real_mac.clone(),
                 Entry {
                     state,
                     last_seen: now,
@@ -488,7 +470,7 @@ impl Coordinator {
             // AAP data for this device is exact and current; its own
             // advertisements are coarser and lag behind, and nothing a snapshot
             // shows has changed - unless the prune dropped something.
-            if inner.supersedes_ble(&key_mac) && !pruned {
+            if inner.supersedes_ble(&real_mac) && !pruned {
                 return;
             }
             inner.snapshot()
@@ -695,7 +677,6 @@ impl Coordinator {
             right_charging: info.right.is_some_and(|b| b.is_charging()),
             case_charging: info.case.is_some_and(|b| b.is_charging()),
             real_mac: mac_addr.to_string(),
-            identified: true,
             device_model,
             model_name,
             color,
@@ -876,19 +857,22 @@ mod tests {
 
     fn coordinator_with(inner: Inner) -> (Arc<Coordinator>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
+        let (updates, _) = watch::channel(inner.snapshot());
         let coordinator = Arc::new(Coordinator {
             inner: RwLock::new(inner),
             keystore: Mutex::new(Keystore::with_dir(dir.path().to_path_buf()).unwrap()),
-            subscribers: std::sync::Mutex::new(Vec::new()),
+            updates,
         });
         (coordinator, dir)
     }
 
+    /// A reading outlives a few quiet minutes, so it is still there after the
+    /// AirPods go silent in their case, and goes after [`BLE_CACHE_TTL`].
     #[test]
     fn prune_drops_only_stale_devices() {
         let mut inner = inner_with(vec![
-            ("fresh", Duration::from_secs(1)),
-            ("stale", Duration::from_secs(300)),
+            ("fresh", Duration::from_secs(10 * 60)),
+            ("stale", Duration::from_secs(31 * 60)),
         ]);
         assert!(inner.prune(Instant::now()));
 
@@ -897,56 +881,39 @@ mod tests {
         assert!(!inner.prune(Instant::now()), "nothing left to expire");
     }
 
-    /// An identified device's last advertisement outlives the unidentified TTL,
-    /// so a reading is still there after the AirPods go quiet in their case.
-    #[test]
-    fn identified_readings_are_cached_for_the_cache_ttl() {
-        let now = Instant::now();
-        let mut inner = inner_with(vec![]);
-        for (mac, age) in [("recent", 10 * 60), ("expired", 31 * 60)] {
-            inner.ble.insert(
-                mac.into(),
-                Entry {
-                    state: PodState {
-                        identified: true,
-                        ..Default::default()
-                    },
-                    last_seen: now - Duration::from_secs(age),
-                },
-            );
-        }
+    /// Undecryptable advertisements are not kept: keyed by a MAC that rotates
+    /// every few minutes they can never be attributed to anything, and storing
+    /// them - an entry and a broadcast each - is what a BLE spam flood fed on.
+    #[tokio::test]
+    async fn unidentified_advertisements_are_not_stored() {
+        let (coordinator, _dir) = coordinator_with(inner_with(vec![]));
+        let mut rx = coordinator.subscribe();
+        let _ = rx.borrow_and_update();
 
-        inner.prune(now);
-        assert!(inner.ble.contains_key("recent"));
-        assert!(!inner.ble.contains_key("expired"));
+        coordinator
+            .handle_advertisement(ProximityData::default(), "5C:4D:3F:B5:41:B6".into())
+            .await;
+
+        assert!(coordinator.inner.read().await.ble.is_empty());
+        assert!(!rx.has_changed().unwrap(), "nothing to broadcast");
     }
 
-    /// The Go original had no eviction at all, so a run of rotating BLE MACs grew
-    /// the map without bound. This is the regression test for that.
+    /// A consumer that falls behind holds the latest snapshot, not a queue of
+    /// every one it missed.
     #[test]
-    fn rotating_ble_macs_do_not_accumulate() {
-        let mut inner = inner_with(vec![]);
-        let start = Instant::now();
+    fn a_slow_subscriber_holds_one_snapshot() {
+        let (coordinator, _dir) = coordinator_with(inner_with(vec![]));
+        let mut rx = coordinator.subscribe();
 
-        // 500 rotations, one every 30s - far past the TTL.
-        for i in 0..500 {
-            let now = start + Duration::from_secs(i * 30);
-            inner.ble.insert(
-                format!("random-mac-{i}"),
-                Entry {
-                    state: PodState::default(),
-                    last_seen: now,
-                },
-            );
-            inner.prune(now);
+        for i in 0..1000 {
+            coordinator.broadcast(Snapshot {
+                known_keys: vec![i.to_string()],
+                ..Default::default()
+            });
         }
 
-        // Only entries inside the 120s window survive.
-        assert!(
-            inner.ble.len() <= 5,
-            "expected bounded map, got {} entries",
-            inner.ble.len()
-        );
+        assert_eq!(rx.borrow_and_update().known_keys, ["999"]);
+        assert!(!rx.has_changed().unwrap());
     }
 
     /// Regression: the window came up blank with no device connected and none in
@@ -956,9 +923,11 @@ mod tests {
         let coordinator = Coordinator::new().await.expect("coordinator");
         let rx = coordinator.subscribe();
 
-        let snapshot = rx
-            .try_recv()
-            .expect("a subscriber must receive the current state without waiting");
+        assert!(
+            rx.has_changed().unwrap(),
+            "a subscriber must receive the current state without waiting"
+        );
+        let snapshot = rx.borrow().clone();
 
         // Whatever is on disk, the snapshot must carry the loaded key list so the
         // UI can render known devices before anything is heard over the air.
@@ -980,7 +949,6 @@ mod tests {
         PodState {
             source: DataSource::Ble,
             left_battery: Some(left),
-            identified: true,
             ..Default::default()
         }
     }
@@ -1142,8 +1110,7 @@ mod tests {
         assert!(inner.supersedes_ble("aa"));
         // ...but a second pair of AirPods keeps being tracked over BLE.
         assert!(!inner.supersedes_ble("bb"));
-        // An unidentified advertisement is keyed by its random MAC, so it is never
-        // mistaken for the connected device.
+        // A random BLE MAC is never mistaken for the connected device's real one.
         assert!(!inner.supersedes_ble("5C:4D:3F:B5:41:B6"));
     }
 
@@ -1190,58 +1157,30 @@ mod tests {
         assert_eq!(snap.primary().unwrap().device_model, 2);
     }
 
-    /// Unidentified advertisements must not become the primary device: with
-    /// rotating MACs, strangers nearby would otherwise drive the tray and the
-    /// GNOME battery reading.
+    /// With nothing on AAP, the lowest MAC - not whichever the `HashMap` yields
+    /// first, which changes from one snapshot to the next and made the tray jump
+    /// between two pairs.
     #[test]
-    fn primary_ignores_unidentified_devices() {
-        let mut states = HashMap::new();
-        states.insert(
-            "known".into(),
-            PodState {
-                device_model: 7,
-                identified: true,
-                ..Default::default()
-            },
-        );
-        states.insert(
-            "stranger".into(),
-            PodState {
-                device_model: 9,
-                identified: false,
-                ..Default::default()
-            },
-        );
+    fn primary_falls_back_to_the_lowest_mac() {
+        let states = ["cc", "aa", "bb"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, mac)| {
+                (
+                    mac.to_string(),
+                    PodState {
+                        device_model: i as u16,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
 
         let snap = Snapshot {
             states,
-            connected_macs: vec![],
-            known_keys: vec![],
-            device_names: HashMap::new(),
+            ..Default::default()
         };
-        assert_eq!(snap.primary().unwrap().device_model, 7);
-    }
-
-    #[test]
-    fn primary_falls_back_to_an_identified_device() {
-        let mut states = HashMap::new();
-        states.insert(
-            "stranger".into(),
-            PodState {
-                identified: false,
-                ..Default::default()
-            },
-        );
-
-        let snap = Snapshot {
-            states,
-            connected_macs: vec![],
-            known_keys: vec![],
-            device_names: HashMap::new(),
-        };
-        assert!(
-            snap.primary().is_none(),
-            "an unidentified device is not a primary"
-        );
+        assert_eq!(snap.primary().unwrap().device_model, 1);
+        assert!(Snapshot::default().primary().is_none());
     }
 }

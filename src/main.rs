@@ -242,7 +242,7 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
         Err(e) => tracing::warn!("failed to list connected devices: {e:#}"),
     }
 
-    let updates = coordinator.subscribe();
+    let mut updates = coordinator.subscribe();
 
     loop {
         tokio::select! {
@@ -276,13 +276,18 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
 
             // Mirror each attached pair's lowest earbud into GNOME Settings, from
             // whichever source has it - AAP, or BLE when the link failed.
-            Ok(snapshot) = updates.recv() => {
-                for mac in attached.values() {
-                    let Some(level) = snapshot.states.get(mac).and_then(|s| s.lowest_earbud())
-                    else {
-                        continue;
-                    };
-                    if let Err(e) = provider.update_percentage(mac, level).await {
+            Ok(()) = updates.changed() => {
+                // Read out first: the borrow is a read lock every broadcast waits
+                // for, so it must not live across the awaits below.
+                let levels: Vec<(String, u8)> = {
+                    let snapshot = updates.borrow_and_update();
+                    attached
+                        .values()
+                        .filter_map(|mac| Some((mac.clone(), snapshot.states.get(mac)?.lowest_earbud()?)))
+                        .collect()
+                };
+                for (mac, level) in levels {
+                    if let Err(e) = provider.update_percentage(&mac, level).await {
                         tracing::debug!("update BlueZ battery for {mac}: {e}");
                     }
                 }
@@ -330,8 +335,10 @@ async fn tray_task(coordinator: Arc<Coordinator>, actions: Arc<AppActions>) {
         }
     };
 
-    let updates = coordinator.subscribe();
-    while let Ok(snapshot) = updates.recv().await {
+    let mut updates = coordinator.subscribe();
+    while updates.changed().await.is_ok() {
+        // Cloned out: the borrow is a read lock every broadcast waits for.
+        let snapshot = updates.borrow_and_update().clone();
         indicator::apply_snapshot(&handle, &snapshot).await;
     }
 }

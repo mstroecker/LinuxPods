@@ -440,9 +440,12 @@ Because identification resolves the randomized MAC back to the permanent one,
 per-device state should be keyed by the **real** MAC. Keying by the advertised
 MAC instead makes state grow without bound, since Apple rotates it continuously
 while disconnected (observed: 4 distinct MACs for one device inside 45 seconds).
-Devices that cannot be identified - no stored key, or a key that does not match -
-still need a time-based eviction policy, since their rotating MACs cannot be
-collapsed.
+Advertisements that cannot be identified - no stored key, or a key that does not
+match - are best dropped rather than kept: their rotating MACs cannot be collapsed,
+nothing can be attributed to them, and storing them is exactly what a BLE spam flood
+(a Flipper Zero or ESP32 broadcasting proximity pairing messages) feeds on.
+LinuxPods keeps only what a stored key decrypts; the key arrives on the device's
+first AAP connection.
 
 ## Implementation Notes
 

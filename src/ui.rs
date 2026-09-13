@@ -71,6 +71,10 @@ fn charging_icon(level: Option<u8>) -> String {
 /// Anything heard within this long counts as advertising now.
 const RECENT: Duration = Duration::from_secs(60);
 
+/// Shortest gap between two renders. Readings change over minutes, while a
+/// replayed advertisement can arrive every few milliseconds.
+const RENDER_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Icon name of the app icon, installed into hicolor by `make install`.
 const APP_ICON: &str = "com.linuxpods.app";
 
@@ -112,7 +116,7 @@ pub fn activate(
     coordinator: std::sync::Arc<Coordinator>,
     runtime: tokio::runtime::Handle,
 ) -> adw::ApplicationWindow {
-    let updates = coordinator.subscribe();
+    let mut updates = coordinator.subscribe();
     let win = adw::ApplicationWindow::new(app);
     win.set_title(Some("LinuxPods"));
     // Tall enough for the whole Control page without scrolling.
@@ -139,7 +143,7 @@ pub fn activate(
     ]);
     app.set_accels_for_action("win.preferences", &["<Control>comma"]);
 
-    // Updates arrive over an async channel consumed on the main context. GTK types
+    // Updates arrive over a watch channel consumed on the main context. GTK types
     // are !Send, so this is the only legal way in - enforced at compile time.
     let device_rows: Rc<RefCell<HashMap<String, DeviceRow>>> =
         Rc::new(RefCell::new(HashMap::new()));
@@ -241,11 +245,14 @@ pub fn activate(
     );
 
     glib::spawn_future_local(async move {
-        while let Ok(snapshot) = updates.recv().await {
+        while updates.changed().await.is_ok() {
+            // Cloned out: the borrow is a read lock every broadcast waits for, so it
+            // must not live across an await.
+            let snapshot = updates.borrow_and_update().clone();
+
             // The switcher lists every device we hold a key for. That keeps the list
             // stable instead of flickering as advertisements arrive, and strangers
-            // still cannot appear: an advertisement we could not decrypt is stored
-            // under its random MAC, which never matches a stored key.
+            // cannot appear: an advertisement we could not decrypt is never stored.
             let macs = snapshot.known_keys.clone();
 
             // Read the selection BEFORE touching the widget. Splicing the model makes
@@ -286,6 +293,12 @@ pub fn activate(
             render_device(&control, &snapshot, chosen.as_deref());
             update_device_rows(&dev_group, &device_rows, &snapshot, &coordinator, &runtime);
             *last_snapshot.borrow_mut() = Some(snapshot);
+
+            // tokio's cooperative budget does not reach the GTK main context, so
+            // under a stream of updates `changed()` would stay ready and this loop
+            // would never yield to GTK. The pause caps rendering, not delivery: the
+            // next pass picks up whatever is newest.
+            glib::timeout_future(RENDER_INTERVAL).await;
         }
     });
 
@@ -766,9 +779,9 @@ fn update_device_rows(
     coordinator: &std::sync::Arc<Coordinator>,
     runtime: &tokio::runtime::Handle,
 ) {
-    // Known devices first, in stable key order, then anything else we have heard
-    // advertising. Unknown entries are the whole point of a Development section:
-    // they are how you spot a device whose key you have not captured yet.
+    // Known devices first, in stable key order, then any other device we hold
+    // state for - one on AAP whose key has not arrived yet. Undecryptable
+    // advertisements are never stored, so strangers do not appear.
     let mut entries: Vec<(&String, bool)> = snapshot.known_keys.iter().map(|m| (m, true)).collect();
     let mut unknown: Vec<&String> = snapshot
         .states
@@ -878,8 +891,9 @@ fn update_device_rows(
 
         let (text, css) = match (known, connected, state) {
             (_, true, _) => ("Connected".to_string(), "success"),
-            // Advertising but no stored key: visible, not yet decryptable. Its MAC
-            // rotates, so these entries come and go until a key is captured.
+            // State without a stored key. Only a device on AAP has that - its key
+            // is requested on connecting - and `Connected` above takes it first,
+            // so this is a fallback.
             (false, _, _) => ("No key".to_string(), "warning"),
             // A cached reading is not an advertisement in progress.
             (true, _, Some(s)) => match s.last_seen.map(|t| t.elapsed()) {
