@@ -76,7 +76,7 @@ const RECENT: Duration = Duration::from_secs(60);
 const RENDER_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Icon name of the app icon, installed into hicolor by `make install`.
-const APP_ICON: &str = "com.linuxpods.app";
+const APP_ICON: &str = "io.github.mstroecker.LinuxPods";
 
 /// Drawn for this app and bundled: the theme has no icon for an earbud being
 /// worn, and headphones read as "audio device" rather than "in an ear".
@@ -84,7 +84,7 @@ const IN_EAR_ICON: &str = "linuxpods-in-ear-symbolic";
 
 /// The app icon as a symbolic, for the empty state. Bundled, so it resolves
 /// without an install.
-const APP_SYMBOLIC_ICON: &str = "com.linuxpods.app-symbolic";
+const APP_SYMBOLIC_ICON: &str = "io.github.mstroecker.LinuxPods-symbolic";
 
 const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
 
@@ -93,7 +93,7 @@ const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
 const NOISE_ACTION: &str = "noise-mode";
 
 /// Prefix of the resources `build.rs` compiles from `assets/`.
-const RESOURCE_PREFIX: &str = "/com/linuxpods/app";
+const RESOURCE_PREFIX: &str = "/io/github/mstroecker/LinuxPods";
 
 /// Left pod, right pod, case - the order of the battery display's columns.
 const BATTERY_IMAGES: [&str; 3] = [

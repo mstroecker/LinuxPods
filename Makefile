@@ -1,4 +1,4 @@
-.PHONY: all build build-release run run-debug test fmt lint clean install uninstall
+.PHONY: all build build-release run run-debug test fmt lint clean install uninstall remove-legacy
 
 # Default target
 all: fmt build
@@ -40,7 +40,10 @@ BINDIR     = $(PREFIX)/bin
 AUTOSTART  = $(HOME)/.config/autostart
 APPDIR     = $(PREFIX)/share/applications
 ICONDIR    = $(PREFIX)/share/icons/hicolor
-DESKTOP    = com.linuxpods.app.desktop
+DESKTOP    = io.github.mstroecker.LinuxPods.desktop
+# The app ID before the Flathub-style rename. An autostart entry left under it
+# would start a second instance: GApplication only deduplicates within one ID.
+LEGACY_ID  = com.linuxpods.app
 
 # The battery artwork is compiled into the binary, so the installed copy does not
 # depend on this checkout. The icons below go into the theme because the shell
@@ -53,7 +56,7 @@ Name=LinuxPods
 Comment=Manage Apple AirPods on Linux
 Exec=$(BINDIR)/linuxpods --minimized
 TryExec=$(BINDIR)/linuxpods
-Icon=com.linuxpods.app
+Icon=io.github.mstroecker.LinuxPods
 Terminal=false
 Categories=AudioVideo;Audio;
 X-GNOME-Autostart-enabled=true
@@ -61,16 +64,16 @@ endef
 export DESKTOP_ENTRY
 
 # Install the binary, the autostart entry and the launcher entry
-install: build-release
+install: build-release remove-legacy
 	install -Dm755 target/release/linuxpods $(BINDIR)/linuxpods
 	# assets/icons/hicolor/index.theme is deliberately not installed: it exists
 	# for source checkouts, and here the icons merge with the system hicolor
 	# index, which already declares scalable/apps and symbolic/apps. A second
 	# index.theme in this base dir would shadow that for every other app's icons.
-	install -Dm644 assets/icons/hicolor/scalable/apps/com.linuxpods.app.svg \
-		$(ICONDIR)/scalable/apps/com.linuxpods.app.svg
-	install -Dm644 assets/icons/hicolor/symbolic/apps/com.linuxpods.app-symbolic.svg \
-		$(ICONDIR)/symbolic/apps/com.linuxpods.app-symbolic.svg
+	install -Dm644 assets/icons/hicolor/scalable/apps/io.github.mstroecker.LinuxPods.svg \
+		$(ICONDIR)/scalable/apps/io.github.mstroecker.LinuxPods.svg
+	install -Dm644 assets/icons/hicolor/symbolic/apps/io.github.mstroecker.LinuxPods-symbolic.svg \
+		$(ICONDIR)/symbolic/apps/io.github.mstroecker.LinuxPods-symbolic.svg
 	-@gtk-update-icon-cache -qtf $(ICONDIR) 2>/dev/null || true
 	mkdir -p $(AUTOSTART) $(APPDIR)
 	@printf '%s\n' "$$DESKTOP_ENTRY" > $(AUTOSTART)/$(DESKTOP)
@@ -89,13 +92,20 @@ install: build-release
 	@echo "Launcher:   $(APPDIR)/$(DESKTOP)"
 
 # Remove the binary, the autostart entry and the launcher entry
-uninstall:
+uninstall: remove-legacy
 	-@pkill -f '^$(BINDIR)/linuxpods' 2>/dev/null || true
 	rm -f $(BINDIR)/linuxpods
-	rm -f $(ICONDIR)/scalable/apps/com.linuxpods.app.svg
-	rm -f $(ICONDIR)/symbolic/apps/com.linuxpods.app-symbolic.svg
+	rm -f $(ICONDIR)/scalable/apps/io.github.mstroecker.LinuxPods.svg
+	rm -f $(ICONDIR)/symbolic/apps/io.github.mstroecker.LinuxPods-symbolic.svg
 	-@gtk-update-icon-cache -qtf $(ICONDIR) 2>/dev/null || true
 	rm -f $(AUTOSTART)/$(DESKTOP)
 	rm -f $(APPDIR)/$(DESKTOP)
 	-@update-desktop-database $(APPDIR) 2>/dev/null || true
 	@echo "LinuxPods uninstalled"
+
+# Remove what an install under the old app ID left behind
+remove-legacy:
+	rm -f $(ICONDIR)/scalable/apps/$(LEGACY_ID).svg
+	rm -f $(ICONDIR)/symbolic/apps/$(LEGACY_ID)-symbolic.svg
+	rm -f $(AUTOSTART)/$(LEGACY_ID).desktop
+	rm -f $(APPDIR)/$(LEGACY_ID).desktop

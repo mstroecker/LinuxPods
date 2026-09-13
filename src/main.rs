@@ -19,7 +19,7 @@ use indicator::{Indicator, TrayActions};
 use linuxpods::aap::NoiseMode;
 use podstate::Coordinator;
 
-const APP_ID: &str = "com.linuxpods.app";
+const APP_ID: &str = "io.github.mstroecker.LinuxPods";
 
 /// Bridges tray clicks onto the GTK main context, and noise control onto tokio.
 struct AppActions {
