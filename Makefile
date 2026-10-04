@@ -1,4 +1,4 @@
-.PHONY: all build build-release run run-debug test fmt lint secrets sbom hooks clean install uninstall remove-legacy
+.PHONY: all build build-release run run-debug test fmt lint secrets deny sbom hooks clean install uninstall remove-legacy
 
 # Default target
 all: fmt build
@@ -34,6 +34,11 @@ lint:
 # Scan the full git history for secrets (rules: .gitleaks.toml)
 secrets:
 	gitleaks git --redact --no-banner .
+
+# Check dependencies for advisories, licenses and sources (rules: deny.toml)
+deny:
+	@command -v cargo-deny >/dev/null || { echo "cargo-deny not found: cargo install --locked cargo-deny"; exit 1; }
+	cargo deny --locked check
 
 # Software bill of materials for the release binary (CycloneDX JSON). Dev- and
 # build-only dependencies are left out: they never reach the binary. The

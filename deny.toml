@@ -1,0 +1,38 @@
+# cargo-deny: advisories, licenses, banned crates and allowed sources.
+# Run with `make deny`; CI runs the same checks.
+
+[graph]
+# LinuxPods only runs on Linux, so Windows and macOS dependencies are not judged
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[advisories]
+# RustSec advisories: vulnerabilities, unmaintained crates and yanked versions fail
+yanked = "deny"
+
+[licenses]
+# Every license here is compatible with GPL-3.0-or-later
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "GPL-3.0-or-later",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Older majors still used upstream. Once their users move on, cargo-deny reports
+# the entry as an unmatched skip and it can go.
+skip = [
+    { crate = "syn@2", reason = "enumflags2_derive, num-derive, strum_macros and tracing-attributes are still on syn 2" },
+    { crate = "system-deps@7", reason = "libadwaita-sys is still on system-deps 7; the other GTK -sys crates use 9" },
+]
+
+[sources]
+# crates.io only: a git or third-party registry dependency has to be added here first
+unknown-registry = "deny"
+unknown-git = "deny"
