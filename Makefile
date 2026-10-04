@@ -43,13 +43,20 @@ deny:
 # Software bill of materials for the release binary (CycloneDX JSON). Dev- and
 # build-only dependencies are left out: they never reach the binary. The
 # timestamp is the last commit's, so the same commit gives the same file.
+# cargo-cyclonedx then omits the serial number, which actions/attest requires,
+# so one is derived from the commit (UUIDv5).
 SBOM_DIR = target/sbom
 sbom:
 	@command -v cargo-cyclonedx >/dev/null || { echo "cargo-cyclonedx not found: cargo install --locked cargo-cyclonedx"; exit 1; }
 	SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct) cargo cyclonedx --format json \
 		--spec-version 1.5 --describe binaries --no-build-deps
 	mkdir -p $(SBOM_DIR)
-	mv linuxpods_bin.cdx.json $(SBOM_DIR)/linuxpods.cdx.json
+	python3 -c 'import json, sys, uuid; d = json.load(open(sys.argv[1])); \
+		d["serialNumber"] = uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[2]).urn; \
+		json.dump(d, open(sys.argv[3], "w"), indent=2)' \
+		linuxpods_bin.cdx.json "https://github.com/mstroecker/LinuxPods/commit/$$(git rev-parse HEAD)" \
+		$(SBOM_DIR)/linuxpods.cdx.json
+	rm linuxpods_bin.cdx.json
 	@echo "SBOM: $(SBOM_DIR)/linuxpods.cdx.json"
 
 # Install the pre-commit secret scan into this checkout
