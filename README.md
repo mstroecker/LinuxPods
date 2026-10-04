@@ -2,6 +2,10 @@
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mstroecker/LinuxPods/badge)](https://scorecard.dev/viewer/?uri=github.com/mstroecker/LinuxPods)
 [![codecov](https://codecov.io/gh/mstroecker/LinuxPods/graph/badge.svg)](https://codecov.io/gh/mstroecker/LinuxPods)
+[![Release](https://img.shields.io/github/v/release/mstroecker/LinuxPods)](https://github.com/mstroecker/LinuxPods/releases/latest)
+[![License: GPL-3.0-or-later](https://img.shields.io/github/license/mstroecker/LinuxPods)](LICENSE)
+[![MSRV 1.92](https://img.shields.io/badge/rustc-1.92+-orange?logo=rust)](Cargo.toml)
+[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](docs/releasing.md#verifying-a-release)
 
 A native GNOME desktop application for managing Apple AirPods on Linux.
 
