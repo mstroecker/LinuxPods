@@ -138,3 +138,4 @@ A `Co-Authored-By:` trailer is fine.
 - `docs/ble-proximity-pairing.md` - proximity pairing, decrypted layout, suffix validation
 - `docs/aap-key-retrieval.md` - retrieving IRK and ENC_KEY over AAP
 - `docs/aap-noise-control.md` - mode packet, the 0x4B notification, the 0x09 family
+- `docs/releasing.md` - release steps, what a release contains, verifying one

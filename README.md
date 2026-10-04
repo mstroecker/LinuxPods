@@ -139,6 +139,24 @@ Later builds are incremental.
 
 ## Installing
 
+### From a release
+
+Download the tarball for your architecture from
+[Releases](https://github.com/mstroecker/LinuxPods/releases), then:
+
+```bash
+tar -xzf linuxpods-0.1.0-x86_64-linux.tar.gz
+linuxpods-0.1.0-x86_64-linux/install.sh              # same as make install below
+linuxpods-0.1.0-x86_64-linux/install.sh --uninstall
+```
+
+The release binaries need glibc 2.39 or newer besides the runtime libraries listed under
+[Requirements](#requirements). Every release carries checksums, an SBOM and signed build
+provenance; [docs/releasing.md](docs/releasing.md#verifying-a-release) shows how to verify
+a download.
+
+### From source
+
 ```bash
 make install      # ~/.local/bin, autostart entry, launcher entry - no sudo
 make uninstall
