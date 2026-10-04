@@ -1,5 +1,7 @@
 # LinuxPods
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mstroecker/LinuxPods/badge)](https://scorecard.dev/viewer/?uri=github.com/mstroecker/LinuxPods)
+
 A native GNOME desktop application for managing Apple AirPods on Linux.
 
 <p align="center">
