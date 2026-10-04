@@ -39,8 +39,8 @@ cannot be changed: fix a broken release with a new version.
 | File | Content |
 |---|---|
 | `linuxpods-<version>-x86_64-linux.tar.gz`, `…-aarch64-linux.tar.gz` | binary, `install.sh`, icons, LICENSE, README |
-| `linuxpods-<version>.cdx.json` | CycloneDX SBOM |
-| `SHA256SUMS` | checksums of the tarballs and the SBOM |
+| `linuxpods-<version>-x86_64-linux.cdx.json`, `…-aarch64-linux.cdx.json` | CycloneDX SBOM of each build |
+| `SHA256SUMS` | checksums of the tarballs and the SBOMs |
 | `linuxpods-<version>.sigstore.json` | SLSA build provenance bundle |
 
 The binaries are built with `cargo auditable`, which embeds the dependency list,
@@ -55,5 +55,5 @@ gh attestation verify linuxpods-0.2.0-x86_64-linux.tar.gz -R mstroecker/LinuxPod
 ```
 
 The attestation proves the file was built by `release-build.yml` from the tagged
-commit. The tarballs also carry an SBOM attestation
+commit. Each tarball also carries an attestation of its own build's SBOM
 (`--predicate-type https://cyclonedx.org/bom`).
