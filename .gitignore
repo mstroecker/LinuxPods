@@ -1,6 +1,9 @@
 # Rust build output
 /target
 
+# Coverage report
+lcov.info
+
 # SBOM output, should it land outside target/
 *.cdx.json
 
