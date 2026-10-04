@@ -1,0 +1,113 @@
+# Builds the release files and attests them. A reusable workflow, so the
+# attestations are signed with this workflow's identity rather than the caller's
+# (SLSA Build L3). Verify with:
+#   gh attestation verify <file> -R mstroecker/LinuxPods \
+#     --signer-workflow mstroecker/LinuxPods/.github/workflows/release-build.yml
+name: Release build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install GTK4 and libadwaita
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      # No build cache: a release builds from scratch
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-auditable@0.7.7
+      # Embeds the dependency list in the binary, for scanners such as cargo audit bin
+      - run: cargo auditable build --release --locked
+      - run: scripts/package.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tarball-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - run: make sbom
+      - run: mv target/sbom/linuxpods.cdx.json "linuxpods-${VERSION}.cdx.json"
+        env:
+          VERSION: ${{ inputs.version }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: linuxpods-*.cdx.json
+          if-no-files-found: error
+
+  attest:
+    name: Attest
+    needs: [build, sbom]
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write # requests the Sigstore signing certificate
+      attestations: write # stores the attestations on GitHub
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - run: sha256sum -- *.tar.gz *.cdx.json > SHA256SUMS
+        working-directory: dist
+      - id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+          create-storage-record: false
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+          sbom-path: dist/linuxpods-${{ inputs.version }}.cdx.json
+          create-storage-record: false
+      # The provenance bundle also goes into the release, so it can be checked
+      # without the GitHub API
+      - run: cp "$BUNDLE" "dist/linuxpods-${VERSION}.sigstore.json"
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          VERSION: ${{ inputs.version }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-metadata
+          path: |
+            dist/SHA256SUMS
+            dist/*.sigstore.json
+          if-no-files-found: error
