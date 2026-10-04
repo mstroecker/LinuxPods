@@ -89,8 +89,9 @@ jobs:
           sbom-path: dist/linuxpods-${{ inputs.version }}-aarch64-linux.cdx.json
           create-storage-record: false
       # The provenance bundle also goes into the release, so it can be checked
-      # without the GitHub API
-      - run: cp "$BUNDLE" "dist/linuxpods-${VERSION}.sigstore.json"
+      # without the GitHub API. One bundle per line (.intoto.jsonl), as
+      # gh attestation download writes them and Scorecard looks for them.
+      - run: jq -c . "$BUNDLE" > "dist/linuxpods-${VERSION}.intoto.jsonl"
         env:
           BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
           VERSION: ${{ inputs.version }}
@@ -99,5 +100,5 @@ jobs:
           name: release-metadata
           path: |
             dist/SHA256SUMS
-            dist/*.sigstore.json
+            dist/*.intoto.jsonl
           if-no-files-found: error

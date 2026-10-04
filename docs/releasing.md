@@ -41,7 +41,7 @@ cannot be changed: fix a broken release with a new version.
 | `linuxpods-<version>-x86_64-linux.tar.gz`, `…-aarch64-linux.tar.gz` | binary, `install.sh`, icons, LICENSE, README |
 | `linuxpods-<version>-x86_64-linux.cdx.json`, `…-aarch64-linux.cdx.json` | CycloneDX SBOM of each build |
 | `SHA256SUMS` | checksums of the tarballs and the SBOMs |
-| `linuxpods-<version>.sigstore.json` | SLSA build provenance bundle |
+| `linuxpods-<version>.intoto.jsonl` | SLSA build provenance bundle, for offline verification with `--bundle` |
 
 The binaries are built with `cargo auditable`, which embeds the dependency list,
 on Ubuntu 24.04, so they need glibc 2.39 or newer.
