@@ -12,12 +12,13 @@ nothing is uploaded by hand.
    git switch -c release/v0.2.0
    # set version = "0.2.0" in Cargo.toml
    cargo check                              # updates Cargo.lock
-   git cliff --tag v0.2.0 --output CHANGELOG.md
+   git cliff --unreleased --tag v0.2.0 --prepend CHANGELOG.md
    git commit -am "chore(release): v0.2.0"
    ```
 
-   Edit `CHANGELOG.md` if a generated entry reads badly; the release notes come
-   from the commits, so fix the wording there as well for later releases.
+   `--prepend` adds only the new section, so earlier entries keep any edits.
+   Edit the new one freely: the release notes are taken from this section of
+   `CHANGELOG.md`.
 
 2. Open a pull request and merge it once CI passes.
 
@@ -29,8 +30,8 @@ nothing is uploaded by hand.
    git push origin v0.2.0
    ```
 
-The workflow refuses a tag that does not match the version in `Cargo.toml` or
-does not point at a commit on `main`. Once published, a release and its tag
+The workflow refuses a tag that does not match the version in `Cargo.toml`,
+does not point at a commit on `main`, or has no section in `CHANGELOG.md`. Once published, a release and its tag
 cannot be changed: fix a broken release with a new version.
 
 ## What a release contains
