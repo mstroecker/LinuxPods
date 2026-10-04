@@ -1,0 +1,12 @@
+#!/bin/sh
+# Blocks a commit whose staged changes contain a secret (rules: .gitleaks.toml).
+# Install with `make hooks`. Bypass a false positive with a trailing
+# `gitleaks:allow` comment, or once with `git commit --no-verify`.
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: gitleaks not installed, skipping secret scan" >&2
+    echo "            (Arch: pacman -S gitleaks; others: github.com/gitleaks/gitleaks)" >&2
+    exit 0
+fi
+
+exec gitleaks git --pre-commit --staged --redact --no-banner .

@@ -1,0 +1,11 @@
+# Vetted false positives in history, by gitleaks fingerprint.
+# Add an entry only after confirming the value is not a secret.
+
+# Placeholder key a1b2c3d4... in the removed Go debug tools
+eed0a6e9541bf3f7e5d1f584cdbc844245489016:cmd/debug_decrypt/main.go:airpods-key-hex:60
+ff4fa2947c5e880621b9866c19fa577d35af09eb:cmd/debug_ble/main.go:airpods-key-hex:17
+ff4fa2947c5e880621b9866c19fa577d35af09eb:cmd/debug_decrypt_test/main.go:airpods-key-hex:17
+ff4fa2947c5e880621b9866c19fa577d35af09eb:cmd/debug_decrypt_test/main.go:airpods-key-hex:42
+
+# Apple's AAP service UUID, not a key
+3e5033abcee20529d0b4a5665ffbffefb79ab24f:cmd/discover/main.go:generic-api-key:133

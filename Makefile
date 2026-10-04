@@ -1,4 +1,4 @@
-.PHONY: all build build-release run run-debug test fmt lint clean install uninstall remove-legacy
+.PHONY: all build build-release run run-debug test fmt lint secrets hooks clean install uninstall remove-legacy
 
 # Default target
 all: fmt build
@@ -30,6 +30,14 @@ fmt:
 
 lint:
 	cargo clippy --all-targets
+
+# Scan the full git history for secrets (rules: .gitleaks.toml)
+secrets:
+	gitleaks git --redact --no-banner .
+
+# Install the pre-commit secret scan into this checkout
+hooks:
+	ln -sf ../../scripts/pre-commit "$$(git rev-parse --git-path hooks)/pre-commit"
 
 clean:
 	cargo clean

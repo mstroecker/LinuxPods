@@ -26,6 +26,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+      # Full history: a secret removed in a later commit is still published.
+      - run: gitleaks git --redact --no-banner --verbose .
+
   clippy:
     name: Clippy
     runs-on: ubuntu-24.04

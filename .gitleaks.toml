@@ -1,0 +1,48 @@
+# Secret scanning for LinuxPods. Runs in CI and from the pre-commit hook
+# (scripts/pre-commit). The built-in rules cover tokens and private keys; the
+# rules below cover what this project actually handles: 16-byte AirPods keys
+# (IRK and ENC_KEY), which generic rules skip as too ambiguous.
+#
+# Test vectors must be synthetic (see CLAUDE.md). A deliberate key-shaped
+# literal is allowed with a trailing `gitleaks:allow` comment on its line.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "linuxpods-keystore-file"
+description = "LinuxPods keystore (keys.json holds real device keys)"
+path = '''(^|/)keys\.json$'''
+
+[[rules]]
+id = "airpods-key-hex"
+description = "16-byte key as 32 hex characters (IRK or ENC_KEY)"
+regex = '''\b([0-9a-fA-F]{32})\b'''
+secretGroup = 1
+# Repeated-byte vectors (0x11 * 16) and zero padding fall below this.
+entropy = 2.5
+
+[[rules]]
+id = "airpods-key-bytes"
+description = "16-byte key as a Rust byte array (IRK or ENC_KEY)"
+regex = '''\[\s*((?:0x[0-9a-fA-F]{2}\s*,\s*){15}0x[0-9a-fA-F]{2})\s*,?\s*\]'''
+secretGroup = 1
+# Protocol constants such as PACKET_HANDSHAKE are mostly zeros and fall below this.
+entropy = 2.8
+
+[[allowlists]]
+description = "Lockfile checksums, build output and local audit output"
+paths = [
+    '''(^|/)Cargo\.lock$''',
+    '''^target/''',
+    '''^\.flatpak-builder/''',
+    '''^security-audit/''',
+]
+
+[[allowlists]]
+description = "Revoked example keys in docs/aap-key-retrieval.md (re-paired 2026-10-04)"
+regexTarget = "secret"
+regexes = [
+    '''^64dd9ce7bcb5b50a9a334542cbaf1902$''',
+    '''^1bdd73d2be019b9855cc5b367bf99d5d$''',
+]
