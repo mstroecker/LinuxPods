@@ -36,6 +36,10 @@ jobs:
             echo "::error::Tag $TAG points at a commit that is not on main"
             exit 1
           fi
+          if ! grep -qF "## [$version]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
         env:
           TAG: ${{ github.ref_name }}
@@ -65,10 +69,15 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
-        with:
-          tool: git-cliff@2.14.2
-      - run: git cliff --latest --strip header --output notes.md
+      # The release notes are this version's section of CHANGELOG.md
+      - run: |
+          awk -v heading="## [$VERSION]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found
+          ' CHANGELOG.md | sed '/./,$!d' > notes.md
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
       # Created as a draft and published once every file is attached, so an
       # immutable release never goes out incomplete
       - run: |
