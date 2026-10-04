@@ -42,6 +42,22 @@ jobs:
       # Full history: a secret removed in a later commit is still published.
       - run: gitleaks git --redact --no-banner --verbose .
 
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - run: make sbom
+      # A single file, uploaded as is rather than zipped
+      - uses: actions/upload-artifact@v7
+        with:
+          path: target/sbom/linuxpods.cdx.json
+          archive: false
+
   clippy:
     name: Clippy
     runs-on: ubuntu-24.04

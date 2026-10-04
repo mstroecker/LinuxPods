@@ -1,6 +1,9 @@
 # Rust build output
 /target
 
+# SBOM output, should it land outside target/
+*.cdx.json
+
 # Flatpak build output
 .flatpak-builder/
 /build-aux/flatpak/build/

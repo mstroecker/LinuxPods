@@ -1,4 +1,4 @@
-.PHONY: all build build-release run run-debug test fmt lint secrets hooks clean install uninstall remove-legacy
+.PHONY: all build build-release run run-debug test fmt lint secrets sbom hooks clean install uninstall remove-legacy
 
 # Default target
 all: fmt build
@@ -34,6 +34,18 @@ lint:
 # Scan the full git history for secrets (rules: .gitleaks.toml)
 secrets:
 	gitleaks git --redact --no-banner .
+
+# Software bill of materials for the release binary (CycloneDX JSON). Dev- and
+# build-only dependencies are left out: they never reach the binary. The
+# timestamp is the last commit's, so the same commit gives the same file.
+SBOM_DIR = target/sbom
+sbom:
+	@command -v cargo-cyclonedx >/dev/null || { echo "cargo-cyclonedx not found: cargo install --locked cargo-cyclonedx"; exit 1; }
+	SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct) cargo cyclonedx --format json \
+		--spec-version 1.5 --describe binaries --no-build-deps
+	mkdir -p $(SBOM_DIR)
+	mv linuxpods_bin.cdx.json $(SBOM_DIR)/linuxpods.cdx.json
+	@echo "SBOM: $(SBOM_DIR)/linuxpods.cdx.json"
 
 # Install the pre-commit secret scan into this checkout
 hooks:
