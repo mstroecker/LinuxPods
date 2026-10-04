@@ -1,3 +1,6 @@
+# publish_results makes api.scorecard.dev reject results from a workflow with
+# top-level env or defaults, workflow-level write permissions, or actions outside
+# its approved list: https://github.com/ossf/scorecard-action#workflow-restrictions
 name: Scorecard
 
 on:
