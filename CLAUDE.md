@@ -23,7 +23,7 @@ src/
 ├── bluez.rs       # org.bluez.BatteryProvider1 + device connection watch
 ├── keystore.rs    # Encryption keys at ~/.local/share/linuxpods/keys.json (0600)
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
-└── ui.rs          # GTK4/libadwaita interface
+└── ui/            # GTK4/libadwaita: window, Control page, Preferences
 ```
 
 **Threading.** GTK owns the main thread, tokio carries BLE/AAP/D-Bus. GTK types are

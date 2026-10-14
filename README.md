@@ -257,7 +257,7 @@ src/
 ├── bluez.rs       # BatteryProvider1 and the device connection watch
 ├── keystore.rs    # Key storage under XDG data dir
 ├── indicator.rs   # System tray (StatusNotifierItem)
-└── ui.rs          # GTK4/libadwaita interface
+└── ui/            # GTK4/libadwaita: window, Control page, Preferences
 ```
 
 GTK owns the main thread; tokio carries BLE, AAP and D-Bus work. The two meet over
