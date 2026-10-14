@@ -379,6 +379,19 @@ fn device_labels(macs: &[String], snapshot: &Snapshot) -> Vec<String> {
         .collect()
 }
 
+/// The device to show after an update, out of `macs`: the one already shown
+/// while it is still there, else the first AAP-connected one, else the first.
+pub(super) fn choose_device(
+    current: Option<String>,
+    macs: &[String],
+    connected: &[String],
+) -> Option<String> {
+    current
+        .filter(|m| macs.contains(m))
+        .or_else(|| connected.iter().find(|m| macs.contains(m)).cloned())
+        .or_else(|| macs.first().cloned())
+}
+
 /// Draws one device, and gates the control sections on how the data arrived.
 pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
     let state = mac.and_then(|m| snapshot.states.get(m));
@@ -617,6 +630,53 @@ mod tests {
                 "AirPods Pro (11:22:33:44:55:66)",
                 "AirPods Max",
             ]
+        );
+    }
+
+    fn macs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|m| (*m).to_string()).collect()
+    }
+
+    /// The user's pick holds through every update while the device is known,
+    /// even with another pair connected.
+    #[test]
+    fn choice_keeps_the_device_shown() {
+        let known = macs(&["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB"]);
+        let connected = macs(&["AA:AA:AA:AA:AA:AA"]);
+        assert_eq!(
+            choose_device(Some("BB:BB:BB:BB:BB:BB".into()), &known, &connected).as_deref(),
+            Some("BB:BB:BB:BB:BB:BB")
+        );
+    }
+
+    #[test]
+    fn choice_prefers_a_connected_device() {
+        let known = macs(&["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB"]);
+        let connected = macs(&["BB:BB:BB:BB:BB:BB"]);
+        assert_eq!(
+            choose_device(None, &known, &connected).as_deref(),
+            Some("BB:BB:BB:BB:BB:BB")
+        );
+        // A device whose key is gone is not kept.
+        assert_eq!(
+            choose_device(Some("CC:CC:CC:CC:CC:CC".into()), &known, &connected).as_deref(),
+            Some("BB:BB:BB:BB:BB:BB")
+        );
+    }
+
+    /// A connected device without a key is not in the switcher, so it cannot be
+    /// chosen; the first known device is.
+    #[test]
+    fn choice_falls_back_to_the_first_known() {
+        let known = macs(&["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB"]);
+        let connected = macs(&["CC:CC:CC:CC:CC:CC"]);
+        assert_eq!(
+            choose_device(None, &known, &connected).as_deref(),
+            Some("AA:AA:AA:AA:AA:AA")
+        );
+        assert_eq!(
+            choose_device(Some("AA:AA:AA:AA:AA:AA".into()), &[], &connected),
+            None
         );
     }
 }
