@@ -214,8 +214,41 @@ struct Link {
     /// session would show as selected after a reconnect, though it may have
     /// been changed from a phone meanwhile.
     noise_mode: Option<aap::NoiseMode>,
+    /// What the device last advertised about itself, which AAP never says.
+    /// Kept apart from the reading like the mode. Taken from the cached
+    /// advertisement when the link comes up and refreshed by every one after,
+    /// so it outlives that cache entry's expiry.
+    identity: Option<Identity>,
     /// Orders `Snapshot::connected_macs`.
     since: Instant,
+}
+
+/// The parts of a reading that say which device it is rather than how it is
+/// doing. Only advertisements carry them.
+#[derive(Clone, PartialEq)]
+struct Identity {
+    device_model: u16,
+    model_name: String,
+    color: u8,
+    primary_pod: PodSide,
+}
+
+impl Identity {
+    fn of(state: &PodState) -> Self {
+        Self {
+            device_model: state.device_model,
+            model_name: state.model_name.clone(),
+            color: state.color,
+            primary_pod: state.primary_pod,
+        }
+    }
+
+    fn apply_to(&self, state: &mut PodState) {
+        state.device_model = self.device_model;
+        state.model_name.clone_from(&self.model_name);
+        state.color = self.color;
+        state.primary_pod = self.primary_pod;
+    }
 }
 
 struct Inner {
@@ -292,6 +325,13 @@ impl Inner {
             };
             let mut state = reading.clone();
             state.noise_mode = link.noise_mode;
+            // Merged here rather than copied into each battery packet: a
+            // reading that arrived before the first advertisement kept a blank
+            // model until the next packet, which over AAP comes only when a
+            // level changes.
+            if let Some(identity) = &link.identity {
+                identity.apply_to(&mut state);
+            }
             states.insert(mac.clone(), state);
         }
 
@@ -549,6 +589,7 @@ impl Coordinator {
                 .join(" ")
         );
 
+        let identity = Identity::of(&state);
         let snapshot = {
             let mut inner = self.inner.write().await;
             let now = Instant::now();
@@ -562,10 +603,16 @@ impl Coordinator {
                 },
             );
             let pruned = inner.prune(now);
+            let identified = inner
+                .links
+                .get_mut(&real_mac)
+                .is_some_and(|link| link.identity.replace(identity.clone()) != Some(identity));
             // AAP data for this device is exact and current; its own
-            // advertisements are coarser and lag behind, and nothing a snapshot
-            // shows has changed - unless the prune dropped something.
-            if inner.supersedes_ble(&real_mac) && !pruned {
+            // advertisements are coarser and lag behind. Nothing a snapshot
+            // shows has changed - unless they told the link something new
+            // about the device, typically its model on the first advertisement
+            // after connecting, or the prune dropped something.
+            if inner.supersedes_ble(&real_mac) && !identified && !pruned {
                 return;
             }
             inner.snapshot()
@@ -620,6 +667,8 @@ impl Coordinator {
                 tracing::debug!("AAP already connected to {mac_addr}; dropping the duplicate");
                 return Ok(());
             }
+            // Advertised before the link came up, if the cache still has it.
+            let identity = inner.ble.get(mac_addr).map(|e| Identity::of(&e.state));
             inner.links.insert(
                 mac_addr.to_string(),
                 Link {
@@ -627,6 +676,7 @@ impl Coordinator {
                     reading: None,
                     // Reported by the startup dump, once the read loop is up.
                     noise_mode: None,
+                    identity,
                     since: Instant::now(),
                 },
             );
@@ -744,27 +794,17 @@ impl Coordinator {
         }
     }
 
+    /// Makes a battery packet the link's reading, and broadcasts.
+    ///
+    /// AAP packets carry battery only - no model, colour or orientation. The
+    /// link holds what the device advertised about itself, and
+    /// [`Inner::snapshot`] merges it in.
     async fn handle_battery_info(
         &self,
         info: aap::BatteryInfo,
         mac_addr: &str,
         client: &Arc<aap::Client>,
     ) {
-        // AAP packets carry battery only - no model, colour or orientation. Carry
-        // that identity forward from whatever BLE last saw for this device, so the
-        // UI does not lose the device name the moment it connects. The previous
-        // AAP reading covers a device that has not advertised yet.
-        let identity = {
-            let inner = self.inner.read().await;
-            inner
-                .ble
-                .get(mac_addr)
-                .map(|e| &e.state)
-                .or(inner.links.get(mac_addr).and_then(|l| l.reading.as_ref()))
-                .map(|s| (s.device_model, s.model_name.clone(), s.color, s.primary_pod))
-        };
-        let (device_model, model_name, color, primary_pod) = identity.unwrap_or_default();
-
         let state = PodState {
             source: DataSource::Aap,
             left_battery: info.left.and_then(|b| b.level),
@@ -774,10 +814,6 @@ impl Coordinator {
             right_charging: info.right.is_some_and(|b| b.is_charging()),
             case_charging: info.case.is_some_and(|b| b.is_charging()),
             real_mac: mac_addr.to_string(),
-            device_model,
-            model_name,
-            color,
-            primary_pod,
             // AAP carries no in-ear, lid or connection-state data; those stay at
             // their defaults.
             ..Default::default()
@@ -961,6 +997,7 @@ mod tests {
             client: Arc::new(aap::Client::new("00:00:00:00:00:00").unwrap()),
             reading,
             noise_mode: None,
+            identity: None,
             since: Instant::now(),
         }
     }
@@ -1377,6 +1414,108 @@ mod tests {
             !inner.record_noise_mode("aa", &current, aap::NoiseMode::Off),
             "an unchanged mode is not worth a broadcast"
         );
+    }
+
+    /// MAC on AAP with KEY stored for it, as after the key exchange; and the
+    /// link's client.
+    fn linked() -> (Arc<Coordinator>, Arc<aap::Client>, tempfile::TempDir) {
+        let mut inner = inner_with(vec![]);
+        inner.encryption_keys.insert(MAC.into(), KEY.to_vec());
+        let l = link(None);
+        let client = l.client.clone();
+        inner.links.insert(MAC.into(), l);
+        let (coordinator, dir) = coordinator_with(inner);
+        (coordinator, client, dir)
+    }
+
+    fn battery_packet(left: u8) -> aap::BatteryInfo {
+        aap::BatteryInfo {
+            left: Some(aap::battery::Battery {
+                component: aap::battery::Component::Left,
+                level: Some(left),
+                status: aap::battery::Status::Discharging,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// An AirPods Pro 3 advertisement that KEY decrypts, its suffix field zeroed
+    /// as a connected device sends it. Encrypted here, so no real key is needed.
+    fn advertisement() -> ProximityData {
+        use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
+
+        let mut plain = [0u8; 16];
+        plain[1..4].copy_from_slice(&[80, 80, 50]); // left, right, case
+        let mut block = Block::<aes::Aes128>::try_from(&plain[..]).unwrap();
+        aes::Aes128::new_from_slice(&KEY)
+            .unwrap()
+            .encrypt_block(&mut block);
+
+        // The encrypted portion starts at byte 9 of the payload.
+        let mut raw_data = vec![0; 9];
+        raw_data.extend_from_slice(&block);
+        ProximityData {
+            device_model: 0x2720,
+            color: 0x01,
+            raw_data,
+            ..Default::default()
+        }
+    }
+
+    /// Regression (#44): a battery packet that arrived before any advertisement
+    /// left the model blank - "AirPods" in the status line - until the next
+    /// packet, which over AAP comes only when a level changes. Advertisements
+    /// kept arriving, but none was broadcast for a device on AAP.
+    #[tokio::test]
+    async fn an_advertisement_names_a_device_already_on_aap() {
+        let (coordinator, client, _dir) = linked();
+        coordinator
+            .handle_battery_info(battery_packet(83), MAC, &client)
+            .await;
+        let mut rx = coordinator.subscribe();
+        assert_eq!(rx.borrow_and_update().states[MAC].model_name, "");
+
+        coordinator
+            .handle_advertisement(advertisement(), "5C:4D:3F:B5:41:B6".into())
+            .await;
+        assert!(rx.has_changed().unwrap(), "the model is worth a broadcast");
+        let state = rx.borrow_and_update().states[MAC].clone();
+        assert_eq!(state.source, DataSource::Aap);
+        assert_eq!(state.left_battery, Some(83));
+        assert_eq!(state.model_name, "AirPods Pro 3");
+        assert_eq!(state.color, 0x01);
+
+        coordinator
+            .handle_advertisement(advertisement(), "5C:4D:3F:B5:41:B6".into())
+            .await;
+        assert!(!rx.has_changed().unwrap(), "nothing new to show");
+    }
+
+    /// The identity is the link's: it outlives the advertisement it came from,
+    /// whose cache entry expires while the link may well last, and every
+    /// battery packet after.
+    #[tokio::test]
+    async fn the_identity_outlives_the_cached_advertisement() {
+        let (coordinator, client, _dir) = linked();
+        coordinator
+            .handle_advertisement(advertisement(), "5C:4D:3F:B5:41:B6".into())
+            .await;
+        assert!(
+            coordinator
+                .inner
+                .write()
+                .await
+                .prune(Instant::now() + BLE_CACHE_TTL)
+        );
+
+        coordinator
+            .handle_battery_info(battery_packet(82), MAC, &client)
+            .await;
+        let state = coordinator.subscribe().borrow().states[MAC].clone();
+        assert_eq!(state.left_battery, Some(82));
+        assert_eq!(state.device_model, 0x2720);
+        assert_eq!(state.model_name, "AirPods Pro 3");
+        assert_eq!(state.color, 0x01);
     }
 
     #[test]
