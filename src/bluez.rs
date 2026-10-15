@@ -187,13 +187,9 @@ impl BatteryProvider {
         Ok(objects
             .into_iter()
             .filter(|(_, interfaces)| {
-                interfaces.get("org.bluez.Device1").is_some_and(|props| {
-                    is_airpods(props)
-                        && props
-                            .get("Connected")
-                            .and_then(|v| bool::try_from(v.clone()).ok())
-                            .unwrap_or(false)
-                })
+                interfaces
+                    .get("org.bluez.Device1")
+                    .is_some_and(|props| is_airpods(props) && bool_prop(props, "Connected"))
             })
             .map(|(path, _)| path.to_string())
             .collect())
@@ -210,7 +206,7 @@ impl BatteryProvider {
             .context("failed to get device address")
     }
 
-    /// Every known device's BlueZ alias, keyed by uppercase MAC.
+    /// Every paired device's BlueZ alias, keyed by uppercase MAC.
     ///
     /// The alias is the name the user sees everywhere else on the desktop - their
     /// own rename if they made one, the device's advertised name otherwise - so it
@@ -332,11 +328,26 @@ pub fn is_airpods(props: &HashMap<String, OwnedValue>) -> bool {
         .unwrap_or(false)
 }
 
-/// Pulls the (uppercase MAC, alias) pair out of a Device1 property map.
+/// A boolean Device1 property; absent or mistyped reads as false.
+fn bool_prop(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
+    props
+        .get(key)
+        .and_then(|v| bool::try_from(v.clone()).ok())
+        .unwrap_or(false)
+}
+
+/// Pulls the (uppercase MAC, alias) pair out of a paired device's Device1 property map.
 ///
 /// Both properties are required: an address with no alias has no name to show, and
-/// an alias with no address cannot be matched to a device we track.
+/// an alias with no address cannot be matched to a device we track. Unpaired devices
+/// are skipped: while we scan, BlueZ keeps an object for every advertiser nearby,
+/// mostly random addresses named after themselves, and the map goes into every
+/// snapshot - unfiltered, a BLE spam flood would grow it. The switcher lists only
+/// devices whose key we hold, and getting a key takes a pairing.
 fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(String, String)> {
+    if !bool_prop(props, "Paired") {
+        return None;
+    }
     let string_prop = |k: &str| {
         props
             .get(k)
@@ -356,38 +367,68 @@ pub const fn adapter_path() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zbus::zvariant::Value;
+
+    /// A Device1 property map, as GetManagedObjects or PropertiesChanged carry it.
+    fn device<'a>(
+        props: impl IntoIterator<Item = (&'a str, Value<'static>)>,
+    ) -> HashMap<String, OwnedValue> {
+        props
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), OwnedValue::try_from(value).unwrap()))
+            .collect()
+    }
 
     fn props(alias: Option<&str>) -> HashMap<String, OwnedValue> {
-        let mut m = HashMap::new();
-        if let Some(a) = alias {
-            m.insert(
-                "Alias".to_string(),
-                OwnedValue::try_from(zbus::zvariant::Value::from(a.to_string())).unwrap(),
-            );
-        }
-        m
+        device(alias.map(|a| ("Alias", Value::from(a.to_string()))))
     }
 
     /// Both properties are needed, and the address is normalized because the
     /// keystore keys its entries on the uppercase form.
     #[test]
     fn name_entry_needs_an_address_and_an_alias() {
-        let mut p = props(Some("Marcel's AirPods Pro"));
-        assert_eq!(device_name_entry(&p), None);
+        let paired = ("Paired", Value::from(true));
+        let alias = ("Alias", Value::from("Marcel's AirPods Pro"));
+        let address = ("Address", Value::from("aa:bb:cc:dd:ee:ff"));
 
-        p.insert(
-            "Address".to_string(),
-            OwnedValue::try_from(zbus::zvariant::Value::from("aa:bb:cc:dd:ee:ff")).unwrap(),
+        assert_eq!(
+            device_name_entry(&device([paired.clone(), alias.clone()])),
+            None
         );
         assert_eq!(
-            device_name_entry(&p),
+            device_name_entry(&device([paired.clone(), address.clone()])),
+            None
+        );
+        assert_eq!(
+            device_name_entry(&device([paired, alias, address])),
             Some((
                 "AA:BB:CC:DD:EE:FF".to_string(),
                 "Marcel's AirPods Pro".to_string()
             ))
         );
+    }
 
-        assert_eq!(device_name_entry(&props(None)), None);
+    /// Discovery leaves BlueZ an object for every advertiser in range, its alias
+    /// the address itself; only a pairing earns a device a name.
+    #[test]
+    fn name_entry_needs_a_pairing() {
+        let mut props = device([
+            ("Address", Value::from("DE:AD:BE:EF:00:01")),
+            ("Alias", Value::from("DE-AD-BE-EF-00-01")),
+        ]);
+        assert_eq!(device_name_entry(&props), None);
+
+        props.extend(device([("Paired", Value::from(false))]));
+        assert_eq!(device_name_entry(&props), None);
+
+        props.extend(device([("Paired", Value::from(true))]));
+        assert_eq!(
+            device_name_entry(&props),
+            Some((
+                "DE:AD:BE:EF:00:01".to_string(),
+                "DE-AD-BE-EF-00-01".to_string()
+            ))
+        );
     }
 
     /// One object per device, and a MAC's colons are not legal in an object path.
