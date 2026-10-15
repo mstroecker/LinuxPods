@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+use super::preferences::unavailable_row;
 use super::{RESOURCE_PREFIX, last_seen_text};
 use crate::aap::NoiseMode;
 use crate::ble::decode_connection_state;
@@ -101,7 +102,6 @@ pub struct ControlView {
     /// `win.noise-mode`, enabled only while the device shown is on AAP. The Noise
     /// Control group's sensitivity is bound to it.
     pub noise_action: gio::SimpleAction,
-    pub features_group: adw::PreferencesGroup,
 }
 
 /// The Control page. An `AdwPreferencesPage` for its scrolling, width clamp and
@@ -256,30 +256,12 @@ pub(super) fn create_control_view() -> ControlView {
     }
     page.add(&noise_control_group);
 
-    // Features
-    let conversation_group = adw::PreferencesGroup::builder().title("Features").build();
-    let conversation_row = adw::ActionRow::builder()
-        .title("Conversation Awareness")
-        .subtitle("Lower media volume when you start speaking")
-        .build();
-
-    let conversation_switch = gtk::Switch::builder()
-        .active(false)
-        .valign(gtk::Align::Center)
-        .build();
-    conversation_row.add_suffix(&conversation_switch);
-    conversation_row.set_activatable_widget(Some(&conversation_switch));
-
-    conversation_switch.connect_active_notify(|s| {
-        if s.is_active() {
-            println!("Conversation Awareness enabled");
-        } else {
-            println!("Conversation Awareness disabled");
-        }
-    });
-
-    conversation_group.add(&conversation_row);
-    page.add(&conversation_group);
+    // Features. The command behind Conversation Awareness is still unknown, so
+    // its row stays greyed out whatever the connection: on AAP, a live switch
+    // would claim a setting the AirPods never received.
+    let features_group = adw::PreferencesGroup::builder().title("Features").build();
+    features_group.add(&unavailable_row("Conversation Awareness"));
+    page.add(&features_group);
 
     let content = gtk::Stack::new();
     content.add_named(&page, Some("device"));
@@ -293,7 +275,6 @@ pub(super) fn create_control_view() -> ControlView {
         device_macs: RefCell::new(Vec::new()),
         device_labels: RefCell::new(Vec::new()),
         noise_action,
-        features_group: conversation_group,
     }
 }
 
@@ -392,7 +373,7 @@ pub(super) fn choose_device(
         .or_else(|| macs.first().cloned())
 }
 
-/// Draws one device, and gates the control sections on how the data arrived.
+/// Draws one device, and gates noise control on how the data arrived.
 pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
     let state = mac.and_then(|m| snapshot.states.get(m));
     let connected = mac.is_some_and(|m| snapshot.is_connected(m));
@@ -400,11 +381,10 @@ pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option
     match state {
         Some(state) => {
             update_battery_display(&view.battery, state);
-            // Noise control and features need an AAP connection; over BLE we can
-            // read state but not command the device, so they are disabled.
+            // Noise control needs an AAP connection; over BLE we can read state
+            // but not command the device, so it is disabled.
             let interactive = state.source == DataSource::Aap;
             view.noise_action.set_enabled(interactive);
-            view.features_group.set_sensitive(interactive);
             show_noise_mode(view, state.noise_mode);
         }
         // Known device, nothing heard from it yet: show it as empty rather than
@@ -419,7 +399,6 @@ pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option
             };
             clear_battery_display(&view.battery, status);
             view.noise_action.set_enabled(false);
-            view.features_group.set_sensitive(false);
             show_noise_mode(view, None);
         }
     }

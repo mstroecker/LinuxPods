@@ -18,31 +18,11 @@ pub(super) fn create_preferences_dialog(
 ) -> (adw::PreferencesDialog, DeviceRows) {
     let page = adw::PreferencesPage::new();
 
+    // Neither setting exists yet: the app always connects, and nothing watches
+    // for a low battery.
     let settings_group = adw::PreferencesGroup::builder().title("General").build();
-
-    for (title, subtitle, active) in [
-        (
-            "Auto-connect",
-            "Automatically connect when AirPods are detected",
-            true,
-        ),
-        (
-            "Battery notifications",
-            "Show notification when battery is low",
-            false,
-        ),
-    ] {
-        let row = adw::ActionRow::builder()
-            .title(title)
-            .subtitle(subtitle)
-            .build();
-        let sw = gtk::Switch::builder()
-            .active(active)
-            .valign(gtk::Align::Center)
-            .build();
-        row.add_suffix(&sw);
-        row.set_activatable_widget(Some(&sw));
-        settings_group.add(&row);
+    for title in ["Auto-connect", "Battery notifications"] {
+        settings_group.add(&unavailable_row(title));
     }
     page.add(&settings_group);
 
@@ -62,6 +42,26 @@ pub(super) fn create_preferences_dialog(
         runtime,
     };
     (dialog, devices)
+}
+
+/// A setting that is planned but not built, in Preferences and on the Control
+/// page. Shown so the plan is visible, but switched off and greyed out: it
+/// neither claims a state nor takes a click, and nothing listens to the switch.
+/// Once a feature lands, its state comes with the snapshot and a change goes
+/// out as a command, as noise control's does.
+pub(super) fn unavailable_row(title: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .subtitle("Not available yet")
+        .sensitive(false)
+        .build();
+    row.add_suffix(
+        &gtk::Switch::builder()
+            .active(false)
+            .valign(gtk::Align::Center)
+            .build(),
+    );
+    row
 }
 
 /// The Development group: a row per device, by real MAC.
