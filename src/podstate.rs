@@ -254,31 +254,74 @@ impl Inner {
     }
 }
 
+/// Where `Inner::encryption_keys` is saved, and what was last saved there.
+struct Persistence {
+    /// `None` when keys are not saved this session: the data directory could not
+    /// be set up, or a key file that did not load could not be moved out of the
+    /// way. Keys still arrive and decrypt BLE either way - from memory.
+    keystore: Option<Keystore>,
+    /// The keys as last loaded or saved successfully. A save is due whenever
+    /// memory differs from this. Judged against memory instead, a key whose save
+    /// failed looked unchanged the next time it arrived, and was never written.
+    saved: HashMap<String, Vec<u8>>,
+}
+
 /// Coordinates sources and broadcasts snapshots.
 pub struct Coordinator {
     inner: RwLock<Inner>,
-    keystore: Mutex<Keystore>,
+    /// Held across a save, so saves never overlap - they share a temporary file.
+    keystore: Mutex<Persistence>,
     /// The latest snapshot, which every subscriber sees - see [`Coordinator::subscribe`].
     updates: watch::Sender<Snapshot>,
 }
 
 impl Coordinator {
     /// Loads persisted encryption keys so BLE decryption works from first launch.
+    ///
+    /// Without a usable data directory it starts anyway and keeps keys in memory
+    /// only: a missing key costs BLE accuracy, nothing more.
     pub async fn new() -> Result<Arc<Self>> {
-        let mut keystore = Keystore::new().context("failed to create keystore")?;
-        let loaded = match keystore.load() {
-            Ok(keys) => {
-                if !keys.is_empty() {
-                    tracing::info!("Loaded {} encryption key(s) from disk", keys.len());
-                }
-                keys
-            }
-            Err(e) => {
-                tracing::warn!("failed to load encryption keys from disk: {e}");
-                HashMap::new()
-            }
-        };
+        let keystore = Keystore::new()
+            .inspect_err(|e| tracing::warn!("encryption keys will not be saved: {e:#}"))
+            .ok();
+        Ok(Self::with_keystore(keystore))
+    }
 
+    /// [`Coordinator::new`] with the keystore given, so tests use their own
+    /// directory rather than the user's.
+    fn with_keystore(mut keystore: Option<Keystore>) -> Arc<Self> {
+        let mut loaded = HashMap::new();
+        if let Some(ks) = &keystore {
+            match ks.load() {
+                Ok(keys) => {
+                    if !keys.is_empty() {
+                        tracing::info!("Loaded {} encryption key(s) from disk", keys.len());
+                    }
+                    loaded = keys;
+                }
+                // Left in place, the file would be overwritten by the next key to
+                // arrive - holding that key alone, every other one lost.
+                Err(e) => match ks.set_aside() {
+                    Ok(aside) => tracing::warn!(
+                        "failed to load encryption keys: {e:#}; moved the file to {} \
+                         and starting without them",
+                        aside.display()
+                    ),
+                    Err(set_aside) => {
+                        tracing::warn!(
+                            "failed to load encryption keys: {e:#}; nor could the file be \
+                             moved aside ({set_aside:#}), so keys will not be saved"
+                        );
+                        keystore = None;
+                    }
+                },
+            }
+        }
+
+        let persistence = Persistence {
+            keystore,
+            saved: loaded.clone(),
+        };
         let inner = Inner {
             ble: HashMap::new(),
             links: HashMap::new(),
@@ -288,11 +331,11 @@ impl Coordinator {
         };
         let (updates, _) = watch::channel(inner.snapshot());
 
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             inner: RwLock::new(inner),
-            keystore: Mutex::new(keystore),
+            keystore: Mutex::new(persistence),
             updates,
-        }))
+        })
     }
 
     /// Registers a new consumer, which sees the latest snapshot.
@@ -765,39 +808,49 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Persists a newly received ENC_KEY and broadcasts the new key list.
+    /// Takes a newly received ENC_KEY into use, broadcasts the new key list, and
+    /// persists it.
     ///
     /// Keys are requested on every connection, so this is usually the key already
-    /// held. That is skipped rather than rewriting the keystore each time - which
-    /// also keeps a device repeating its key packet from keeping the disk busy.
+    /// held and already saved. That is skipped rather than rewriting the keystore
+    /// each time - which also keeps a device repeating its key packet from keeping
+    /// the disk busy. "Already saved" goes by the last save that succeeded, so a
+    /// key whose save failed is written again when it next arrives.
     async fn store_encryption_key(&self, mac_addr: &str, key: &[u8]) {
-        {
+        let snapshot = {
             let mut inner = self.inner.write().await;
-            if inner
-                .encryption_keys
-                .get(mac_addr)
-                .is_some_and(|k| k.as_slice() == key)
-            {
-                tracing::debug!("Encryption key for {mac_addr} unchanged");
-                return;
-            }
-            inner
+            let previous = inner
                 .encryption_keys
                 .insert(mac_addr.to_string(), key.to_vec());
+            (previous.as_deref() != Some(key)).then(|| inner.snapshot())
+        };
+        // Decrypting from here on, whether or not the key reaches the disk.
+        if let Some(snapshot) = snapshot {
+            self.broadcast(snapshot);
         }
 
-        let mut ks = self.keystore.lock().await;
-        if let Err(e) = ks.set(mac_addr, key) {
-            tracing::warn!("failed to cache encryption key: {e}");
-        } else if let Err(e) = ks.save() {
-            tracing::warn!("failed to save encryption key to disk: {e}");
-        } else {
-            tracing::info!("Stored encryption key for {mac_addr} ({} bytes)", key.len());
+        let mut persistence = self.keystore.lock().await;
+        let Some(keystore) = persistence.keystore.clone() else {
+            tracing::debug!("Encryption key for {mac_addr} kept for this session only");
+            return;
+        };
+        let keys = self.inner.read().await.encryption_keys.clone();
+        if keys == persistence.saved {
+            tracing::debug!("Encryption key for {mac_addr} already saved");
+            return;
         }
-        drop(ks);
 
-        let snapshot = self.inner.read().await.snapshot();
-        self.broadcast(snapshot);
+        // Off the async workers: the save waits on the disk.
+        let saved = tokio::task::spawn_blocking(move || keystore.save(&keys).map(|()| keys))
+            .await
+            .unwrap_or_else(|e| Err(e.into()));
+        match saved {
+            Ok(keys) => {
+                persistence.saved = keys;
+                tracing::info!("Stored encryption key for {mac_addr} ({} bytes)", key.len());
+            }
+            Err(e) => tracing::warn!("failed to save encryption key to disk: {e:#}"),
+        }
     }
 
     /// Asks one pair of AirPods for their proximity keys. Requires its AAP link.
@@ -860,10 +913,113 @@ mod tests {
         let (updates, _) = watch::channel(inner.snapshot());
         let coordinator = Arc::new(Coordinator {
             inner: RwLock::new(inner),
-            keystore: Mutex::new(Keystore::with_dir(dir.path().to_path_buf()).unwrap()),
+            keystore: Mutex::new(Persistence {
+                keystore: Some(keystore_in(&dir)),
+                saved: HashMap::new(),
+            }),
             updates,
         });
         (coordinator, dir)
+    }
+
+    /// Synthetic, like every key in these tests.
+    const MAC: &str = "AA:BB:CC:DD:EE:FF";
+    const KEY: [u8; 16] = [7; 16];
+
+    fn keystore_in(dir: &tempfile::TempDir) -> Keystore {
+        Keystore::with_dir(dir.path().to_path_buf()).unwrap()
+    }
+
+    fn chmod(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Regression (#38): a key file that did not load was overwritten by the
+    /// next key to arrive, holding that key alone - every other one was lost.
+    #[tokio::test]
+    async fn a_key_file_that_did_not_load_is_set_aside_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        // One entry that does not decode fails the whole file, the good key with it.
+        let corrupt = r#"{"version":1,"keys":{
+            "11:22:33:44:55:66":"AQIDBAUGBwgJCgsMDQ4PEA==",
+            "AA:BB:CC:DD:EE:FF":"not base64!"}}"#;
+        std::fs::write(dir.path().join("keys.json"), corrupt).unwrap();
+
+        let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
+        assert_eq!(coordinator.known_key_count().await, 0);
+        coordinator.store_encryption_key(MAC, &KEY).await;
+
+        let aside: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_str().unwrap().contains("keys.json.corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), corrupt);
+        assert_eq!(
+            keystore_in(&dir).load().unwrap(),
+            HashMap::from([(MAC.to_string(), KEY.to_vec())]),
+            "a fresh file in its place"
+        );
+    }
+
+    /// A key file that can be neither read nor moved aside is never saved over.
+    /// The keys that arrive are still used, for this session only.
+    #[tokio::test]
+    async fn a_key_file_that_cannot_be_set_aside_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.json");
+        std::fs::write(&path, "original").unwrap();
+        let keystore = keystore_in(&dir);
+
+        chmod(&path, 0o000);
+        chmod(dir.path(), 0o500);
+        let coordinator = Coordinator::with_keystore(Some(keystore));
+        // Writable again, so only the coordinator stands between the next key
+        // and the file.
+        chmod(dir.path(), 0o700);
+        coordinator.store_encryption_key(MAC, &KEY).await;
+        chmod(&path, 0o600);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(coordinator.known_key_count().await, 1);
+    }
+
+    /// Regression (#38): "unchanged" was judged against memory, which already
+    /// held the key whose save had failed, so the save was never retried.
+    #[tokio::test]
+    async fn a_failed_save_is_retried_when_the_key_arrives_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
+
+        // Read-only, so the save cannot create its temporary file.
+        chmod(dir.path(), 0o500);
+        coordinator.store_encryption_key(MAC, &KEY).await;
+        chmod(dir.path(), 0o700);
+        assert!(keystore_in(&dir).load().unwrap().is_empty());
+        assert_eq!(
+            coordinator.known_key_count().await,
+            1,
+            "in use whether saved or not"
+        );
+
+        coordinator.store_encryption_key(MAC, &KEY).await;
+        assert_eq!(keystore_in(&dir).load().unwrap()[MAC], KEY);
+    }
+
+    /// Keys are requested on every connection; one already saved is not
+    /// written again.
+    #[tokio::test]
+    async fn a_saved_key_is_not_written_again() {
+        let (coordinator, dir) = coordinator_with(inner_with(vec![]));
+        let path = dir.path().join("keys.json");
+        coordinator.store_encryption_key(MAC, &KEY).await;
+        assert!(path.exists());
+
+        std::fs::remove_file(&path).unwrap();
+        coordinator.store_encryption_key(MAC, &KEY).await;
+        assert!(!path.exists(), "the same key again is no reason to write");
     }
 
     /// A reading outlives a few quiet minutes, so it is still there after the
@@ -920,21 +1076,20 @@ mod tests {
     /// range, because nothing was broadcast until the first advertisement arrived.
     #[tokio::test]
     async fn subscribe_delivers_current_state_immediately() {
-        let coordinator = Coordinator::new().await.expect("coordinator");
+        let dir = tempfile::tempdir().unwrap();
+        keystore_in(&dir)
+            .save(&HashMap::from([(MAC.to_string(), KEY.to_vec())]))
+            .unwrap();
+        let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
         let rx = coordinator.subscribe();
 
         assert!(
             rx.has_changed().unwrap(),
             "a subscriber must receive the current state without waiting"
         );
-        let snapshot = rx.borrow().clone();
-
-        // Whatever is on disk, the snapshot must carry the loaded key list so the
-        // UI can render known devices before anything is heard over the air.
-        assert_eq!(
-            snapshot.known_keys.len(),
-            coordinator.known_key_count().await
-        );
+        // The snapshot must carry the loaded key list so the UI can render known
+        // devices before anything is heard over the air.
+        assert_eq!(rx.borrow().known_keys, [MAC]);
     }
 
     fn aap_state(left: u8) -> PodState {

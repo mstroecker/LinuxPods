@@ -29,8 +29,7 @@ fn hex(s: &str) -> Vec<u8> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ks = Keystore::new()?;
-    let keys = ks.load()?;
+    let keys = Keystore::new()?.load()?;
     println!("stored keys: {:?}\n", keys.keys().collect::<Vec<_>>());
 
     for (mac, key) in &keys {
