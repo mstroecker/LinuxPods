@@ -6,7 +6,7 @@
 
 use linuxpods::{ble, bluez, indicator, podstate, ui};
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -54,6 +54,99 @@ impl TrayActions for AppActions {
     }
 }
 
+/// The option the autostart entry passes: start in the tray, window hidden.
+const MINIMIZED: &str = "minimized";
+
+/// Declares the command-line options. GApplication parses them in whichever
+/// process was launched and hands them to the primary instance's
+/// `command-line` - over D-Bus, when that is another process.
+fn add_options(app: &impl IsA<gio::Application>) {
+    app.add_main_option(
+        MINIMIZED,
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        "Start in the system tray without showing the window",
+        None,
+    );
+}
+
+/// Whether a launch brings up the window. `--minimized` leaves it as it is:
+/// hidden when the launch starts the app, and not raised when the app is
+/// already running - autostart must not pop up a window the user put away.
+fn shows_window(options: &glib::VariantDict) -> bool {
+    !options.contains(MINIMIZED)
+}
+
+/// The half of the app only the primary instance runs. It is set up in
+/// `startup`, which a second launch never reaches: that one registers, finds
+/// the primary, hands it its command line and exits.
+struct Primary {
+    coordinator: Arc<Coordinator>,
+    runtime: tokio::runtime::Handle,
+    /// Tray commands, for the window once it is built.
+    window_rx: async_channel::Receiver<WindowCommand>,
+    /// Built by the first launch and kept: every later one lands in this
+    /// instance, and the window from the first is the one to raise. Building a
+    /// second would leave two windows on one coordinator.
+    window: RefCell<Option<adw::ApplicationWindow>>,
+}
+
+impl Primary {
+    /// Starts the background workers. Between them they reach well outside the
+    /// process - BLE discovery, the BlueZ battery provider, an AAP link to every
+    /// connected pair, the tray icon - so there must only ever be one set.
+    fn start(coordinator: Arc<Coordinator>, runtime: tokio::runtime::Handle) -> Self {
+        let (window_tx, window_rx) = async_channel::unbounded::<WindowCommand>();
+
+        runtime.spawn(ble_task(coordinator.clone()));
+        runtime.spawn(bluez_task(coordinator.clone()));
+        runtime.spawn(expiry_task(coordinator.clone()));
+        runtime.spawn(tray_task(
+            coordinator.clone(),
+            Arc::new(AppActions {
+                window: window_tx,
+                coordinator: coordinator.clone(),
+                runtime: runtime.clone(),
+            }),
+        ));
+
+        Self {
+            coordinator,
+            runtime,
+            window_rx,
+            window: RefCell::default(),
+        }
+    }
+
+    /// The window, built on first use. A new one is not shown: whether it is
+    /// shown is up to the caller.
+    fn window(&self, app: &adw::Application) -> adw::ApplicationWindow {
+        if let Some(win) = self.window.borrow().as_ref() {
+            return win.clone();
+        }
+
+        let win = ui::activate(app, self.coordinator.clone(), self.runtime.clone());
+        *self.window.borrow_mut() = Some(win.clone());
+
+        // Tray commands arrive here, on the main context, where touching the
+        // window is legal.
+        let window_rx = self.window_rx.clone();
+        let app = app.clone();
+        let shown = win.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(cmd) = window_rx.recv().await {
+                match cmd {
+                    WindowCommand::Present => shown.present(),
+                    WindowCommand::Quit => app.quit(),
+                }
+            }
+        });
+
+        win
+    }
+}
+
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -70,45 +163,14 @@ fn main() -> glib::ExitCode {
         }
     };
 
-    let coordinator = match runtime.block_on(Coordinator::new()) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("failed to create pod state coordinator: {e}");
-            return glib::ExitCode::FAILURE;
-        }
-    };
-
-    // Ours, not GTK's: the application rejects options it does not know, so the
-    // flag is taken out of the list before it ever sees it.
-    let mut minimized = false;
-    let args: Vec<String> = std::env::args()
-        .filter(|arg| {
-            let ours = arg == "--minimized";
-            minimized |= ours;
-            !ours
-        })
-        .collect();
-
-    let (window_tx, window_rx) = async_channel::unbounded::<WindowCommand>();
-
-    // Background workers.
-    runtime.spawn(ble_task(coordinator.clone()));
-    runtime.spawn(bluez_task(coordinator.clone()));
-    runtime.spawn(expiry_task(coordinator.clone()));
-    runtime.spawn(tray_task(
-        coordinator.clone(),
-        Arc::new(AppActions {
-            window: window_tx,
-            coordinator: coordinator.clone(),
-            runtime: runtime.handle().clone(),
-        }),
-    ));
-
-    // The window's artwork and the About dialog's icon load from the bundle.
-    ui::register_resources();
-
-    let app = adw::Application::builder().application_id(APP_ID).build();
-    let handle = runtime.handle().clone();
+    // Handling the command line, rather than leaving GApplication to turn it into
+    // an activation, is what carries a second launch's options to the running
+    // instance - see `shows_window`.
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+    add_options(&app);
 
     // Closing the window only hides it (see ui::activate), so quitting is an
     // action of its own, for the main menu and Ctrl+Q.
@@ -117,41 +179,59 @@ fn main() -> glib::ExitCode {
         .build()]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
 
-    // Activation runs again whenever the app is launched while already running -
-    // from the launcher entry, say - and the window from the first run is the one
-    // to raise. Building a second would leave two windows on one coordinator.
-    let window: Rc<RefCell<Option<adw::ApplicationWindow>>> = Rc::new(RefCell::new(None));
+    // GApplication finds out inside `run` whether this process is the primary
+    // instance, so nothing with an effect outside it may start before then.
+    let primary: Rc<OnceCell<Primary>> = Rc::default();
 
-    app.connect_activate(move |app| {
-        if let Some(win) = window.borrow().as_ref() {
-            win.present();
-            return;
-        }
+    let started = primary.clone();
+    let handle = runtime.handle().clone();
+    app.connect_startup(move |_| {
+        // The window's artwork and the About dialog's icon load from the bundle.
+        ui::register_resources();
 
-        let win = ui::activate(app, coordinator.clone(), handle.clone());
-        *window.borrow_mut() = Some(win.clone());
-
-        // --minimized hands the app to the tray: the window is built, which is
-        // what keeps GTK running, but stays hidden until something asks for it.
-        if !minimized {
-            win.present();
-        }
-
-        // Tray commands arrive here, on the main context, where touching the
-        // window is legal.
-        let window_rx = window_rx.clone();
-        let app = app.clone();
-        glib::spawn_future_local(async move {
-            while let Ok(cmd) = window_rx.recv().await {
-                match cmd {
-                    WindowCommand::Present => win.present(),
-                    WindowCommand::Quit => app.quit(),
-                }
+        let coordinator = match handle.block_on(Coordinator::new()) {
+            Ok(c) => c,
+            Err(e) => {
+                // Nothing is started; the command line finds that and fails the run.
+                tracing::error!("failed to create pod state coordinator: {e}");
+                return;
             }
-        });
+        };
+        // Startup runs once, so the cell is still empty.
+        let _ = started.set(Primary::start(coordinator, handle.clone()));
     });
 
-    let code = app.run_with_args(&args);
+    let launched = primary.clone();
+    app.connect_command_line(move |app, cmdline| {
+        // Empty only when startup failed, and said why.
+        let Some(primary) = launched.get() else {
+            return glib::ExitCode::FAILURE;
+        };
+
+        let shows = shows_window(&cmdline.options_dict());
+        if cmdline.is_remote() {
+            tracing::info!("launched again, minimized: {}", !shows);
+        }
+
+        if shows {
+            app.activate();
+        } else {
+            // --minimized hands the app to the tray: the window is built, which is
+            // what keeps GTK running, but stays hidden until something asks for it.
+            primary.window(app);
+        }
+        glib::ExitCode::SUCCESS
+    });
+
+    // Runs for every launch without --minimized, the first and any later one -
+    // from the launcher entry, say, while the app sits in the tray.
+    app.connect_activate(move |app| {
+        if let Some(primary) = primary.get() {
+            primary.window(app).present();
+        }
+    });
+
+    let code = app.run();
     // Keep the runtime alive until GTK returns.
     drop(runtime);
     code
@@ -365,5 +445,43 @@ async fn tray_task(coordinator: Arc<Coordinator>, actions: Arc<AppActions>) {
         // Cloned out: the borrow is a read lock every broadcast waits for.
         let snapshot = updates.borrow_and_update().clone();
         indicator::apply_snapshot(&handle, &snapshot).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// Puts `args` through GApplication's own option parsing and reports what
+    /// the primary instance's command line would do with the window.
+    fn shows_window_for(args: &[&str]) -> bool {
+        // NON_UNIQUE keeps the test off the session bus: the app is its own
+        // primary and handles its command line itself, as the running instance
+        // handles a forwarded one.
+        let app = gio::Application::new(
+            None,
+            gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::NON_UNIQUE,
+        );
+        add_options(&app);
+
+        let shows = Rc::new(Cell::new(None));
+        let seen = shows.clone();
+        app.connect_command_line(move |_, cmdline| {
+            seen.set(Some(shows_window(&cmdline.options_dict())));
+            glib::ExitCode::SUCCESS
+        });
+
+        assert_eq!(app.run_with_args(args), glib::ExitCode::SUCCESS);
+        shows.get().expect("the command line reached the handler")
+    }
+
+    /// The flag used to be filtered out of argv by hand. Registered with
+    /// GApplication instead, it has to come back out of the options dict under
+    /// the name `shows_window` looks up.
+    #[test]
+    fn minimized_keeps_the_window_hidden() {
+        assert!(shows_window_for(&["linuxpods"]));
+        assert!(!shows_window_for(&["linuxpods", "--minimized"]));
     }
 }
