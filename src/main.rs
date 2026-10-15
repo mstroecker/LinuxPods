@@ -237,7 +237,7 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
     match provider.connected_airpods().await {
         Ok(paths) => {
             for device_path in paths {
-                attach_device(&mut provider, &coordinator, &mut attached, &device_path).await;
+                attach_device(&provider, &coordinator, &mut attached, &device_path).await;
             }
         }
         Err(e) => tracing::warn!("failed to list connected devices: {e:#}"),
@@ -272,45 +272,67 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
                         continue;
                     }
                     tracing::info!("AirPods connected: {}", event.device_path);
-                    attach_device(&mut provider, &coordinator, &mut attached, &event.device_path)
+                    attach_device(&provider, &coordinator, &mut attached, &event.device_path)
                         .await;
                 } else if let Some(mac) = attached.remove(&event.device_path) {
                     // Only this device's link goes; any other pair keeps its own.
+                    // Its battery object goes in the sync below.
                     tracing::info!("AirPods disconnected: {}", event.device_path);
                     coordinator.disconnect_aap(&mac).await;
-                    if let Err(e) = provider.remove_battery(&mac).await {
-                        tracing::warn!("failed to remove battery object for {mac}: {e:#}");
-                    }
                 }
             }
 
-            // Mirror each attached pair's lowest earbud into GNOME Settings, from
-            // whichever source has it - AAP, or BLE when the link failed.
-            Ok(()) = updates.changed() => {
-                // Read out first: the borrow is a read lock every broadcast waits
-                // for, so it must not live across the awaits below.
-                let levels: Vec<(String, u8)> = {
-                    let snapshot = updates.borrow_and_update();
-                    attached
-                        .values()
-                        .filter_map(|mac| Some((mac.clone(), snapshot.states.get(mac)?.lowest_earbud()?)))
-                        .collect()
-                };
-                for (mac, level) in levels {
-                    if let Err(e) = provider.update_percentage(&mac, level).await {
-                        tracing::debug!("update BlueZ battery for {mac}: {e}");
-                    }
-                }
-            }
+            // A snapshot can bring a pair's reading, change it or take it away.
+            Ok(()) = updates.changed() => {}
 
             else => break,
+        }
+
+        // After a connection event as well: it changes which pairs are attached,
+        // and a pair whose AAP link failed may have a BLE reading already.
+        sync_batteries(&mut provider, &attached, &mut updates).await;
+    }
+}
+
+/// Mirrors each attached pair's lowest earbud into GNOME Settings, from whichever
+/// source has it - AAP, or BLE when the link failed. A pair without a reading has
+/// no battery object at all; see `bluez::battery_actions`.
+async fn sync_batteries(
+    provider: &mut bluez::BatteryProvider,
+    attached: &HashMap<String, String>,
+    updates: &mut tokio::sync::watch::Receiver<podstate::Snapshot>,
+) {
+    // Read out first: the borrow is a read lock every broadcast waits for, so it
+    // must not live across the awaits below.
+    let levels: HashMap<String, u8> = {
+        let snapshot = updates.borrow_and_update();
+        attached
+            .values()
+            .filter_map(|mac| Some((mac.clone(), snapshot.states.get(mac)?.lowest_earbud()?)))
+            .collect()
+    };
+
+    for action in bluez::battery_actions(attached, &levels, provider.exported()) {
+        if let Err(e) = provider.apply(&action).await {
+            tracing::warn!("failed to apply {action:?} to the BlueZ battery: {e:#}");
+            continue;
+        }
+        match action {
+            bluez::BatteryAction::Add {
+                mac, percentage, ..
+            } => tracing::info!("BlueZ battery for {mac} exported at {percentage}%"),
+            bluez::BatteryAction::Remove { mac } => {
+                tracing::info!("BlueZ battery for {mac} withdrawn")
+            }
+            bluez::BatteryAction::Update { .. } => {}
         }
     }
 }
 
-/// Registers a battery object and opens an AAP connection for one device.
+/// Opens an AAP connection for one device. Its battery object waits for a
+/// reading - see `sync_batteries`.
 async fn attach_device(
-    provider: &mut bluez::BatteryProvider,
+    provider: &bluez::BatteryProvider,
     coordinator: &Arc<Coordinator>,
     attached: &mut HashMap<String, String>,
     device_path: &str,
@@ -320,13 +342,6 @@ async fn attach_device(
         return;
     };
     attached.insert(device_path.to_string(), mac.clone());
-
-    if !provider.has_battery(&mac) {
-        match provider.add_battery(&mac, device_path).await {
-            Ok(()) => tracing::info!("Battery provider registered for {device_path}"),
-            Err(e) => tracing::warn!("failed to add battery object: {e:#}"),
-        }
-    }
 
     // Starts the link's read loop as well.
     if let Err(e) = coordinator.connect_aap(&mac).await {
