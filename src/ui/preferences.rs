@@ -73,12 +73,13 @@ pub(super) struct DeviceRows {
 }
 
 impl DeviceRows {
-    /// Adds a row for every device in the snapshot, redraws them all, and drops
-    /// the rows of devices that are gone.
+    /// Adds a row for every device the snapshot lists, redraws them all, and
+    /// drops the rows of devices that are gone.
     pub(super) fn update(&self, snapshot: &Snapshot) {
+        let listed = row_order(snapshot);
         let mut rows = self.rows.borrow_mut();
-        for (mac, known) in row_order(snapshot) {
-            let row = rows.entry(mac.clone()).or_insert_with(|| {
+        for &(mac, known) in &listed {
+            let row = rows.entry(mac.to_string()).or_insert_with(|| {
                 let row = DeviceRow::new(mac, &self.coordinator, &self.runtime);
                 self.group.add(&row.row);
                 row
@@ -91,9 +92,9 @@ impl DeviceRows {
             );
         }
 
-        // Drop a row once its key is gone and it has stopped advertising.
+        // Drop a row once the device is no longer listed: no key, and no link.
         rows.retain(|mac, row| {
-            let keep = snapshot.known_keys.contains(mac) || snapshot.states.contains_key(mac);
+            let keep = listed.iter().any(|(m, _)| m == mac);
             if !keep {
                 self.group.remove(&row.row);
             }
@@ -102,20 +103,14 @@ impl DeviceRows {
     }
 }
 
-/// The devices to list, each with whether a key is stored for it. Known devices
-/// first, in stable key order, then any other device we hold state for - one on
-/// AAP whose key has not arrived yet. Undecryptable advertisements are never
-/// stored, so strangers do not appear.
-fn row_order(snapshot: &Snapshot) -> Vec<(&String, bool)> {
-    let mut entries: Vec<(&String, bool)> = snapshot.known_keys.iter().map(|m| (m, true)).collect();
-    let mut unknown: Vec<&String> = snapshot
-        .states
-        .keys()
-        .filter(|m| !snapshot.known_keys.contains(m))
-        .collect();
-    unknown.sort();
-    entries.extend(unknown.into_iter().map(|m| (m, false)));
-    entries
+/// The devices to list - the snapshot's, in its order - each with whether a key
+/// is stored for it. A pair on AAP whose key has not arrived is among them.
+fn row_order(snapshot: &Snapshot) -> Vec<(&str, bool)> {
+    snapshot
+        .devices()
+        .into_iter()
+        .map(|mac| (mac, snapshot.known_keys.iter().any(|k| k == mac)))
+        .collect()
 }
 
 /// One device in the Development group.
@@ -238,9 +233,9 @@ fn row_title(mac: &str, state: Option<&PodState>) -> String {
 fn row_status(known: bool, connected: bool, state: Option<&PodState>) -> (String, &'static str) {
     match (known, connected, state) {
         (_, true, _) => ("Connected".to_string(), "success"),
-        // State without a stored key. Only a device on AAP has that - its key
-        // is requested on connecting - and `Connected` above takes it first,
-        // so this is a fallback.
+        // Listed without a stored key. Only a device on AAP is - its key is
+        // requested on connecting - and `Connected` above takes it first, so
+        // this is a fallback.
         (false, _, _) => ("No key".to_string(), "warning"),
         // A cached reading is not an advertisement in progress.
         (true, _, Some(s)) => match s.last_seen.map(|t| t.elapsed()) {
@@ -270,23 +265,20 @@ mod tests {
         }
     }
 
-    /// Known devices keep their key order, even without a reading, and come
-    /// before the rest; a device with both a key and a reading is listed once.
+    /// A row per device the snapshot lists, in MAC order: one with a key but no
+    /// reading, one on AAP without a key, and one with both, listed once.
     #[test]
-    fn rows_list_known_devices_first() {
+    fn rows_follow_the_device_list() {
         let snapshot = Snapshot {
-            known_keys: vec![B.into(), C.into()],
-            states: [D, A, C]
+            known_keys: vec![B.into(), D.into()],
+            connected_macs: vec![C.into(), B.into()],
+            states: [B, C]
                 .into_iter()
                 .map(|m| (m.to_string(), PodState::default()))
                 .collect(),
             ..Default::default()
         };
-        let order: Vec<(&str, bool)> = row_order(&snapshot)
-            .into_iter()
-            .map(|(m, known)| (m.as_str(), known))
-            .collect();
-        assert_eq!(order, [(B, true), (C, true), (A, false), (D, false)]);
+        assert_eq!(row_order(&snapshot), [(B, true), (C, false), (D, true)]);
     }
 
     #[test]

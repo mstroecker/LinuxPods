@@ -86,7 +86,7 @@ pub(super) const BATTERY_IMAGES: [&str; 3] = [
 /// Everything on the Control page the update loop needs to touch.
 pub struct ControlView {
     /// The window's content: the Control page as `device`, or the empty state
-    /// as `empty` while no device has a stored key.
+    /// as `empty` while `Snapshot::devices` is empty.
     pub content: gtk::Stack,
     pub battery: BatteryWidgets,
     /// The device switcher, in the header bar in place of the title; hidden
@@ -278,10 +278,10 @@ pub(super) fn create_control_view() -> ControlView {
     }
 }
 
-/// Shown instead of the Control page until a device has a stored key. The page
-/// and the switcher follow the keystore, and a key arrives only over AAP - it is
-/// requested on every connection - so until a pair has connected once there is
-/// nothing to show. Connecting is the whole setup, so there is no button.
+/// Shown instead of the Control page while there is no device at all: no stored
+/// key, and no pair on AAP. A key arrives only over AAP - it is requested on
+/// every connection - so until a pair has connected once there is nothing to
+/// show. Connecting is the whole setup, so there is no button.
 fn create_empty_state() -> adw::StatusPage {
     adw::StatusPage::builder()
         .icon_name(APP_SYMBOLIC_ICON)
@@ -310,7 +310,7 @@ pub(super) fn noise_mode_from_target(target: &str) -> Option<NoiseMode> {
 }
 
 /// Repopulates the switcher, preserving the current selection where possible.
-pub(super) fn sync_device_list(view: &ControlView, macs: &[String], snapshot: &Snapshot) {
+pub(super) fn sync_device_list(view: &ControlView, macs: &[&str], snapshot: &Snapshot) {
     let labels = device_labels(macs, snapshot);
     if *view.device_macs.borrow() == macs && *view.device_labels.borrow() == labels {
         return; // nothing changed; leave the selection alone
@@ -320,7 +320,7 @@ pub(super) fn sync_device_list(view: &ControlView, macs: &[String], snapshot: &S
 
     let old_len = view.device_list.n_items();
     view.device_list.splice(0, old_len, &refs);
-    *view.device_macs.borrow_mut() = macs.to_vec();
+    *view.device_macs.borrow_mut() = macs.iter().map(|m| m.to_string()).collect();
     *view.device_labels.borrow_mut() = labels;
 
     // More than one device is the only case worth showing a switcher for.
@@ -334,14 +334,14 @@ pub(super) fn sync_device_list(view: &ControlView, macs: &[String], snapshot: &S
 /// The MAC is appended whenever a label would otherwise be ambiguous - two pairs of
 /// the same model, or two devices the user gave the same name - since the entries
 /// would otherwise be impossible to tell apart.
-fn device_labels(macs: &[String], snapshot: &Snapshot) -> Vec<String> {
+fn device_labels(macs: &[&str], snapshot: &Snapshot) -> Vec<String> {
     let names: Vec<Option<String>> = macs
         .iter()
         .map(|mac| {
             snapshot.device_name(mac).map(str::to_string).or_else(|| {
                 snapshot
                     .states
-                    .get(mac)
+                    .get(*mac)
                     .map(|s| s.model_name.clone())
                     .filter(|n| !n.is_empty())
             })
@@ -355,22 +355,17 @@ fn device_labels(macs: &[String], snapshot: &Snapshot) -> Vec<String> {
                 name.clone()
             }
             Some(name) => format!("{name} ({mac})"),
-            None => mac.clone(),
+            None => mac.to_string(),
         })
         .collect()
 }
 
-/// The device to show after an update, out of `macs`: the one already shown
-/// while it is still there, else the first AAP-connected one, else the first.
-pub(super) fn choose_device(
-    current: Option<String>,
-    macs: &[String],
-    connected: &[String],
-) -> Option<String> {
+/// The device to show after an update: the one already shown while it is still
+/// listed, else the snapshot's default - the device the tray shows.
+pub(super) fn choose_device(current: Option<String>, snapshot: &Snapshot) -> Option<String> {
     current
-        .filter(|m| macs.contains(m))
-        .or_else(|| connected.iter().find(|m| macs.contains(m)).cloned())
-        .or_else(|| macs.first().cloned())
+        .filter(|m| snapshot.devices().contains(&m.as_str()))
+        .or_else(|| snapshot.default_device().map(str::to_string))
 }
 
 /// Draws one device, and gates noise control on how the data arrived.
@@ -387,7 +382,7 @@ pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option
             view.noise_action.set_enabled(interactive);
             show_noise_mode(view, state.noise_mode);
         }
-        // Known device, nothing heard from it yet: show it as empty rather than
+        // Listed device, nothing heard from it yet: show it as empty rather than
         // hiding it, so the switcher and the display agree. Distinguish a device
         // that is connected but has not reported yet from one simply out of range -
         // otherwise a live AAP link looks identical to a missing device.
@@ -564,7 +559,7 @@ mod tests {
 
     #[test]
     fn labels_prefer_the_bluetooth_name() {
-        let macs = vec!["AA:BB:CC:DD:EE:FF".to_string()];
+        let macs = ["AA:BB:CC:DD:EE:FF"];
         let snap = snapshot(
             &[("AA:BB:CC:DD:EE:FF", "Marcel's AirPods Pro")],
             &[("AA:BB:CC:DD:EE:FF", "AirPods Pro 2")],
@@ -574,10 +569,7 @@ mod tests {
 
     #[test]
     fn labels_fall_back_to_the_model_then_the_mac() {
-        let macs = vec![
-            "AA:BB:CC:DD:EE:FF".to_string(),
-            "11:22:33:44:55:66".to_string(),
-        ];
+        let macs = ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"];
         let snap = snapshot(&[], &[("AA:BB:CC:DD:EE:FF", "AirPods Pro 2")]);
         assert_eq!(
             device_labels(&macs, &snap),
@@ -589,10 +581,10 @@ mod tests {
     /// only the ambiguous ones carry their MAC.
     #[test]
     fn duplicate_names_keep_the_mac() {
-        let macs = vec![
-            "AA:BB:CC:DD:EE:FF".to_string(),
-            "11:22:33:44:55:66".to_string(),
-            "77:88:99:AA:BB:CC".to_string(),
+        let macs = [
+            "AA:BB:CC:DD:EE:FF",
+            "11:22:33:44:55:66",
+            "77:88:99:AA:BB:CC",
         ];
         let snap = snapshot(
             &[
@@ -612,50 +604,45 @@ mod tests {
         );
     }
 
-    fn macs(list: &[&str]) -> Vec<String> {
-        list.iter().map(|m| (*m).to_string()).collect()
+    const A: &str = "AA:AA:AA:AA:AA:AA";
+    const B: &str = "BB:BB:BB:BB:BB:BB";
+    const C: &str = "CC:CC:CC:CC:CC:CC";
+
+    /// A snapshot holding keys for `known` and links to `connected`, in that
+    /// order, and no readings.
+    fn listing(known: &[&str], connected: &[&str]) -> Snapshot {
+        let macs = |list: &[&str]| list.iter().map(|m| m.to_string()).collect();
+        Snapshot {
+            known_keys: macs(known),
+            connected_macs: macs(connected),
+            ..Default::default()
+        }
     }
 
-    /// The user's pick holds through every update while the device is known,
+    /// The user's pick holds through every update while the device is listed,
     /// even with another pair connected.
     #[test]
     fn choice_keeps_the_device_shown() {
-        let known = macs(&["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB"]);
-        let connected = macs(&["AA:AA:AA:AA:AA:AA"]);
-        assert_eq!(
-            choose_device(Some("BB:BB:BB:BB:BB:BB".into()), &known, &connected).as_deref(),
-            Some("BB:BB:BB:BB:BB:BB")
-        );
+        let snap = listing(&[A, B], &[A]);
+        assert_eq!(choose_device(Some(B.into()), &snap).as_deref(), Some(B));
     }
 
+    /// With nothing picked, or the pick gone, the default device: the one the
+    /// tray shows.
     #[test]
-    fn choice_prefers_a_connected_device() {
-        let known = macs(&["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB"]);
-        let connected = macs(&["BB:BB:BB:BB:BB:BB"]);
-        assert_eq!(
-            choose_device(None, &known, &connected).as_deref(),
-            Some("BB:BB:BB:BB:BB:BB")
-        );
-        // A device whose key is gone is not kept.
-        assert_eq!(
-            choose_device(Some("CC:CC:CC:CC:CC:CC".into()), &known, &connected).as_deref(),
-            Some("BB:BB:BB:BB:BB:BB")
-        );
+    fn choice_falls_back_to_the_default_device() {
+        let snap = listing(&[A, B], &[B]);
+        assert_eq!(choose_device(None, &snap).as_deref(), Some(B));
+        assert_eq!(choose_device(Some(C.into()), &snap).as_deref(), Some(B));
+        assert_eq!(choose_device(Some(A.into()), &Snapshot::default()), None);
     }
 
-    /// A connected device without a key is not in the switcher, so it cannot be
-    /// chosen; the first known device is.
+    /// A pair on AAP whose key has not arrived is listed, so it can be shown -
+    /// rather than the window saying "Connect Your AirPods" to a connected pair.
     #[test]
-    fn choice_falls_back_to_the_first_known() {
-        let known = macs(&["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB"]);
-        let connected = macs(&["CC:CC:CC:CC:CC:CC"]);
-        assert_eq!(
-            choose_device(None, &known, &connected).as_deref(),
-            Some("AA:AA:AA:AA:AA:AA")
-        );
-        assert_eq!(
-            choose_device(Some("AA:AA:AA:AA:AA:AA".into()), &[], &connected),
-            None
-        );
+    fn choice_takes_a_connected_device_without_a_key() {
+        assert_eq!(choose_device(None, &listing(&[], &[C])).as_deref(), Some(C));
+        let snap = listing(&[A], &[B, C]);
+        assert_eq!(choose_device(Some(C.into()), &snap).as_deref(), Some(C));
     }
 }

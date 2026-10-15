@@ -214,10 +214,20 @@ impl Tray for Indicator {
 /// before and after, so a snapshot that changes nothing the tray shows sends
 /// nothing to the host.
 pub async fn apply_snapshot(handle: &Handle<Indicator>, snapshot: &Snapshot) {
-    let state = snapshot.primary().cloned();
+    let state = tray_state(snapshot).cloned();
     handle
         .update(move |tray: &mut Indicator| tray.show(state.as_ref()))
         .await;
+}
+
+/// The reading the tray shows: the default device's, the one the window shows
+/// until the user picks another. None while that device has no reading - a link
+/// that has not reported yet - rather than another pair's, which would leave the
+/// tray and the window on different devices.
+fn tray_state(snapshot: &Snapshot) -> Option<&PodState> {
+    snapshot
+        .default_device()
+        .and_then(|mac| snapshot.states.get(mac))
 }
 
 #[cfg(test)]
@@ -305,7 +315,7 @@ mod tests {
     #[test]
     fn a_reading_fills_the_tray() {
         let mut tray = Indicator::new(Arc::new(NoActions));
-        tray.show(reading().primary());
+        tray.show(tray_state(&reading()));
 
         assert_eq!(tray.mac.as_deref(), Some(MAC));
         assert_eq!(
@@ -325,9 +335,37 @@ mod tests {
     #[test]
     fn an_empty_snapshot_resets_the_tray() {
         let mut tray = Indicator::new(Arc::new(NoActions));
-        tray.show(reading().primary());
-        tray.show(Snapshot::default().primary());
+        tray.show(tray_state(&reading()));
+        tray.show(tray_state(&Snapshot::default()));
+        assert_is_reset(&tray);
+    }
 
+    /// The default device - the pair on AAP - has not reported yet, while another
+    /// pair has a reading. The tray waits for the default device rather than
+    /// showing the other pair, which the window, on the default device too, is
+    /// not showing.
+    #[test]
+    fn a_default_device_without_a_reading_resets_the_tray() {
+        const OTHER: &str = "11:22:33:44:55:66";
+        let other = PodState {
+            source: DataSource::Ble,
+            left_battery: Some(50),
+            right_battery: Some(50),
+            real_mac: OTHER.into(),
+            ..Default::default()
+        };
+        let mut snapshot = reading();
+        snapshot.states = [(OTHER.to_string(), other)].into();
+        snapshot.known_keys = vec![OTHER.into()];
+
+        let mut tray = Indicator::new(Arc::new(NoActions));
+        tray.show(tray_state(&reading()));
+        tray.show(tray_state(&snapshot));
+        assert_is_reset(&tray);
+    }
+
+    /// The tray as it starts: no levels, no device, no noise control entry live.
+    fn assert_is_reset(tray: &Indicator) {
         assert_eq!(tray.mac, None);
         assert_eq!((tray.left, tray.right, tray.case), (None, None, None));
         assert!(!tray.left_charging && !tray.right_charging && !tray.case_charging);
