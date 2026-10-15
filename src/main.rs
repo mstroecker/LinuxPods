@@ -221,9 +221,10 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
     tracing::info!("watching for AirPods connections");
 
     // Names for the device switcher. Read once up front so paired devices are
-    // labelled before any of them connects, then again on every connection event -
-    // that is when a newly paired device first shows up, and when a rename made
-    // while the app was running takes effect.
+    // labelled before any of them connects, then again on every event - a rename
+    // made while the app was running takes effect at the next one, and a newly
+    // paired pair shows up with its services, which BlueZ fills in once pairing
+    // is done.
     coordinator
         .set_device_names(provider.device_aliases().await)
         .await;
@@ -249,16 +250,25 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
             Some(event) = events.next() => {
                 let alias = provider.device_alias(&event.device_path).await;
                 tracing::debug!(
-                    "connection event: {} connected={} alias={alias:?}",
+                    "connection event: {} connected={:?} alias={alias:?}",
                     event.device_path,
                     event.connected
                 );
 
                 coordinator.set_device_names(provider.device_aliases().await).await;
 
-                if event.connected {
+                let connected = match event.connected {
+                    Some(connected) => connected,
+                    // Only the services changed. That matters to a pair which
+                    // connected before they marked it as AirPods, not to one
+                    // already attached.
+                    None if attached.contains_key(&event.device_path) => continue,
+                    None => provider.device_connected(&event.device_path).await,
+                };
+
+                if connected {
                     // Only react to AirPods, not every Bluetooth device on the system.
-                    if !alias.contains("AirPods") {
+                    if !provider.device_is_airpods(&event.device_path).await {
                         continue;
                     }
                     tracing::info!("AirPods connected: {}", event.device_path);

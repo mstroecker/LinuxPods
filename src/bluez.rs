@@ -18,6 +18,11 @@ const PROVIDER_PATH: &str = "/com/github/mstroecker/linuxpods/battery";
 const BATTERY_NAME: &str = "airpods_battery";
 const SOURCE: &str = "LinuxPods";
 
+/// The service UUID every AirPods lists in `Device1.UUIDs` - the identifier
+/// LibrePods uses too. Unlike the alias it survives a rename, and unlike Apple's
+/// vendor ID in `Modalias` it does not also match Apple keyboards and mice.
+const AIRPODS_UUID: &str = "74ec2172-0bad-4d01-8f77-997b2be0722a";
+
 #[proxy(
     interface = "org.bluez.BatteryProviderManager1",
     default_service = "org.bluez",
@@ -36,6 +41,8 @@ trait Device1 {
     fn address(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn connected(&self) -> zbus::Result<bool>;
+    #[zbus(property, name = "UUIDs")]
+    fn uuids(&self) -> zbus::Result<Vec<String>>;
 }
 
 /// One battery exposed to BlueZ. Properties are read-only; zbus emits
@@ -171,7 +178,7 @@ impl BatteryProvider {
         &self.conn
     }
 
-    /// Every connected device whose alias contains "AirPods".
+    /// Every connected AirPods - see [`is_airpods`].
     pub async fn connected_airpods(&self) -> Result<Vec<String>> {
         let om = zbus::fdo::ObjectManagerProxy::builder(&self.conn)
             .destination(BLUEZ_SERVICE)?
@@ -245,13 +252,39 @@ impl BatteryProvider {
 
     /// Empty string when the device is gone or has no alias.
     pub async fn device_alias(&self, device_path: &str) -> String {
-        let Ok(builder) = Device1Proxy::builder(&self.conn).path(device_path.to_string()) else {
-            return String::new();
-        };
-        match builder.build().await {
-            Ok(proxy) => proxy.alias().await.unwrap_or_default(),
-            Err(_) => String::new(),
+        match self.device_proxy(device_path).await {
+            Some(proxy) => proxy.alias().await.unwrap_or_default(),
+            None => String::new(),
         }
+    }
+
+    /// Whether the device lists the AirPods service - see [`is_airpods`]. False
+    /// when the device is gone.
+    pub async fn device_is_airpods(&self, device_path: &str) -> bool {
+        match self.device_proxy(device_path).await {
+            Some(proxy) => proxy
+                .uuids()
+                .await
+                .is_ok_and(|uuids| has_airpods_uuid(&uuids)),
+            None => false,
+        }
+    }
+
+    /// False when the device is gone.
+    pub async fn device_connected(&self, device_path: &str) -> bool {
+        match self.device_proxy(device_path).await {
+            Some(proxy) => proxy.connected().await.unwrap_or(false),
+            None => false,
+        }
+    }
+
+    async fn device_proxy(&self, device_path: &str) -> Option<Device1Proxy<'static>> {
+        Device1Proxy::builder(&self.conn)
+            .path(device_path.to_string())
+            .ok()?
+            .build()
+            .await
+            .ok()
     }
 
     /// Unregisters the provider. Called on shutdown.
@@ -267,15 +300,19 @@ impl BatteryProvider {
     }
 }
 
-/// A device connecting or disconnecting.
+/// A device connecting or disconnecting, or its services marking it as AirPods.
 #[derive(Debug, Clone)]
 pub struct ConnectionEvent {
     pub device_path: String,
-    pub connected: bool,
+    /// `None` when the services changed, not the connection: a first pairing
+    /// connects before service discovery fills in the UUID that marks AirPods, so
+    /// the device is not recognisable yet when `Connected` changes.
+    pub connected: Option<bool>,
 }
 
 impl BatteryProvider {
-    /// Stream of Connected changes on org.bluez.Device1.
+    /// Stream of Connected changes on org.bluez.Device1, and of UUIDs changes
+    /// that mark a device as AirPods.
     ///
     /// Port of the Go WatchForAirPods signal loop. Without this the provider only
     /// ever saw devices that were already connected at startup, so plugging the
@@ -306,7 +343,15 @@ impl BatteryProvider {
                 return None;
             }
 
-            let connected = bool::try_from(changed.get("Connected")?.clone()).ok()?;
+            let connected = match changed.get("Connected") {
+                Some(connected) => Some(bool::try_from(connected.clone()).ok()?),
+                // The signal carries the whole new list, so the test is the same
+                // as on a full property map. Any other UUIDs change - advertisers
+                // in range update theirs while we scan - is dropped here, before
+                // it costs a round trip to BlueZ.
+                None if is_airpods(&changed) => None,
+                None => return None,
+            };
             Some(ConnectionEvent {
                 device_path,
                 connected,
@@ -319,13 +364,24 @@ impl BatteryProvider {
     }
 }
 
-/// An alias containing "AirPods" is how the Go version identified the device.
+/// Whether a Device1 property map lists the AirPods service, [`AIRPODS_UUID`].
+///
+/// The Go version went by an alias containing "AirPods", but the alias is the
+/// user's to change: a renamed pair silently stayed on BLE, and any device with
+/// "AirPods" in its name got an L2CAP connect. The alias is for display only.
 pub fn is_airpods(props: &HashMap<String, OwnedValue>) -> bool {
     props
-        .get("Alias")
-        .and_then(|v| String::try_from(v.clone()).ok())
-        .map(|alias| alias.contains("AirPods"))
-        .unwrap_or(false)
+        .get("UUIDs")
+        .and_then(|v| Vec::<String>::try_from(v.clone()).ok())
+        .is_some_and(|uuids| has_airpods_uuid(&uuids))
+}
+
+/// Case-insensitive: BlueZ reports UUIDs in lowercase, but the spelling is not
+/// part of the UUID.
+fn has_airpods_uuid(uuids: &[String]) -> bool {
+    uuids
+        .iter()
+        .any(|uuid| uuid.eq_ignore_ascii_case(AIRPODS_UUID))
 }
 
 /// A boolean Device1 property; absent or mistyped reads as false.
@@ -379,9 +435,14 @@ mod tests {
             .collect()
     }
 
-    fn props(alias: Option<&str>) -> HashMap<String, OwnedValue> {
-        device(alias.map(|a| ("Alias", Value::from(a.to_string()))))
+    /// A `UUIDs` property listing `uuids`.
+    fn uuids(uuids: &[&str]) -> (&'static str, Value<'static>) {
+        let uuids: Vec<String> = uuids.iter().map(|u| u.to_string()).collect();
+        ("UUIDs", Value::from(uuids))
     }
+
+    const AUDIO_SINK: &str = "0000110b-0000-1000-8000-00805f9b34fb";
+    const HANDS_FREE: &str = "0000111e-0000-1000-8000-00805f9b34fb";
 
     /// Both properties are needed, and the address is normalized because the
     /// keystore keys its entries on the uppercase form.
@@ -445,10 +506,43 @@ mod tests {
     }
 
     #[test]
-    fn identifies_airpods_by_alias() {
-        assert!(is_airpods(&props(Some("Marcel's AirPods Pro"))));
-        assert!(is_airpods(&props(Some("AirPods"))));
-        assert!(!is_airpods(&props(Some("Sony WH-1000XM5"))));
-        assert!(!is_airpods(&props(None)));
+    fn identifies_airpods_by_service_uuid() {
+        assert!(is_airpods(&device([uuids(&[
+            AUDIO_SINK,
+            HANDS_FREE,
+            AIRPODS_UUID
+        ])])));
+        // Ordinary headphones list the audio profiles alone.
+        assert!(!is_airpods(&device([uuids(&[AUDIO_SINK, HANDS_FREE])])));
+        assert!(!is_airpods(&device([uuids(&[])])));
+    }
+
+    #[test]
+    fn service_uuid_ignores_case() {
+        assert!(is_airpods(&device([uuids(&[
+            "74EC2172-0BAD-4D01-8F77-997B2BE0722A"
+        ])])));
+    }
+
+    /// No UUIDs - a device service discovery has not reached yet - is not
+    /// AirPods, and neither is one merely named so: the alias plays no part.
+    #[test]
+    fn no_service_uuid_is_not_airpods() {
+        assert!(!is_airpods(&device([])));
+        assert!(!is_airpods(&device([(
+            "Alias",
+            Value::from("Marcel's AirPods Pro")
+        )])));
+        // Mistyped: a bare string where BlueZ sends a list.
+        assert!(!is_airpods(&device([("UUIDs", Value::from(AIRPODS_UUID))])));
+    }
+
+    /// A rename leaves the UUIDs alone, so the pair is still recognised.
+    #[test]
+    fn renamed_airpods_are_still_airpods() {
+        assert!(is_airpods(&device([
+            ("Alias", Value::from("Kitchen buds")),
+            uuids(&[AUDIO_SINK, AIRPODS_UUID]),
+        ])));
     }
 }
