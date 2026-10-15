@@ -9,7 +9,7 @@ use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{Handle, MenuItem, Tray, TrayMethods};
 
 use crate::aap::NoiseMode;
-use crate::podstate::{DataSource, Snapshot};
+use crate::podstate::{DataSource, PodState, Snapshot};
 
 /// Icons ship with the crate rather than only with `make install`, which a
 /// `cargo run` never performs. Handing the host this directory is what keeps the
@@ -71,6 +71,26 @@ impl Indicator {
             .spawn()
             .await
             .map_err(|e| anyhow::anyhow!("failed to start tray: {e}"))
+    }
+
+    /// Shows `state`, or with none the state the tray starts in. Without the
+    /// reset, a device that has left - its cached reading expired, its AAP link
+    /// dropped - would stay on show indefinitely, its noise control entries
+    /// still enabled and aimed at it.
+    fn show(&mut self, state: Option<&PodState>) {
+        let Some(state) = state else {
+            *self = Self::new(Arc::clone(&self.actions));
+            return;
+        };
+        self.mac = (!state.real_mac.is_empty()).then(|| state.real_mac.clone());
+        self.left = state.left_battery;
+        self.right = state.right_battery;
+        self.case = state.case_battery;
+        self.left_charging = state.left_charging;
+        self.right_charging = state.right_charging;
+        self.case_charging = state.case_charging;
+        self.noise_mode = state.noise_mode;
+        self.on_aap = state.source == DataSource::Aap;
     }
 }
 
@@ -190,23 +210,13 @@ impl Tray for Indicator {
     }
 }
 
-/// Pushes a new snapshot into the tray.
+/// Pushes a new snapshot into the tray. ksni compares the properties and menu
+/// before and after, so a snapshot that changes nothing the tray shows sends
+/// nothing to the host.
 pub async fn apply_snapshot(handle: &Handle<Indicator>, snapshot: &Snapshot) {
-    let Some(state) = snapshot.primary().cloned() else {
-        return;
-    };
+    let state = snapshot.primary().cloned();
     handle
-        .update(move |tray: &mut Indicator| {
-            tray.mac = (!state.real_mac.is_empty()).then(|| state.real_mac.clone());
-            tray.left = state.left_battery;
-            tray.right = state.right_battery;
-            tray.case = state.case_battery;
-            tray.left_charging = state.left_charging;
-            tray.right_charging = state.right_charging;
-            tray.case_charging = state.case_charging;
-            tray.noise_mode = state.noise_mode;
-            tray.on_aap = state.source == DataSource::Aap;
-        })
+        .update(move |tray: &mut Indicator| tray.show(state.as_ref()))
         .await;
 }
 
@@ -258,5 +268,80 @@ mod tests {
         assert_eq!(battery_label("Left", Some(80), false), "  Left : 80%");
         assert_eq!(battery_label("Right", Some(75), true), "  Right: 75% ⚡");
         assert_eq!(battery_label("Case", None, false), "  Case : --");
+    }
+
+    /// The tray without a host: nothing here activates a menu entry.
+    struct NoActions;
+
+    impl TrayActions for NoActions {
+        fn show_window(&self) {}
+        fn quit(&self) {}
+        fn set_noise_mode(&self, _: String, _: NoiseMode) {}
+    }
+
+    const MAC: &str = "AA:BB:CC:DD:EE:FF";
+
+    /// One pair on AAP, charging, in Transparency.
+    fn reading() -> Snapshot {
+        let state = PodState {
+            source: DataSource::Aap,
+            left_battery: Some(73),
+            right_battery: Some(80),
+            case_battery: Some(41),
+            left_charging: true,
+            right_charging: true,
+            case_charging: true,
+            noise_mode: Some(NoiseMode::Transparency),
+            real_mac: MAC.into(),
+            ..Default::default()
+        };
+        Snapshot {
+            states: [(MAC.to_string(), state)].into(),
+            connected_macs: vec![MAC.into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_reading_fills_the_tray() {
+        let mut tray = Indicator::new(Arc::new(NoActions));
+        tray.show(reading().primary());
+
+        assert_eq!(tray.mac.as_deref(), Some(MAC));
+        assert_eq!(
+            (tray.left, tray.right, tray.case),
+            (Some(73), Some(80), Some(41))
+        );
+        assert!(tray.left_charging && tray.right_charging && tray.case_charging);
+        assert_eq!(tray.noise_mode, Some(NoiseMode::Transparency));
+        assert!(tray.on_aap);
+        assert_eq!(tray.tool_tip().description, "AirPods - 73%");
+    }
+
+    /// Once the last device is gone - its cached reading expired, or its AAP link
+    /// dropped with no advertisement cached - the tray is back where it started,
+    /// rather than showing the last reading and offering noise control for a
+    /// device that is not there.
+    #[test]
+    fn an_empty_snapshot_resets_the_tray() {
+        let mut tray = Indicator::new(Arc::new(NoActions));
+        tray.show(reading().primary());
+        tray.show(Snapshot::default().primary());
+
+        assert_eq!(tray.mac, None);
+        assert_eq!((tray.left, tray.right, tray.case), (None, None, None));
+        assert!(!tray.left_charging && !tray.right_charging && !tray.case_charging);
+        assert_eq!(tray.noise_mode, None);
+        assert!(!tray.on_aap);
+        assert_eq!(tray.tool_tip().description, "Searching for AirPods…");
+        for item in tray.menu() {
+            if let MenuItem::Checkmark(entry) = item {
+                assert!(
+                    !entry.enabled && !entry.checked,
+                    "{} is still live",
+                    entry.label
+                );
+            }
+        }
     }
 }
