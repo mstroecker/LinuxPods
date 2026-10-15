@@ -118,8 +118,17 @@ impl PodState {
 }
 
 /// What consumers receive on every update.
+///
+/// Which devices exist, and which one to show when nothing else decides, are
+/// answered here - by [`Snapshot::devices`] and [`Snapshot::default_device`] -
+/// rather than by each consumer: answered three ways, the window said "Connect
+/// Your AirPods" while the tray showed the battery of a pair whose key had not
+/// arrived, and the two could show different pairs.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
+    /// The current reading per device, by real MAC. Every key is in
+    /// [`Snapshot::devices`], but not every device has a reading: a remembered
+    /// pair may be out of range, a new link may not have reported yet.
     pub states: HashMap<String, PodState>,
     /// Every device with a live AAP link, in the order they connected.
     pub connected_macs: Vec<String>,
@@ -144,20 +153,43 @@ impl Snapshot {
         self.connected_macs.iter().any(|m| m == mac)
     }
 
-    /// The device that has been on AAP longest, else the lowest MAC with a reading.
-    /// The longest link rather than the newest, so a second pair connecting does
-    /// not take over the tray; the lowest MAC rather than whichever the `HashMap`
-    /// yields first, since that order changes from one snapshot to the next.
-    pub fn primary(&self) -> Option<&PodState> {
-        self.connected_macs
+    /// Every device there is to show, sorted by MAC: each one we hold a key for,
+    /// and each one on AAP - whose key may not have arrived, or may never.
+    ///
+    /// Neither set takes in strangers: an advertisement no stored key decrypts is
+    /// never stored, and an AAP link is only opened to attached AirPods. Nor does
+    /// either depend on a reading being present, so the list holds still as
+    /// advertisements come and go and cached readings expire, rather than a
+    /// device flickering in and out of the switcher.
+    pub fn devices(&self) -> Vec<&str> {
+        let mut macs: Vec<&str> = self
+            .known_keys
             .iter()
-            .find_map(|m| self.states.get(m))
-            .or_else(|| {
-                self.states
-                    .iter()
-                    .min_by_key(|(mac, _)| *mac)
-                    .map(|(_, s)| s)
-            })
+            .chain(&self.connected_macs)
+            .map(String::as_str)
+            .collect();
+        macs.sort_unstable();
+        macs.dedup();
+        macs
+    }
+
+    /// The device to show when nothing else decides - the tray always, the
+    /// window until the user picks one: the device that has been on AAP longest,
+    /// else the first device with a reading, else the first device.
+    ///
+    /// The longest link rather than the newest, so a second pair connecting does
+    /// not take over. In MAC order rather than whichever the `HashMap` yields
+    /// first, since that order changes from one snapshot to the next.
+    pub fn default_device(&self) -> Option<&str> {
+        if let Some(mac) = self.connected_macs.first() {
+            return Some(mac);
+        }
+        let devices = self.devices();
+        devices
+            .iter()
+            .find(|mac| self.states.contains_key(**mac))
+            .or(devices.first())
+            .copied()
     }
 }
 
@@ -1285,57 +1317,53 @@ mod tests {
         assert_eq!(s.lowest_earbud(), None);
     }
 
+    /// The longest link wins, even before it has reported and with another pair
+    /// in range: a second pair connecting must not take over.
     #[test]
-    fn snapshot_primary_prefers_connected_device() {
-        let mut states = HashMap::new();
-        states.insert(
-            "aa".into(),
-            PodState {
-                device_model: 1,
-                ..Default::default()
-            },
-        );
-        states.insert(
-            "bb".into(),
-            PodState {
-                device_model: 2,
-                ..Default::default()
-            },
-        );
-
-        let snap = Snapshot {
-            states,
-            connected_macs: vec!["bb".into()],
-            known_keys: vec!["aa".into(), "bb".into()],
-            device_names: HashMap::new(),
-        };
-        assert_eq!(snap.primary().unwrap().device_model, 2);
+    fn default_device_is_the_longest_link() {
+        let snap = listing(&["aa"], &["cc", "bb"], &["aa", "bb"]);
+        assert_eq!(snap.default_device(), Some("cc"));
     }
 
-    /// With nothing on AAP, the lowest MAC - not whichever the `HashMap` yields
-    /// first, which changes from one snapshot to the next and made the tray jump
-    /// between two pairs.
+    /// With nothing on AAP, the first device with a reading - in MAC order, not
+    /// whichever the `HashMap` yields first, which changes from one snapshot to
+    /// the next and made the tray jump between two pairs.
     #[test]
-    fn primary_falls_back_to_the_lowest_mac() {
-        let states = ["cc", "aa", "bb"]
-            .into_iter()
-            .enumerate()
-            .map(|(i, mac)| {
-                (
-                    mac.to_string(),
-                    PodState {
-                        device_model: i as u16,
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
+    fn default_device_falls_back_to_the_first_with_a_reading() {
+        let snap = listing(&["aa", "bb", "cc"], &[], &["cc", "bb"]);
+        assert_eq!(snap.default_device(), Some("bb"));
+    }
 
-        let snap = Snapshot {
-            states,
-            ..Default::default()
-        };
-        assert_eq!(snap.primary().unwrap().device_model, 1);
-        assert!(Snapshot::default().primary().is_none());
+    /// A pair we hold a key for is still a device to show, out of range or not.
+    #[test]
+    fn default_device_falls_back_to_the_first_device() {
+        let snap = listing(&["aa", "bb"], &[], &[]);
+        assert_eq!(snap.default_device(), Some("aa"));
+        assert_eq!(Snapshot::default().default_device(), None);
+    }
+
+    /// Keyed and connected devices alike, each once, in MAC order: a pair on AAP
+    /// whose key has not arrived is listed, and so is one we hold a key for but
+    /// have not heard from.
+    #[test]
+    fn devices_are_the_known_and_the_connected() {
+        let snap = listing(&["bb", "dd"], &["cc", "bb"], &["bb"]);
+        assert_eq!(snap.devices(), ["bb", "cc", "dd"]);
+        assert!(Snapshot::default().devices().is_empty());
+    }
+
+    /// A snapshot holding keys for `known`, links to `connected` in that order,
+    /// and a reading for each of `heard`.
+    fn listing(known: &[&str], connected: &[&str], heard: &[&str]) -> Snapshot {
+        let macs = |list: &[&str]| list.iter().map(|m| m.to_string()).collect();
+        Snapshot {
+            states: heard
+                .iter()
+                .map(|m| (m.to_string(), PodState::default()))
+                .collect(),
+            connected_macs: macs(connected),
+            known_keys: macs(known),
+            device_names: HashMap::new(),
+        }
     }
 }

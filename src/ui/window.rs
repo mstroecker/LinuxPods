@@ -164,10 +164,11 @@ struct Ui {
 impl Ui {
     /// Takes in a snapshot from the coordinator.
     fn apply(&self, snapshot: Snapshot) {
-        // The switcher lists every device we hold a key for. That keeps the list
-        // stable instead of flickering as advertisements arrive, and strangers
-        // cannot appear: an advertisement we could not decrypt is never stored.
-        let macs = &snapshot.known_keys;
+        // The switcher lists the snapshot's devices, as the tray and Preferences
+        // do: every pair we hold a key for or are on AAP to. Neither depends on an
+        // advertisement having arrived, so the list holds still instead of
+        // flickering, and neither takes in strangers.
+        let macs = snapshot.devices();
 
         // Read the selection BEFORE touching the widget. Splicing the model makes
         // the dropdown emit selected-notify, and if that ran unguarded it would clobber
@@ -176,8 +177,8 @@ impl Ui {
         let current = self.selected.borrow().clone();
 
         self.syncing.set(true);
-        sync_device_list(&self.control, macs, &snapshot);
-        let chosen = choose_device(current, macs, &snapshot.connected_macs);
+        sync_device_list(&self.control, &macs, &snapshot);
+        let chosen = choose_device(current, &snapshot);
         let position = chosen
             .as_ref()
             .and_then(|mac| macs.iter().position(|m| m == mac));
@@ -187,8 +188,9 @@ impl Ui {
         }
         self.syncing.set(false);
 
-        // With no stored key there is no device to show; the empty state says
-        // how to get one.
+        // With no device at all - no stored key, no pair on AAP - the empty state
+        // says how to get one. A listed device without a reading is shown
+        // regardless, waiting for data.
         let page = if macs.is_empty() { "empty" } else { "device" };
         self.control.content.set_visible_child_name(page);
 
