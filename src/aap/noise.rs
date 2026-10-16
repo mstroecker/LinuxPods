@@ -109,8 +109,9 @@ pub enum NoiseParseError {
     UnknownMode(u8),
 }
 
-/// One single-byte setting in the 0x09 family. Every command in it has this
-/// shape; the trailing three bytes are unused.
+/// One single-byte setting in the 0x09 family, the shape of every command we
+/// send in it. Their trailing three bytes are unused; a report can fill them -
+/// see `settings_report`.
 fn settings_packet(sub_cmd: u8, value: u8) -> [u8; 11] {
     [
         0x04,

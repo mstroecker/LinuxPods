@@ -29,7 +29,7 @@ pub enum DecryptError {
     BadDataLen(usize),
     #[error("encryption key must be {KEY_LEN} bytes, got {0}")]
     BadKeyLen(usize),
-    /// AES always "succeeds" on a wrong key, so the magic bytes are what actually
+    /// AES always "succeeds" on a wrong key, so the MAC suffix is what actually
     /// tells us whether this key belongs to this device.
     #[error("decryption validation failed: incorrect encryption key")]
     ValidationFailed,
