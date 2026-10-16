@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use bluer::Address;
 use futures_util::StreamExt;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 use zbus::{Connection, MatchRule, MessageStream, interface, proxy};
@@ -76,12 +77,15 @@ pub struct BatteryProvider {
     conn: Connection,
     /// The level each exported battery object shows, keyed by MAC. An attached
     /// device has one only while it has a reading - see [`battery_actions`].
-    batteries: HashMap<String, u8>,
+    batteries: HashMap<Address, u8>,
 }
 
 /// Where one device's battery object lives, under the provider root.
-fn battery_path(mac: &str) -> Result<OwnedObjectPath> {
-    let path = format!("{PROVIDER_PATH}/{BATTERY_NAME}_{}", mac.replace(':', "_"));
+fn battery_path(mac: Address) -> Result<OwnedObjectPath> {
+    let path = format!(
+        "{PROVIDER_PATH}/{BATTERY_NAME}_{}",
+        mac.to_string().replace(':', "_")
+    );
     OwnedObjectPath::try_from(path.as_str()).with_context(|| format!("invalid battery path {path}"))
 }
 
@@ -90,24 +94,24 @@ fn battery_path(mac: &str) -> Result<OwnedObjectPath> {
 pub enum BatteryAction {
     /// Export a device's object, starting at its first reading.
     Add {
-        mac: String,
+        mac: Address,
         device_path: String,
         percentage: u8,
     },
     Update {
-        mac: String,
+        mac: Address,
         percentage: u8,
     },
     /// Withdraw a device's object: its reading went, or the device did.
     Remove {
-        mac: String,
+        mac: Address,
     },
 }
 
 impl BatteryAction {
-    fn mac(&self) -> &str {
+    fn mac(&self) -> Address {
         match self {
-            Self::Add { mac, .. } | Self::Update { mac, .. } | Self::Remove { mac } => mac,
+            Self::Add { mac, .. } | Self::Update { mac, .. } | Self::Remove { mac } => *mac,
         }
     }
 }
@@ -125,27 +129,24 @@ impl BatteryAction {
 /// device that has one, `exported` the level each exported object shows, both
 /// keyed by MAC. Sorted by MAC, so the order does not depend on the maps'.
 pub fn battery_actions(
-    attached: &HashMap<String, String>,
-    levels: &HashMap<String, u8>,
-    exported: &HashMap<String, u8>,
+    attached: &HashMap<String, Address>,
+    levels: &HashMap<Address, u8>,
+    exported: &HashMap<Address, u8>,
 ) -> Vec<BatteryAction> {
     let mut actions: Vec<BatteryAction> = attached
         .iter()
         .filter_map(
-            |(device_path, mac)| match (levels.get(mac), exported.get(mac)) {
+            |(device_path, &mac)| match (levels.get(&mac), exported.get(&mac)) {
                 (Some(&percentage), None) => Some(BatteryAction::Add {
-                    mac: mac.clone(),
+                    mac,
                     device_path: device_path.clone(),
                     percentage,
                 }),
                 // An unchanged level would only be signal traffic.
                 (Some(&percentage), Some(&shown)) if percentage != shown => {
-                    Some(BatteryAction::Update {
-                        mac: mac.clone(),
-                        percentage,
-                    })
+                    Some(BatteryAction::Update { mac, percentage })
                 }
-                (None, Some(_)) => Some(BatteryAction::Remove { mac: mac.clone() }),
+                (None, Some(_)) => Some(BatteryAction::Remove { mac }),
                 _ => None,
             },
         )
@@ -153,10 +154,10 @@ pub fn battery_actions(
             exported
                 .keys()
                 .filter(|mac| !attached.values().any(|m| m == *mac))
-                .map(|mac| BatteryAction::Remove { mac: mac.clone() }),
+                .map(|&mac| BatteryAction::Remove { mac }),
         )
         .collect();
-    actions.sort_by(|a, b| a.mac().cmp(b.mac()));
+    actions.sort_by_key(BatteryAction::mac);
     actions
 }
 
@@ -190,7 +191,7 @@ impl BatteryProvider {
     }
 
     /// The level each exported battery object shows, keyed by MAC.
-    pub fn exported(&self) -> &HashMap<String, u8> {
+    pub fn exported(&self) -> &HashMap<Address, u8> {
         &self.batteries
     }
 
@@ -201,17 +202,17 @@ impl BatteryProvider {
                 mac,
                 device_path,
                 percentage,
-            } => self.add_battery(mac, device_path, *percentage).await,
+            } => self.add_battery(*mac, device_path, *percentage).await,
             BatteryAction::Update { mac, percentage } => {
-                self.update_percentage(mac, *percentage).await
+                self.update_percentage(*mac, *percentage).await
             }
-            BatteryAction::Remove { mac } => self.remove_battery(mac).await,
+            BatteryAction::Remove { mac } => self.remove_battery(*mac).await,
         }
     }
 
     /// Exports one device's battery object at its first reading. Registering the
     /// interface emits InterfacesAdded.
-    async fn add_battery(&mut self, mac: &str, device_path: &str, percentage: u8) -> Result<()> {
+    async fn add_battery(&mut self, mac: Address, device_path: &str, percentage: u8) -> Result<()> {
         let battery_path = battery_path(mac)?;
         let device = OwnedObjectPath::try_from(device_path.to_string())
             .with_context(|| format!("invalid device path {device_path}"))?;
@@ -229,12 +230,12 @@ impl BatteryProvider {
             .await
             .context("failed to export battery object")?;
 
-        self.batteries.insert(mac.to_string(), percentage);
+        self.batteries.insert(mac, percentage);
         Ok(())
     }
 
     /// Updates one device's percentage, emitting PropertiesChanged.
-    async fn update_percentage(&mut self, mac: &str, percentage: u8) -> Result<()> {
+    async fn update_percentage(&mut self, mac: Address, percentage: u8) -> Result<()> {
         let iface_ref = self
             .conn
             .object_server()
@@ -249,13 +250,13 @@ impl BatteryProvider {
             .await
             .context("failed to emit PropertiesChanged")?;
 
-        self.batteries.insert(mac.to_string(), percentage);
+        self.batteries.insert(mac, percentage);
         Ok(())
     }
 
     /// Removes one device's battery object, emitting InterfacesRemoved.
-    async fn remove_battery(&mut self, mac: &str) -> Result<()> {
-        if self.batteries.remove(mac).is_some() {
+    async fn remove_battery(&mut self, mac: Address) -> Result<()> {
+        if self.batteries.remove(&mac).is_some() {
             self.conn
                 .object_server()
                 .remove::<BatteryProvider1, _>(&battery_path(mac)?)
@@ -293,25 +294,26 @@ impl BatteryProvider {
             .collect())
     }
 
-    pub async fn device_address(&self, device_path: &str) -> Result<String> {
+    pub async fn device_address(&self, device_path: &str) -> Result<Address> {
         let proxy = Device1Proxy::builder(&self.conn)
             .path(device_path.to_string())?
             .build()
             .await?;
-        proxy
+        let address = proxy
             .address()
             .await
-            .context("failed to get device address")
+            .context("failed to get device address")?;
+        address
+            .parse()
+            .with_context(|| format!("invalid device address {address:?}"))
     }
 
-    /// Every paired device's BlueZ alias, keyed by uppercase MAC.
+    /// Every paired device's BlueZ alias, by MAC.
     ///
     /// The alias is the name the user sees everywhere else on the desktop - their
     /// own rename if they made one, the device's advertised name otherwise - so it
-    /// is what the device switcher should show. Addresses are uppercased because
-    /// that is how they arrive from `Device1.Address` and how the keystore keys
-    /// its entries; a mismatch would silently fall back to the raw MAC.
-    pub async fn device_aliases(&self) -> HashMap<String, String> {
+    /// is what the device switcher should show.
+    pub async fn device_aliases(&self) -> HashMap<Address, String> {
         match self.read_device_aliases().await {
             Ok(names) => names,
             Err(e) => {
@@ -323,7 +325,7 @@ impl BatteryProvider {
         }
     }
 
-    async fn read_device_aliases(&self) -> Result<HashMap<String, String>> {
+    async fn read_device_aliases(&self) -> Result<HashMap<Address, String>> {
         let om = zbus::fdo::ObjectManagerProxy::builder(&self.conn)
             .destination(BLUEZ_SERVICE)?
             .path("/")?
@@ -380,9 +382,9 @@ impl BatteryProvider {
 
     /// Unregisters the provider. Called on shutdown.
     pub async fn close(&mut self) -> Result<()> {
-        let macs: Vec<String> = self.batteries.keys().cloned().collect();
+        let macs: Vec<Address> = self.batteries.keys().copied().collect();
         for mac in macs {
-            let _ = self.remove_battery(&mac).await;
+            let _ = self.remove_battery(mac).await;
         }
         let manager = BatteryProviderManager1Proxy::new(&self.conn).await?;
         let path = ObjectPath::try_from(PROVIDER_PATH)?;
@@ -479,7 +481,7 @@ fn bool_prop(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Pulls the (uppercase MAC, alias) pair out of a paired device's Device1 property map.
+/// Pulls the (MAC, alias) pair out of a paired device's Device1 property map.
 ///
 /// Both properties are required: an address with no alias has no name to show, and
 /// an alias with no address cannot be matched to a device we track. Unpaired devices
@@ -487,7 +489,7 @@ fn bool_prop(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
 /// mostly random addresses named after themselves, and the map goes into every
 /// snapshot - unfiltered, a BLE spam flood would grow it. The switcher lists only
 /// devices whose key we hold, and getting a key takes a pairing.
-fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(String, String)> {
+fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(Address, String)> {
     if !bool_prop(props, "Paired") {
         return None;
     }
@@ -497,10 +499,15 @@ fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(String, Str
             .and_then(|v| String::try_from(v.clone()).ok())
             .filter(|s| !s.is_empty())
     };
-    Some((
-        string_prop("Address")?.to_uppercase(),
-        string_prop("Alias")?,
-    ))
+    let address = string_prop("Address")?;
+    let alias = string_prop("Alias")?;
+    match address.parse() {
+        Ok(mac) => Some((mac, alias)),
+        Err(e) => {
+            tracing::debug!("skipping the alias of {address:?}: {e}");
+            None
+        }
+    }
 }
 
 pub const fn adapter_path() -> &'static str {
@@ -531,8 +538,8 @@ mod tests {
     const AUDIO_SINK: &str = "0000110b-0000-1000-8000-00805f9b34fb";
     const HANDS_FREE: &str = "0000111e-0000-1000-8000-00805f9b34fb";
 
-    /// Both properties are needed, and the address is normalized because the
-    /// keystore keys its entries on the uppercase form.
+    /// Both properties are needed, and the address is parsed, so its spelling
+    /// does not matter.
     #[test]
     fn name_entry_needs_an_address_and_an_alias() {
         let paired = ("Paired", Value::from(true));
@@ -549,11 +556,19 @@ mod tests {
         );
         assert_eq!(
             device_name_entry(&device([paired, alias, address])),
-            Some((
-                "AA:BB:CC:DD:EE:FF".to_string(),
-                "Marcel's AirPods Pro".to_string()
-            ))
+            Some((MAC_A, "Marcel's AirPods Pro".to_string()))
         );
+    }
+
+    /// An address that does not parse could never match a device we track.
+    #[test]
+    fn name_entry_needs_a_valid_address() {
+        let props = device([
+            ("Paired", Value::from(true)),
+            ("Alias", Value::from("Marcel's AirPods Pro")),
+            ("Address", Value::from("not-a-mac")),
+        ]);
+        assert_eq!(device_name_entry(&props), None);
     }
 
     /// Discovery leaves BlueZ an object for every advertiser in range, its alias
@@ -573,7 +588,7 @@ mod tests {
         assert_eq!(
             device_name_entry(&props),
             Some((
-                "DE:AD:BE:EF:00:01".to_string(),
+                Address::new([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]),
                 "DE-AD-BE-EF-00-01".to_string()
             ))
         );
@@ -583,30 +598,24 @@ mod tests {
     #[test]
     fn battery_paths_are_per_device() {
         assert_eq!(
-            battery_path("AA:BB:CC:DD:EE:FF").unwrap().as_str(),
+            battery_path(MAC_A).unwrap().as_str(),
             "/com/github/mstroecker/linuxpods/battery/airpods_battery_AA_BB_CC_DD_EE_FF"
         );
-        assert_ne!(
-            battery_path("AA:BB:CC:DD:EE:FF").unwrap(),
-            battery_path("11:22:33:44:55:66").unwrap()
-        );
+        assert_ne!(battery_path(MAC_A).unwrap(), battery_path(MAC_B).unwrap());
     }
 
-    const MAC_A: &str = "AA:BB:CC:DD:EE:FF";
+    const MAC_A: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
     const PATH_A: &str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
-    const MAC_B: &str = "11:22:33:44:55:66";
+    const MAC_B: Address = Address::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
     const PATH_B: &str = "/org/bluez/hci0/dev_11_22_33_44_55_66";
 
-    fn map<V: Clone>(entries: &[(&str, V)]) -> HashMap<String, V> {
-        entries
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.clone()))
-            .collect()
+    fn map<K: Clone + Eq + std::hash::Hash, V: Clone>(entries: &[(K, V)]) -> HashMap<K, V> {
+        entries.iter().cloned().collect()
     }
 
     /// Pair A attached, as `bluez_task` keeps it: by device path, to its MAC.
-    fn attached_a() -> HashMap<String, String> {
-        map(&[(PATH_A, MAC_A.to_string())])
+    fn attached_a() -> HashMap<String, Address> {
+        map(&[(PATH_A.to_string(), MAC_A)])
     }
 
     /// Nothing is exported until the first reading, and then at that level -
@@ -617,7 +626,7 @@ mod tests {
         assert_eq!(
             battery_actions(&attached_a(), &map(&[(MAC_A, 73)]), &map(&[])),
             [BatteryAction::Add {
-                mac: MAC_A.to_string(),
+                mac: MAC_A,
                 device_path: PATH_A.to_string(),
                 percentage: 73,
             }]
@@ -636,7 +645,7 @@ mod tests {
         assert_eq!(
             battery_actions(&attached_a(), &map(&[(MAC_A, 72)]), &map(&[(MAC_A, 73)])),
             [BatteryAction::Update {
-                mac: MAC_A.to_string(),
+                mac: MAC_A,
                 percentage: 72,
             }]
         );
@@ -648,9 +657,7 @@ mod tests {
     fn reading_gone_withdraws_the_battery() {
         assert_eq!(
             battery_actions(&attached_a(), &map(&[]), &map(&[(MAC_A, 73)])),
-            [BatteryAction::Remove {
-                mac: MAC_A.to_string()
-            }]
+            [BatteryAction::Remove { mac: MAC_A }]
         );
     }
 
@@ -660,16 +667,14 @@ mod tests {
     fn detached_device_loses_its_battery() {
         assert_eq!(
             battery_actions(&map(&[]), &map(&[(MAC_A, 73)]), &map(&[(MAC_A, 73)])),
-            [BatteryAction::Remove {
-                mac: MAC_A.to_string()
-            }]
+            [BatteryAction::Remove { mac: MAC_A }]
         );
     }
 
     /// Each pair is decided on its own, and the order is by MAC.
     #[test]
     fn pairs_are_decided_independently() {
-        let attached = map(&[(PATH_A, MAC_A.to_string()), (PATH_B, MAC_B.to_string())]);
+        let attached = map(&[(PATH_A.to_string(), MAC_A), (PATH_B.to_string(), MAC_B)]);
         assert_eq!(
             battery_actions(
                 &attached,
@@ -677,11 +682,9 @@ mod tests {
                 &map(&[(MAC_A, 60), (MAC_B, 40)])
             ),
             [
-                BatteryAction::Remove {
-                    mac: MAC_B.to_string()
-                },
+                BatteryAction::Remove { mac: MAC_B },
                 BatteryAction::Update {
-                    mac: MAC_A.to_string(),
+                    mac: MAC_A,
                     percentage: 50,
                 },
             ]

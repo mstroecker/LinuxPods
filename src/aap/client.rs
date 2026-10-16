@@ -56,12 +56,9 @@ pub struct Client {
 }
 
 impl Client {
-    /// Parses the MAC address; no I/O happens until [`Client::connect`].
-    pub fn new(mac_addr: &str) -> Result<Self> {
-        let addr: Address = mac_addr
-            .parse()
-            .with_context(|| format!("invalid MAC address: {mac_addr}"))?;
-        Ok(Self { addr, socket: None })
+    /// No I/O happens until [`Client::connect`].
+    pub fn new(addr: Address) -> Self {
+        Self { addr, socket: None }
     }
 
     pub fn is_connected(&self) -> bool {
@@ -230,22 +227,18 @@ impl Client {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_valid_mac() {
-        let c = Client::new("AA:BB:CC:DD:EE:FF").unwrap();
-        assert_eq!(c.addr.to_string(), "AA:BB:CC:DD:EE:FF");
-        assert!(!c.is_connected());
-    }
+    const MAC: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
     #[test]
-    fn rejects_invalid_mac() {
-        assert!(Client::new("not-a-mac").is_err());
-        assert!(Client::new("AA:BB:CC:DD:EE").is_err());
+    fn starts_unconnected() {
+        let c = Client::new(MAC);
+        assert_eq!(c.addr, MAC);
+        assert!(!c.is_connected());
     }
 
     #[tokio::test]
     async fn send_and_read_require_connection() {
-        let c = Client::new("AA:BB:CC:DD:EE:FF").unwrap();
+        let c = Client::new(MAC);
         assert!(c.handshake().await.is_err());
         assert!(c.read_packet().await.is_err());
     }

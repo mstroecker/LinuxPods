@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use adw::prelude::*;
+use bluer::Address;
 use gtk::glib;
 
 use super::{RECENT, last_seen_text};
@@ -67,7 +68,7 @@ pub(super) fn unavailable_row(title: &str) -> adw::ActionRow {
 /// The Development group: a row per device, by real MAC.
 pub(super) struct DeviceRows {
     group: adw::PreferencesGroup,
-    rows: RefCell<HashMap<String, DeviceRow>>,
+    rows: RefCell<HashMap<Address, DeviceRow>>,
     coordinator: Arc<Coordinator>,
     runtime: tokio::runtime::Handle,
 }
@@ -79,14 +80,14 @@ impl DeviceRows {
         let listed = row_order(snapshot);
         let mut rows = self.rows.borrow_mut();
         for &(mac, known) in &listed {
-            let row = rows.entry(mac.to_string()).or_insert_with(|| {
+            let row = rows.entry(mac).or_insert_with(|| {
                 let row = DeviceRow::new(mac, &self.coordinator, &self.runtime);
                 self.group.add(&row.row);
                 row
             });
             row.show(
                 mac,
-                snapshot.states.get(mac),
+                snapshot.states.get(&mac),
                 known,
                 snapshot.is_connected(mac),
             );
@@ -105,11 +106,11 @@ impl DeviceRows {
 
 /// The devices to list - the snapshot's, in its order - each with whether a key
 /// is stored for it. A pair on AAP whose key has not arrived is among them.
-fn row_order(snapshot: &Snapshot) -> Vec<(&str, bool)> {
+fn row_order(snapshot: &Snapshot) -> Vec<(Address, bool)> {
     snapshot
         .devices()
         .into_iter()
-        .map(|mac| (mac, snapshot.known_keys.iter().any(|k| k == mac)))
+        .map(|mac| (mac, snapshot.known_keys.contains(&mac)))
         .collect()
 }
 
@@ -123,11 +124,11 @@ struct DeviceRow {
 
 impl DeviceRow {
     /// Builds the row, with its Request Keys button wired to the coordinator.
-    fn new(mac: &str, coordinator: &Arc<Coordinator>, runtime: &tokio::runtime::Handle) -> Self {
+    fn new(mac: Address, coordinator: &Arc<Coordinator>, runtime: &tokio::runtime::Handle) -> Self {
         // Title and subtitle carry device data, which must never be read as
         // Pango markup - libadwaita's default.
         let row = adw::ActionRow::builder()
-            .title(mac)
+            .title(mac.to_string())
             .use_markup(false)
             .build();
 
@@ -151,7 +152,6 @@ impl DeviceRow {
         // the !Send widgets legal.
         let coord = coordinator.clone();
         let rt = runtime.clone();
-        let mac = mac.to_string();
         request_button.connect_clicked(glib::clone!(
             #[weak]
             request_button,
@@ -161,9 +161,8 @@ impl DeviceRow {
 
                 let (tx, rx) = async_channel::bounded(1);
                 let coord = coord.clone();
-                let mac = mac.clone();
                 rt.spawn(async move {
-                    let _ = tx.send(coord.request_encryption_keys(&mac).await).await;
+                    let _ = tx.send(coord.request_encryption_keys(mac).await).await;
                 });
 
                 glib::spawn_future_local(async move {
@@ -199,7 +198,7 @@ impl DeviceRow {
 
     /// Draws the device's address, model and connection state. `known` is
     /// whether a key is stored for it.
-    fn show(&self, mac: &str, state: Option<&PodState>, known: bool, connected: bool) {
+    fn show(&self, mac: Address, state: Option<&PodState>, known: bool, connected: bool) {
         self.row.set_title(&row_title(mac, state));
 
         match state {
@@ -220,11 +219,9 @@ impl DeviceRow {
 }
 
 /// The real address, and the rotating BLE one alongside it when they differ.
-fn row_title(mac: &str, state: Option<&PodState>) -> String {
-    match state {
-        Some(s) if !s.current_ble_mac.is_empty() && s.current_ble_mac != mac => {
-            format!("{mac} • BLE: {}", s.current_ble_mac)
-        }
+fn row_title(mac: Address, state: Option<&PodState>) -> String {
+    match state.and_then(|s| s.current_ble_mac) {
+        Some(ble_mac) if ble_mac != mac => format!("{mac} • BLE: {ble_mac}"),
         _ => mac.to_string(),
     }
 }
@@ -252,10 +249,10 @@ mod tests {
 
     use super::*;
 
-    const A: &str = "AA:AA:AA:AA:AA:AA";
-    const B: &str = "BB:BB:BB:BB:BB:BB";
-    const C: &str = "CC:CC:CC:CC:CC:CC";
-    const D: &str = "DD:DD:DD:DD:DD:DD";
+    const A: Address = Address::new([0xAA; 6]);
+    const B: Address = Address::new([0xBB; 6]);
+    const C: Address = Address::new([0xCC; 6]);
+    const D: Address = Address::new([0xDD; 6]);
 
     /// A reading heard `age` ago.
     fn heard(age: Duration) -> PodState {
@@ -270,11 +267,11 @@ mod tests {
     #[test]
     fn rows_follow_the_device_list() {
         let snapshot = Snapshot {
-            known_keys: vec![B.into(), D.into()],
-            connected_macs: vec![C.into(), B.into()],
+            known_keys: vec![B, D],
+            connected_macs: vec![C, B],
             states: [B, C]
                 .into_iter()
-                .map(|m| (m.to_string(), PodState::default()))
+                .map(|m| (m, PodState::default()))
                 .collect(),
             ..Default::default()
         };
@@ -284,18 +281,24 @@ mod tests {
     #[test]
     fn title_adds_a_differing_ble_address() {
         let rotating = PodState {
-            current_ble_mac: D.into(),
+            current_ble_mac: Some(D),
             ..Default::default()
         };
-        assert_eq!(row_title(A, Some(&rotating)), format!("{A} • BLE: {D}"));
+        assert_eq!(
+            row_title(A, Some(&rotating)),
+            "AA:AA:AA:AA:AA:AA • BLE: DD:DD:DD:DD:DD:DD"
+        );
 
         let same = PodState {
-            current_ble_mac: A.into(),
+            current_ble_mac: Some(A),
             ..Default::default()
         };
-        assert_eq!(row_title(A, Some(&same)), A);
-        assert_eq!(row_title(A, Some(&PodState::default())), A);
-        assert_eq!(row_title(A, None), A);
+        assert_eq!(row_title(A, Some(&same)), "AA:AA:AA:AA:AA:AA");
+        assert_eq!(
+            row_title(A, Some(&PodState::default())),
+            "AA:AA:AA:AA:AA:AA"
+        );
+        assert_eq!(row_title(A, None), "AA:AA:AA:AA:AA:AA");
     }
 
     /// Connected wins over everything, even a missing key: the key is requested

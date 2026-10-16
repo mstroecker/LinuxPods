@@ -12,6 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
+use bluer::Address;
 use futures_util::StreamExt;
 use gtk::{gio, glib};
 
@@ -44,10 +45,10 @@ impl TrayActions for AppActions {
         let _ = self.window.send_blocking(WindowCommand::Quit);
     }
 
-    fn set_noise_mode(&self, mac: String, mode: NoiseMode) {
+    fn set_noise_mode(&self, mac: Address, mode: NoiseMode) {
         let coordinator = self.coordinator.clone();
         self.runtime.spawn(async move {
-            if let Err(e) = coordinator.set_noise_control(&mac, mode).await {
+            if let Err(e) = coordinator.set_noise_control(mac, mode).await {
                 tracing::warn!("failed to set noise control from tray: {e:#}");
             }
         });
@@ -311,7 +312,7 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
 
     // The AirPods attached so far, by BlueZ object path, with their MAC. Kept
     // rather than looked up on disconnect, by when the device may be gone.
-    let mut attached: HashMap<String, String> = HashMap::new();
+    let mut attached: HashMap<String, Address> = HashMap::new();
 
     // Attach to AirPods that are already connected - every pair, not just one.
     match provider.connected_airpods().await {
@@ -358,7 +359,7 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
                     // Only this device's link goes; any other pair keeps its own.
                     // Its battery object goes in the sync below.
                     tracing::info!("AirPods disconnected: {}", event.device_path);
-                    coordinator.disconnect_aap(&mac).await;
+                    coordinator.disconnect_aap(mac).await;
                 }
             }
 
@@ -379,16 +380,16 @@ async fn bluez_task(coordinator: Arc<Coordinator>) {
 /// no battery object at all; see `bluez::battery_actions`.
 async fn sync_batteries(
     provider: &mut bluez::BatteryProvider,
-    attached: &HashMap<String, String>,
+    attached: &HashMap<String, Address>,
     updates: &mut tokio::sync::watch::Receiver<podstate::Snapshot>,
 ) {
     // Read out first: the borrow is a read lock every broadcast waits for, so it
     // must not live across the awaits below.
-    let levels: HashMap<String, u8> = {
+    let levels: HashMap<Address, u8> = {
         let snapshot = updates.borrow_and_update();
         attached
             .values()
-            .filter_map(|mac| Some((mac.clone(), snapshot.states.get(mac)?.lowest_earbud()?)))
+            .filter_map(|&mac| Some((mac, snapshot.states.get(&mac)?.lowest_earbud()?)))
             .collect()
     };
 
@@ -414,17 +415,20 @@ async fn sync_batteries(
 async fn attach_device(
     provider: &bluez::BatteryProvider,
     coordinator: &Arc<Coordinator>,
-    attached: &mut HashMap<String, String>,
+    attached: &mut HashMap<String, Address>,
     device_path: &str,
 ) {
-    let Ok(mac) = provider.device_address(device_path).await else {
-        tracing::warn!("could not read address for {device_path}");
-        return;
+    let mac = match provider.device_address(device_path).await {
+        Ok(mac) => mac,
+        Err(e) => {
+            tracing::warn!("could not read address for {device_path}: {e:#}");
+            return;
+        }
     };
-    attached.insert(device_path.to_string(), mac.clone());
+    attached.insert(device_path.to_string(), mac);
 
     // Starts the link's read loop as well.
-    if let Err(e) = coordinator.connect_aap(&mac).await {
+    if let Err(e) = coordinator.connect_aap(mac).await {
         tracing::warn!("failed to connect AAP to {mac}: {e:#}");
         tracing::warn!("Falling back to BLE for battery monitoring (approximate)");
     }
