@@ -74,16 +74,16 @@ impl Indicator {
             .map_err(|e| anyhow::anyhow!("failed to start tray: {e}"))
     }
 
-    /// Shows `state`, or with none the state the tray starts in. Without the
-    /// reset, a device that has left - its cached reading expired, its AAP link
-    /// dropped - would stay on show indefinitely, its noise control entries
-    /// still enabled and aimed at it.
-    fn show(&mut self, state: Option<&PodState>) {
-        let Some(state) = state else {
+    /// Shows a device's reading, or with none the state the tray starts in.
+    /// Without the reset, a device that has left - its cached reading expired,
+    /// its AAP link dropped - would stay on show indefinitely, its noise control
+    /// entries still enabled and aimed at it.
+    fn show(&mut self, device: Option<(Address, &PodState)>) {
+        let Some((mac, state)) = device else {
             *self = Self::new(Arc::clone(&self.actions));
             return;
         };
-        self.mac = (state.real_mac != Address::any()).then_some(state.real_mac);
+        self.mac = Some(mac);
         self.left = state.left_battery;
         self.right = state.right_battery;
         self.case = state.case_battery;
@@ -215,20 +215,22 @@ impl Tray for Indicator {
 /// before and after, so a snapshot that changes nothing the tray shows sends
 /// nothing to the host.
 pub async fn apply_snapshot(handle: &Handle<Indicator>, snapshot: &Snapshot) {
-    let state = tray_state(snapshot).cloned();
+    let device = tray_state(snapshot).map(|(mac, state)| (mac, state.clone()));
     handle
-        .update(move |tray: &mut Indicator| tray.show(state.as_ref()))
+        .update(move |tray: &mut Indicator| {
+            tray.show(device.as_ref().map(|(mac, state)| (*mac, state)));
+        })
         .await;
 }
 
-/// The reading the tray shows: the default device's, the one the window shows
-/// until the user picks another. None while that device has no reading - a link
-/// that has not reported yet - rather than another pair's, which would leave the
-/// tray and the window on different devices.
-fn tray_state(snapshot: &Snapshot) -> Option<&PodState> {
-    snapshot
-        .default_device()
-        .and_then(|mac| snapshot.states.get(&mac))
+/// The device the tray shows, by the MAC its reading is keyed under, and that
+/// reading: the default device, the one the window shows until the user picks
+/// another. None while that device has no reading - a link that has not
+/// reported yet - rather than another pair's, which would leave the tray and
+/// the window on different devices.
+fn tray_state(snapshot: &Snapshot) -> Option<(Address, &PodState)> {
+    let mac = snapshot.default_device()?;
+    snapshot.states.get(&mac).map(|state| (mac, state))
 }
 
 #[cfg(test)]
@@ -303,7 +305,6 @@ mod tests {
             right_charging: true,
             case_charging: true,
             noise_mode: Some(NoiseMode::Transparency),
-            real_mac: MAC,
             ..Default::default()
         };
         Snapshot {
@@ -329,6 +330,41 @@ mod tests {
         assert_eq!(tray.tool_tip().description, "AirPods - 73%");
     }
 
+    /// Records the noise control commands the tray hands back.
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<(Address, NoiseMode)>>);
+
+    impl TrayActions for Recorder {
+        fn show_window(&self) {}
+        fn quit(&self) {}
+        fn set_noise_mode(&self, mac: Address, mode: NoiseMode) {
+            self.0.lock().unwrap().push((mac, mode));
+        }
+    }
+
+    /// A noise control entry commands the device whose reading the tray shows,
+    /// by the MAC the snapshot keys that reading under.
+    #[test]
+    fn noise_control_commands_the_mac_from_the_snapshot() {
+        let recorder = Arc::new(Recorder::default());
+        let mut tray = Indicator::new(recorder.clone());
+        tray.show(tray_state(&reading()));
+
+        let adaptive = tray
+            .menu()
+            .into_iter()
+            .find_map(|item| match item {
+                MenuItem::Checkmark(entry) if entry.label == NoiseMode::Adaptive.label() => {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .unwrap();
+        (adaptive.activate)(&mut tray);
+
+        assert_eq!(*recorder.0.lock().unwrap(), [(MAC, NoiseMode::Adaptive)]);
+    }
+
     /// Once the last device is gone - its cached reading expired, or its AAP link
     /// dropped with no advertisement cached - the tray is back where it started,
     /// rather than showing the last reading and offering noise control for a
@@ -352,7 +388,6 @@ mod tests {
             source: DataSource::Ble,
             left_battery: Some(50),
             right_battery: Some(50),
-            real_mac: OTHER,
             ..Default::default()
         };
         let mut snapshot = reading();
