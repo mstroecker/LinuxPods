@@ -31,6 +31,11 @@ const SUB_ALLOW_OFF: u8 = 0x34;
 const ENABLED: u8 = 0x01;
 const DISABLED: u8 = 0x02;
 
+/// The settings-changed notification, the device's one consistent answer to a
+/// mode change - see [`settings_changed_packet`].
+#[cfg(any(test, feature = "harness"))]
+const CMD_SETTINGS_CHANGED: u8 = 0x4B;
+
 /// The four noise control modes an AirPods pair can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoiseMode {
@@ -138,6 +143,64 @@ pub fn allow_off_packet(allowed: bool) -> [u8; 11] {
     settings_packet(SUB_ALLOW_OFF, if allowed { ENABLED } else { DISABLED })
 }
 
+/// A setting in the 0x09 family as the device reports it in its startup dump:
+/// the value from byte 7 on, zero-padded to the family's 11 bytes. Most values
+/// are a single byte; 0x1F's is two.
+///
+/// A mode report is the same packet as [`set_packet`], which serves both
+/// directions.
+///
+/// # Panics
+///
+/// With a value of no bytes, or of more than the four the packet has room for.
+#[cfg(any(test, feature = "harness"))]
+pub fn settings_report(sub_cmd: u8, value: &[u8]) -> [u8; 11] {
+    assert!(
+        (1..=4).contains(&value.len()),
+        "a setting's value is 1 to 4 bytes, got {}",
+        value.len()
+    );
+    let mut packet = settings_packet(sub_cmd, value[0]);
+    packet[MODE..MODE + value.len()].copy_from_slice(value);
+    packet
+}
+
+/// The notification that follows a mode change: `04 00 04 00 4B 00 02 00 01
+/// 09`, a count of one and the family that changed.
+///
+/// Byte-identical whichever mode was set, so it acknowledges that a command
+/// was processed and nothing more.
+#[cfg(any(test, feature = "harness"))]
+pub fn settings_changed_packet() -> [u8; 10] {
+    [
+        0x04,
+        0x00,
+        0x04,
+        0x00,
+        CMD_SETTINGS_CHANGED,
+        0x00,
+        0x02,
+        0x00,
+        0x01,
+        CMD_SETTINGS,
+    ]
+}
+
+/// Reads an allow-Off command: `Some(true)` for `0x34 01`, `Some(false)` for
+/// `0x34 02`, `None` for anything else - the inverse of [`allow_off_packet`],
+/// for a fake on the receiving end.
+#[cfg(any(test, feature = "harness"))]
+pub fn parse_allow_off_packet(packet: &[u8]) -> Option<bool> {
+    if packet.len() <= MODE || packet[CMD] != CMD_SETTINGS || packet[SUB_CMD] != SUB_ALLOW_OFF {
+        return None;
+    }
+    match packet[MODE] {
+        ENABLED => Some(true),
+        DISABLED => Some(false),
+        _ => None,
+    }
+}
+
 /// True for a mode report.
 ///
 /// Byte 6 matters as much as byte 4: the 0x09 family also carries 0x17, 0x1B,
@@ -235,8 +298,62 @@ mod tests {
     fn rejects_the_settings_changed_notification() {
         // 0x4B, the only consistent answer to a mode change - and no use as one,
         // since it is byte-identical whichever mode was set.
-        let ack = [0x04, 0x00, 0x04, 0x00, 0x4B, 0x00, 0x02, 0x00, 0x01, 0x09];
-        assert!(!is_noise_mode_packet(&ack));
+        assert!(!is_noise_mode_packet(&settings_changed_packet()));
+    }
+
+    /// The hex from `docs/aap-noise-control.md`, byte for byte.
+    #[test]
+    fn builds_the_documented_notification() {
+        let hex: String = settings_changed_packet()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(hex, "040004004b0002000109");
+    }
+
+    #[test]
+    fn a_mode_report_is_the_mode_packet() {
+        for mode in NoiseMode::ALL {
+            let report = settings_report(SUB_NOISE_CONTROL, &[mode.as_byte()]);
+            assert_eq!(report, set_packet(mode));
+            assert_eq!(parse_noise_mode_packet(&report), Ok(mode));
+        }
+    }
+
+    /// 0x1F, from the startup dump in `docs/aap-noise-control.md`: the second
+    /// value byte lands at byte 8.
+    #[test]
+    fn reports_a_two_byte_setting() {
+        assert_eq!(
+            settings_report(0x1F, &[0x50, 0x50]),
+            [
+                0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x1F, 0x50, 0x50, 0x00, 0x00
+            ]
+        );
+    }
+
+    #[test]
+    fn allow_off_round_trips() {
+        assert_eq!(parse_allow_off_packet(&allow_off_packet(true)), Some(true));
+        assert_eq!(
+            parse_allow_off_packet(&allow_off_packet(false)),
+            Some(false)
+        );
+    }
+
+    /// A mode packet carries 0x01 for Off at the same byte; only byte 6 tells
+    /// the two apart.
+    #[test]
+    fn a_mode_packet_is_not_an_allow_off_command() {
+        assert_eq!(parse_allow_off_packet(&set_packet(NoiseMode::Off)), None);
+        assert_eq!(
+            parse_allow_off_packet(&settings_report(SUB_ALLOW_OFF, &[0x00])),
+            None
+        );
+        assert_eq!(
+            parse_allow_off_packet(&allow_off_packet(true)[..MODE]),
+            None
+        );
     }
 
     #[test]

@@ -25,6 +25,16 @@ impl From<u8> for KeyType {
     }
 }
 
+impl From<KeyType> for u8 {
+    fn from(t: KeyType) -> Self {
+        match t {
+            KeyType::Irk => 0x01,
+            KeyType::EncKey => 0x04,
+            KeyType::Unknown(other) => other,
+        }
+    }
+}
+
 impl std::fmt::Display for KeyType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -133,17 +143,71 @@ pub fn find_irk(keys: &[ProximityKey]) -> Option<&[u8]> {
         .map(|k| k.data.as_slice())
 }
 
+/// Builds the packet [`parse_proximity_keys`] reads, keys in the order given.
+/// The device sends the IRK, then the ENC_KEY.
+///
+/// # Panics
+///
+/// With more than 255 keys, or a key longer than 255 bytes: the count and
+/// length bytes cannot hold them.
+#[cfg(any(test, feature = "harness"))]
+pub fn key_packet(keys: &[ProximityKey]) -> Vec<u8> {
+    let count = u8::try_from(keys.len()).expect("at most 255 keys in a packet");
+    let mut packet = HEADER.to_vec();
+    packet.extend_from_slice(&[KEY_MARKER, 0x00, count]);
+    for key in keys {
+        let len = u8::try_from(key.data.len()).expect("a key of at most 255 bytes");
+        packet.extend_from_slice(&[key.key_type.into(), 0x00, len, 0x00]);
+        packet.extend_from_slice(&key.data);
+    }
+    packet
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Keys as the wire has them - type byte, data - through the builder.
     fn packet(keys: &[(u8, &[u8])]) -> Vec<u8> {
-        let mut p = vec![0x04, 0x00, 0x04, 0x00, KEY_MARKER, 0x00, keys.len() as u8];
-        for (t, data) in keys {
-            p.extend_from_slice(&[*t, 0x00, data.len() as u8, 0x00]);
-            p.extend_from_slice(data);
+        let keys: Vec<ProximityKey> = keys
+            .iter()
+            .map(|&(t, data)| ProximityKey {
+                key_type: t.into(),
+                data: data.to_vec(),
+            })
+            .collect();
+        key_packet(&keys)
+    }
+
+    /// The layout of the example in `docs/aap-key-retrieval.md`: marker 0x31,
+    /// count, then type, length and data per key, each header four bytes.
+    #[test]
+    fn builds_the_documented_layout() {
+        let irk = vec![0xAA; 16];
+        let enc = vec![0xBB; 16];
+        let p = key_packet(&[
+            ProximityKey {
+                key_type: KeyType::Irk,
+                data: irk.clone(),
+            },
+            ProximityKey {
+                key_type: KeyType::EncKey,
+                data: enc.clone(),
+            },
+        ]);
+        assert_eq!(p.len(), 7 + 2 * (4 + 16));
+        assert_eq!(p[..7], [0x04, 0x00, 0x04, 0x00, 0x31, 0x00, 0x02]);
+        assert_eq!(p[7..11], [0x01, 0x00, 0x10, 0x00]);
+        assert_eq!(p[11..27], irk[..]);
+        assert_eq!(p[27..31], [0x04, 0x00, 0x10, 0x00]);
+        assert_eq!(p[31..], enc[..]);
+    }
+
+    #[test]
+    fn wire_values_round_trip() {
+        for v in 0..=u8::MAX {
+            assert_eq!(u8::from(KeyType::from(v)), v);
         }
-        p
     }
 
     #[test]
