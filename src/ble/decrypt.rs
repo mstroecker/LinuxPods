@@ -185,11 +185,14 @@ pub fn encrypt(plain: &[u8; ENCRYPTED_LEN], key: &[u8; KEY_LEN]) -> [u8; ENCRYPT
 pub fn random_key() -> [u8; KEY_LEN] {
     use std::io::Read;
 
-    let mut key = [0u8; KEY_LEN];
+    // Read into a Vec, not a zeroed array: CodeQL takes the zeros for a
+    // hard-coded key, though every byte of them would be overwritten.
+    let mut key = Vec::with_capacity(KEY_LEN);
     std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut key))
+        .and_then(|f| f.take(KEY_LEN as u64).read_to_end(&mut key))
         .expect("failed to read /dev/urandom");
-    key
+    key.try_into()
+        .expect("/dev/urandom gives as many bytes as asked for")
 }
 
 #[cfg(test)]
