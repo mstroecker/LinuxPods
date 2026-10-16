@@ -33,7 +33,7 @@ pub fn activate(
     coordinator: Arc<Coordinator>,
     runtime: tokio::runtime::Handle,
 ) -> adw::ApplicationWindow {
-    let mut updates = coordinator.subscribe();
+    let updates = Rc::new(RefCell::new(coordinator.subscribe()));
     let win = adw::ApplicationWindow::new(app);
     win.set_widget_name("main-window");
     win.set_title(Some("LinuxPods"));
@@ -128,11 +128,29 @@ pub fn activate(
 
     // Updates arrive over a watch channel consumed on the main context. GTK types
     // are !Send, so this is the only legal way in - enforced at compile time.
+    //
+    // The loop waits on a clone of the receiver, which starts out having seen
+    // what the receiver has seen. The receiver itself is then never borrowed
+    // across an await, so whether a snapshot is waiting can be asked of it at
+    // any time - as the harness's Settle does.
+    #[cfg(feature = "harness")]
+    super::automation::watch_render_loop({
+        let updates = Rc::downgrade(&updates);
+        move || {
+            updates
+                .upgrade()
+                .is_some_and(|updates| updates.borrow().has_changed().unwrap_or(false))
+        }
+    });
     glib::spawn_future_local(async move {
-        while updates.changed().await.is_ok() {
+        loop {
+            let mut next = updates.borrow().clone();
+            if next.changed().await.is_err() {
+                break;
+            }
             // Cloned out: the borrow is a read lock every broadcast waits for, so it
             // must not live across an await.
-            let snapshot = updates.borrow_and_update().clone();
+            let snapshot = updates.borrow_mut().borrow_and_update().clone();
             ui.apply(snapshot);
 
             // tokio's cooperative budget does not reach the GTK main context, so

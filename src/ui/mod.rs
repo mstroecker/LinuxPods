@@ -5,18 +5,24 @@
 //! background task can never touch a widget directly.
 //!
 //! The controls, and the labels a test reads, carry an ID set with
-//! `set_widget_name`, for the test harness (#74) to find them by. Every build
-//! sets them: they cost nothing, and a harness build then lays out the same
-//! widgets as the one users run.
+//! `set_widget_name`, for the test harness (#74) to find them by; `automation`
+//! lists them. Every build sets them: they cost nothing, and a harness build
+//! then lays out the same widgets as the one users run. Under the harness,
+//! `automation` presses widgets over D-Bus as a user would - from GDBus
+//! handlers on the main context, never from a background task.
 
 use std::time::Duration;
 
 use gtk::gio;
 
+#[cfg(feature = "harness")]
+mod automation;
 mod control;
 mod preferences;
 mod window;
 
+#[cfg(feature = "harness")]
+pub use automation::register as register_automation;
 pub use window::activate;
 
 /// Anything heard within this long counts as advertising now.
