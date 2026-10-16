@@ -18,7 +18,7 @@ const MAC_SUFFIX_RANGE: std::ops::Range<usize> = 7..10;
 ///
 /// The suffix exists so a paired-but-disconnected device can be recognised behind
 /// a randomized address; connected, the device publishes zeros. Observed on
-/// AirPods Pro 3 (0x2720) with a key that decrypts correctly by every other
+/// AirPods Pro 3 (0x2027) with a key that decrypts correctly by every other
 /// measure - batteries agreeing with the cleartext buckets and the usual
 /// `1d 7d 64` at bytes 4-6.
 const CONNECTED_SUFFIX: [u8; 3] = [0x00; 3];
@@ -47,8 +47,8 @@ pub enum DecryptError {
 /// Layout confirmed on two models; only byte 0, the batteries and the trailing
 /// four bytes differ between them:
 /// ```text
-/// Pro 3  (0x2720): 10 be be 9f 1d 7d 64 [DD EE FF] 00 00 a7 8a b5 cc
-/// Gen 2  (0x2420): 00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 3b a2 15 bd
+/// Pro 3  (0x2027): 10 be be 9f 1d 7d 64 [DD EE FF] 00 00 a7 8a b5 cc
+/// Gen 2  (0x2024): 00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 3b a2 15 bd
 ///                     ^^ ^^ ^^              ^^^^^^ MAC suffix
 ///                     batteries (bit 7 = charging)
 /// ```
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn round_trips_gen2_layout() {
-        // Gen 2 (0x2420) reports byte 0 = 0x00 where Pro 3 reports 0x10; both carry
+        // Gen 2 (0x2024) reports byte 0 = 0x00 where Pro 3 reports 0x10; both carry
         // the MAC suffix, which is why validation keys on that and nothing else.
         let key = [0x33u8; 16];
         let mac = Address::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);

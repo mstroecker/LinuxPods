@@ -555,8 +555,11 @@ impl Coordinator {
             // BLE carries no noise control mode; `snapshot` attaches the one
             // reported over AAP for the connected device.
             noise_mode: None,
-            device_model: data.device_model,
-            model_name: decode_model_name(data.device_model),
+            device_model: data.product_id,
+            model_name: decode_model_name(data.product_id).map_or_else(
+                || format!("Unknown (0x{:04X})", data.product_id),
+                str::to_string,
+            ),
             color: data.color,
             primary_pod: data.primary_pod(),
             real_mac,
@@ -1466,7 +1469,7 @@ mod tests {
         let mut raw_data = vec![0; 9];
         raw_data.extend_from_slice(&block);
         ProximityData {
-            device_model: 0x2720,
+            product_id: 0x2027,
             color: 0x01,
             raw_data,
             ..Default::default()
@@ -1524,7 +1527,7 @@ mod tests {
             .await;
         let state = coordinator.subscribe().borrow().states[&MAC].clone();
         assert_eq!(state.left_battery, Some(82));
-        assert_eq!(state.device_model, 0x2720);
+        assert_eq!(state.device_model, 0x2027);
         assert_eq!(state.model_name, "AirPods Pro 3");
         assert_eq!(state.color, 0x01);
     }

@@ -41,7 +41,8 @@ pub enum PodSide {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProximityData {
-    pub device_model: u16,
+    /// Apple's product ID - see [`decode_model_name`].
+    pub product_id: u16,
     pub status: u8,
     pub left_battery: Option<u8>,
     pub right_battery: Option<u8>,
@@ -155,7 +156,10 @@ pub fn parse_proximity_data(data: &[u8]) -> Result<ProximityData, ParseError> {
     let xor_factor = primary_left != this_in_case;
 
     let mut pd = ProximityData {
-        device_model: u16::from(payload[1]) << 8 | u16::from(payload[2]),
+        // Little-endian, which makes it the product ID BlueZ's `Modalias` carries
+        // (`p2027` for AirPods Pro 3). Read big-endian, as it once was, the same
+        // model came out as 0x2720 - a second number for one device.
+        product_id: u16::from_le_bytes([payload[1], payload[2]]),
         status,
         is_flipped,
         color: payload[7],
@@ -243,14 +247,32 @@ pub fn decode_connection_state(state: u8) -> String {
     }
 }
 
-pub fn decode_model_name(device_model: u16) -> String {
-    match device_model {
-        0x0220 => "AirPods (2nd gen)".into(),
-        0x0e20 => "AirPods Pro".into(),
-        0x2420 => "AirPods Pro (2nd gen)".into(),
-        0x2720 => "AirPods Pro 3".into(),
-        other => format!("Unknown (0x{other:04X})"),
-    }
+/// The name of an AirPods model, by Apple's product ID; `None` for one not
+/// listed here, so the caller decides what to show instead.
+///
+/// Only AirPods Pro 2 (USB-C) and AirPods Pro 3 are verified on hardware in this
+/// project. The rest come from public Continuity tables, unverified here, and
+/// are listed only where two of them agree: LibrePods
+/// (librepods-org/librepods, `linux/ble/blemanager.cpp`, which writes the IDs
+/// byte-swapped) and AirPodsDesktop (SpriteOvO/AirPodsDesktop,
+/// `Source/Core/AppleCP.cpp`). furiousMAC/continuity's Wireshark dissector
+/// lists the first two generations and the first AirPods Pro, byte-swapped too.
+pub fn decode_model_name(product_id: u16) -> Option<&'static str> {
+    let name = match product_id {
+        0x2002 => "AirPods (1st gen)",
+        0x200F => "AirPods (2nd gen)",
+        0x2013 => "AirPods (3rd gen)",
+        0x2019 => "AirPods 4",
+        0x201B => "AirPods 4 (ANC)",
+        0x200E => "AirPods Pro",
+        0x2014 => "AirPods Pro (2nd gen)",
+        0x2024 => "AirPods Pro (2nd gen, USB-C)", // verified on hardware
+        0x2027 => "AirPods Pro 3",                // verified on hardware
+        0x200A => "AirPods Max",
+        0x201F => "AirPods Max (USB-C)",
+        _ => return None,
+    };
+    Some(name)
 }
 
 #[cfg(test)]
@@ -266,8 +288,8 @@ mod tests {
     fn advert_with_lid(status: u8, battery: u8, charging: u8, lid: u8) -> Vec<u8> {
         let payload = vec![
             0x01,     // 0: prefix
-            0x27,     // 1: model hi
-            0x20,     // 2: model lo -> AirPods Pro 3
+            0x27,     // 1: product ID, low byte
+            0x20,     // 2: product ID, high byte -> 0x2027, AirPods Pro 3
             status,   // 3: status
             battery,  // 4: battery nibbles
             charging, // 5: charging bits + case battery
@@ -330,9 +352,52 @@ mod tests {
         assert_eq!(pd.primary_pod(), PodSide::Left);
         assert_eq!(pd.left_battery, Some(80));
         assert_eq!(pd.right_battery, Some(70));
-        assert_eq!(pd.device_model, 0x2720);
-        assert_eq!(decode_model_name(pd.device_model), "AirPods Pro 3");
+        assert_eq!(pd.product_id, 0x2027);
+        assert_eq!(decode_model_name(pd.product_id), Some("AirPods Pro 3"));
         assert_eq!(pd.lid_open, Some(true));
+    }
+
+    /// The two models verified on hardware, from the cleartext of captured
+    /// advertisements, encrypted portion zeroed: the product ID is the one
+    /// their `Modalias` carries, `p2027` and `p2024` - not the byte-swapped
+    /// 0x2720 and 0x2420 a big-endian read gave.
+    #[test]
+    fn reads_the_product_id_little_endian() {
+        for (header, product_id, name) in [
+            (
+                [0x01, 0x27, 0x20, 0x05, 0x66, 0xf3, 0x51, 0x00, 0x00],
+                0x2027,
+                "AirPods Pro 3",
+            ),
+            (
+                [0x01, 0x24, 0x20, 0x25, 0xaa, 0xf1, 0x51, 0x00, 0x00],
+                0x2024,
+                "AirPods Pro (2nd gen, USB-C)",
+            ),
+        ] {
+            let mut data = vec![PROXIMITY_TYPE, (header.len() + ENCRYPTED_LEN) as u8];
+            data.extend_from_slice(&header);
+            data.extend_from_slice(&[0; ENCRYPTED_LEN]);
+
+            let pd = parse_proximity_data(&data).unwrap();
+            assert_eq!(pd.product_id, product_id);
+            assert_eq!(decode_model_name(pd.product_id), Some(name));
+        }
+    }
+
+    /// Regression (#45): 0x2002 was labelled the 2nd generation.
+    #[test]
+    fn names_the_first_two_generations_apart() {
+        assert_eq!(decode_model_name(0x2002), Some("AirPods (1st gen)"));
+        assert_eq!(decode_model_name(0x200F), Some("AirPods (2nd gen)"));
+    }
+
+    /// No name rather than a made-up one, so the caller decides the fallback.
+    /// The byte-swapped Pro 3 ID is not a product.
+    #[test]
+    fn an_unknown_product_id_has_no_name() {
+        assert_eq!(decode_model_name(0x2720), None);
+        assert_eq!(decode_model_name(0x0000), None);
     }
 
     #[test]

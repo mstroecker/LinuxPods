@@ -115,7 +115,7 @@ impl Scanner {
                 Ok(data) => {
                     tracing::debug!(
                         "BLE parsable: {ble_mac} model=0x{:04X} payload={}B",
-                        data.device_model,
+                        data.product_id,
                         data.raw_data.len()
                     );
                     // Every parsable advertisement, including the ones the

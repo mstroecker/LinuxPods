@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(
             "proximity from {}: model=0x{:04X}",
             advert.ble_mac,
-            advert.data.device_model
+            advert.data.product_id
         );
     }
     Ok(())
