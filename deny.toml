@@ -4,6 +4,9 @@
 [graph]
 # LinuxPods only runs on Linux, so Windows and macOS dependencies are not judged
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+# Judge the crates optional features pull in too - the harness feature's, say.
+# Releases never enable them, but they still build on CI and developer machines.
+all-features = true
 
 [advisories]
 # RustSec advisories: vulnerabilities, unmaintained crates and yanked versions fail
