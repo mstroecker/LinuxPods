@@ -98,7 +98,6 @@ pub struct PodState {
     pub color: u8,
     pub primary_pod: PodSide,
 
-    pub real_mac: Address,
     /// The randomized address the advertisement behind a BLE reading came
     /// from. `None` for AAP, which knows only the real one.
     pub current_ble_mac: Option<Address>,
@@ -562,7 +561,6 @@ impl Coordinator {
             ),
             color: data.color,
             primary_pod: data.primary_pod(),
-            real_mac,
             current_ble_mac: Some(ble_mac),
             // Stamped from the entry in `snapshot`.
             last_seen: None,
@@ -815,7 +813,6 @@ impl Coordinator {
             left_charging: info.left.is_some_and(|b| b.is_charging()),
             right_charging: info.right.is_some_and(|b| b.is_charging()),
             case_charging: info.case.is_some_and(|b| b.is_charging()),
-            real_mac: mac_addr,
             // AAP carries no in-ear, lid or connection-state data, nor a BLE
             // address; those stay at their defaults.
             ..Default::default()
