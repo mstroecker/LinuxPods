@@ -45,10 +45,13 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Test harness: AAP over a Unix socket, for a fake to answer (#68)
+tokio-seqpacket = { version = "0.9", optional = true }
+
 [features]
 # Test harness hooks: a fake BlueZ, fake AirPods and UI automation (#74).
 # Debug builds only - src/lib.rs refuses a release build with it.
-harness = []
+harness = ["dep:tokio-seqpacket"]
 
 [build-dependencies]
 glib-build-tools = "0.22"

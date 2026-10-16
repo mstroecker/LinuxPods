@@ -3,6 +3,11 @@
 //! bluer provides the AF_BLUETOOTH SOCK_SEQPACKET socket as a safe, typed, async
 //! API, so no hand-laid `sockaddr_l2` or raw connect syscall is needed here.
 //!
+//! Under the `harness` feature a client can talk to a Unix SOCK_SEQPACKET socket
+//! instead, for a fake device to answer (#74). It keeps message boundaries and
+//! reports a closed peer as a zero-length read, as L2CAP does, so nothing past
+//! [`Client::connect`] tells the two apart.
+//!
 //! Protocol flow:
 //!   1. Open L2CAP connection to AirPods (PSM 4097)
 //!   2. Send handshake
@@ -11,11 +16,16 @@
 //!
 //! Based on reverse engineering from LibrePods and OpenPods.
 
+use std::io;
+#[cfg(feature = "harness")]
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bluer::l2cap::{SeqPacket, Socket, SocketAddr};
 use bluer::{Address, AddressType};
+#[cfg(feature = "harness")]
+use tokio_seqpacket::UnixSeqpacket;
 
 use crate::aap::noise;
 
@@ -49,25 +59,102 @@ const PACKET_ENABLE_FEATURES: [u8; 14] = [
 /// Requests the proximity pairing encryption keys (IRK and ENC_KEY).
 const PACKET_KEY_REQUEST: [u8; 8] = [0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00];
 
+/// Where a fake listens for the app's AAP link to `addr`: `<dir>/<MAC>.sock`,
+/// the MAC as [`Address`] displays it. One socket per pair keeps two fake pairs
+/// apart, and a fake that binds by this same function cannot drift from it.
+#[cfg(feature = "harness")]
+pub fn unix_socket_path(dir: &Path, addr: Address) -> PathBuf {
+    dir.join(format!("{addr}.sock"))
+}
+
+/// The socket a connected client talks over. Both kinds take `&self` for send
+/// and recv, so a read parked in one task never blocks a send from another.
+enum Transport {
+    L2cap(SeqPacket),
+    #[cfg(feature = "harness")]
+    Unix(UnixSeqpacket),
+}
+
+impl Transport {
+    async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::L2cap(s) => s.send(buf).await,
+            #[cfg(feature = "harness")]
+            Self::Unix(s) => s.send(buf).await,
+        }
+    }
+
+    async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::L2cap(s) => s.recv(buf).await,
+            #[cfg(feature = "harness")]
+            Self::Unix(s) => s.recv(buf).await.map(|info| info.bytes_read()),
+        }
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+        match self {
+            Self::L2cap(s) => s.shutdown(how),
+            #[cfg(feature = "harness")]
+            Self::Unix(s) => s.shutdown(how),
+        }
+    }
+}
+
 /// An AAP client connected to a pair of AirPods.
 pub struct Client {
     addr: Address,
-    socket: Option<SeqPacket>,
+    /// Where [`Client::connect`] goes in place of the device, under the harness.
+    #[cfg(feature = "harness")]
+    unix_path: Option<PathBuf>,
+    socket: Option<Transport>,
 }
 
 impl Client {
     /// No I/O happens until [`Client::connect`].
     pub fn new(addr: Address) -> Self {
-        Self { addr, socket: None }
+        Self {
+            addr,
+            #[cfg(feature = "harness")]
+            unix_path: None,
+            socket: None,
+        }
+    }
+
+    /// A client for `addr` that connects to the Unix socket at `path`, where a
+    /// fake answers for the device. No I/O happens until [`Client::connect`].
+    #[cfg(feature = "harness")]
+    pub fn with_unix_socket(addr: Address, path: PathBuf) -> Self {
+        Self {
+            unix_path: Some(path),
+            ..Self::new(addr)
+        }
     }
 
     pub fn is_connected(&self) -> bool {
         self.socket.is_some()
     }
 
-    /// Opens the L2CAP connection on PSM 4097.
+    /// Opens the L2CAP connection on PSM 4097 - or, for a client made with
+    /// `with_unix_socket`, connects to that socket.
     pub async fn connect(&mut self) -> Result<()> {
         anyhow::ensure!(self.socket.is_none(), "already connected");
+
+        // One attempt. The retries below are for L2CAP connect returning before
+        // the ACL link is up, which a Unix socket never does.
+        #[cfg(feature = "harness")]
+        if let Some(path) = &self.unix_path {
+            let socket = UnixSeqpacket::connect(path).await.with_context(|| {
+                format!(
+                    "failed to connect to AirPods at {} over {}",
+                    self.addr,
+                    path.display()
+                )
+            })?;
+            tracing::debug!("AAP connected to {} over {}", self.addr, path.display());
+            self.socket = Some(Transport::Unix(socket));
+            return Ok(());
+        }
 
         let sa = SocketAddr {
             addr: self.addr,
@@ -102,7 +189,7 @@ impl Client {
                             "AAP connected to {} (cid {cid}, attempt {attempt})",
                             self.addr
                         );
-                        self.socket = Some(sock);
+                        self.socket = Some(Transport::L2cap(sock));
                         return Ok(());
                     }
                     tracing::debug!(
@@ -241,5 +328,112 @@ mod tests {
         let c = Client::new(MAC);
         assert!(c.handshake().await.is_err());
         assert!(c.read_packet().await.is_err());
+    }
+
+    /// Over a Unix socket, as the harness runs AAP.
+    #[cfg(feature = "harness")]
+    mod unix_socket {
+        use std::sync::Arc;
+
+        use tokio::time::timeout;
+        use tokio_seqpacket::UnixSeqpacketListener;
+
+        use super::*;
+
+        /// Plenty for any of these, and a hang fails the test instead of CI.
+        const TIMEOUT: Duration = Duration::from_secs(5);
+
+        /// A client connected to a listener in a temporary directory, and the
+        /// listener's end of the connection - the fake's.
+        async fn connected() -> (Client, UnixSeqpacket, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = unix_socket_path(dir.path(), MAC);
+            let mut listener = UnixSeqpacketListener::bind(&path).unwrap();
+            let mut client = Client::with_unix_socket(MAC, path);
+            client.connect().await.unwrap();
+            let peer = listener.accept().await.unwrap();
+            assert!(client.is_connected());
+            (client, peer, dir)
+        }
+
+        /// The next message the peer receives, whole.
+        async fn recv(peer: &UnixSeqpacket) -> Vec<u8> {
+            let mut buf = [0u8; READ_BUF_LEN];
+            let info = timeout(TIMEOUT, peer.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            buf[..info.bytes_read()].to_vec()
+        }
+
+        async fn next_packet(client: &Client) -> Result<Vec<u8>> {
+            timeout(TIMEOUT, client.read_packet()).await.unwrap()
+        }
+
+        #[test]
+        fn the_socket_is_named_after_the_mac() {
+            assert_eq!(
+                unix_socket_path(Path::new("/run/fake"), MAC),
+                Path::new("/run/fake/AA:BB:CC:DD:EE:FF.sock")
+            );
+        }
+
+        /// Each packet is one message, never two run together nor one split:
+        /// the parsers take whole packets, as L2CAP delivers them.
+        #[tokio::test]
+        async fn packets_keep_their_boundaries_in_both_directions() {
+            let (client, peer, _dir) = connected().await;
+
+            client.handshake().await.unwrap();
+            client.request_battery_status().await.unwrap();
+            assert_eq!(recv(&peer).await, PACKET_HANDSHAKE);
+            assert_eq!(recv(&peer).await, PACKET_BATTERY_REQUEST);
+
+            // Left at 83%, discharging.
+            let battery = [
+                0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01, 0x04, 0x01, 0x53, 0x02, 0x01,
+            ];
+            peer.send(&battery).await.unwrap();
+            peer.send(&[0x04, 0x00]).await.unwrap();
+            assert_eq!(next_packet(&client).await.unwrap(), battery);
+            assert_eq!(next_packet(&client).await.unwrap(), [0x04, 0x00]);
+        }
+
+        /// What closing a link relies on: its read loop is parked in recv, and
+        /// only the shutdown gets it out.
+        #[tokio::test]
+        async fn shutdown_wakes_a_parked_read() {
+            let (client, _peer, _dir) = connected().await;
+            let client = Arc::new(client);
+            let parked = tokio::spawn({
+                let client = client.clone();
+                async move { client.read_packet().await }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!parked.is_finished(), "nothing to read yet");
+
+            client.shutdown();
+            let read = timeout(TIMEOUT, parked).await.unwrap().unwrap();
+            assert_eq!(read.unwrap_err().to_string(), "connection closed");
+        }
+
+        /// A fake hanging up reads as the device would: a closed connection,
+        /// not an empty packet for the read loop to spin on.
+        #[tokio::test]
+        async fn a_peer_hanging_up_closes_the_connection() {
+            let (client, peer, _dir) = connected().await;
+            drop(peer);
+            let read = next_packet(&client).await;
+            assert_eq!(read.unwrap_err().to_string(), "connection closed");
+        }
+
+        /// Nothing listening is a failed connection, not a fall back to L2CAP.
+        #[tokio::test]
+        async fn connecting_without_a_listener_fails() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut client = Client::with_unix_socket(MAC, unix_socket_path(dir.path(), MAC));
+            assert!(client.connect().await.is_err());
+            assert!(!client.is_connected());
+        }
     }
 }

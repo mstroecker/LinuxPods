@@ -320,6 +320,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "filedesc"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4960c866d9cf4c48f64f11ef0020c98900d0cb32e9b019c000ed838470daa1d"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -835,6 +844,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-seqpacket",
  "tracing",
  "tracing-subscriber",
  "zbus",
@@ -1339,6 +1349,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "tokio-seqpacket"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bd945d255b714161fa3e358a9b0d2d76b24d2429944e8ed4f2119984daed0ec"
+dependencies = [
+ "filedesc",
+ "libc",
+ "tokio",
 ]
 
 [[package]]
