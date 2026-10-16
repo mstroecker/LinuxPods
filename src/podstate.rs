@@ -27,6 +27,8 @@
 //! broadcast each - is exactly what a BLE spam flood feeds on.
 
 use std::collections::HashMap;
+#[cfg(feature = "harness")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,6 +46,12 @@ use crate::keystore::Keystore;
 /// by the real MAC, these do not rotate, so the map stays bounded by the number of
 /// stored keys.
 pub const BLE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Set and not empty, it names a directory of Unix sockets for
+/// [`Coordinator::new`] to open AAP links to in place of L2CAP, one per pair at
+/// [`aap::client::unix_socket_path`]: a fake answers there (#74).
+#[cfg(feature = "harness")]
+pub const AAP_SOCKET_DIR_ENV: &str = "LINUXPODS_AAP_SOCKET_DIR";
 
 /// Which protocol a reading came over. Its `Display` is what the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,8 +264,8 @@ struct Entry {
 /// One device's AAP connection.
 struct Link {
     /// Shared with the link's read loop, which reads this client and no other.
-    /// bluer's SeqPacket takes &self for both send and recv, so a read parked in
-    /// the loop never blocks a command. A loop that looked its client up by MAC
+    /// Its socket takes &self for both send and recv, so a read parked in the
+    /// loop never blocks a command. A loop that looked its client up by MAC
     /// would, once the link was replaced, read the new socket under the old
     /// identity - which stored one device's key under another's MAC.
     client: Arc<aap::Client>,
@@ -429,6 +437,11 @@ pub struct Coordinator {
     keystore: Mutex<Persistence>,
     /// The latest snapshot, which every subscriber sees - see [`Coordinator::subscribe`].
     updates: watch::Sender<Snapshot>,
+    /// Where [`Coordinator::connect_aap`] opens links in place of L2CAP, under
+    /// the harness. Fixed at construction, so every link of a session goes the
+    /// same way.
+    #[cfg(feature = "harness")]
+    aap_socket_dir: Option<PathBuf>,
 }
 
 impl Coordinator {
@@ -436,16 +449,47 @@ impl Coordinator {
     ///
     /// Without a usable data directory it starts anyway and keeps keys in memory
     /// only: a missing key costs BLE accuracy, nothing more.
+    ///
+    /// Under the harness, `AAP_SOCKET_DIR_ENV` sends AAP to a fake instead - see
+    /// `Coordinator::with_aap_socket_dir`.
     pub async fn new() -> Result<Arc<Self>> {
         let keystore = Keystore::new()
             .inspect_err(|e| tracing::warn!("encryption keys will not be saved: {e:#}"))
             .ok();
+        #[cfg(feature = "harness")]
+        if let Some(dir) = std::env::var_os(AAP_SOCKET_DIR_ENV).filter(|d| !d.is_empty()) {
+            return Ok(Self::with_aap_socket_dir(keystore, dir.into()));
+        }
         Ok(Self::with_keystore(keystore))
     }
 
     /// [`Coordinator::new`] with the keystore given, so tests use their own
     /// directory rather than the user's.
-    fn with_keystore(mut keystore: Option<Keystore>) -> Arc<Self> {
+    fn with_keystore(keystore: Option<Keystore>) -> Arc<Self> {
+        Arc::new(Self::from_keystore(keystore))
+    }
+
+    /// A coordinator whose AAP links go to the Unix sockets in `dir`, one per
+    /// pair at [`aap::client::unix_socket_path`], where a fake answers for each
+    /// device. Never over L2CAP: a pair with no socket there fails to connect.
+    ///
+    /// Takes the directory, and the keystore, rather than reading them from the
+    /// environment, so tests can build several in one process: setting a
+    /// variable is process-wide, and `unsafe` since edition 2024.
+    #[cfg(feature = "harness")]
+    pub fn with_aap_socket_dir(keystore: Option<Keystore>, dir: PathBuf) -> Arc<Self> {
+        tracing::info!(
+            "Harness: AAP links go to {}/<MAC>.sock instead of L2CAP",
+            dir.display()
+        );
+        Arc::new(Self {
+            aap_socket_dir: Some(dir),
+            ..Self::from_keystore(keystore)
+        })
+    }
+
+    /// Loads the keystore's keys into a coordinator that opens links over L2CAP.
+    fn from_keystore(mut keystore: Option<Keystore>) -> Self {
         let mut loaded = HashMap::new();
         if let Some(ks) = &keystore {
             match ks.load() {
@@ -486,11 +530,13 @@ impl Coordinator {
         };
         let (updates, _) = watch::channel(inner.snapshot());
 
-        Arc::new(Self {
+        Self {
             inner: RwLock::new(inner),
             keystore: Mutex::new(persistence),
             updates,
-        })
+            #[cfg(feature = "harness")]
+            aap_socket_dir: None,
+        }
     }
 
     /// Registers a new consumer, which sees the latest snapshot.
@@ -694,7 +740,7 @@ impl Coordinator {
             return Ok(());
         }
 
-        let mut client = aap::Client::new(mac_addr);
+        let mut client = self.aap_client(mac_addr);
         client.connect().await?;
         client
             .handshake()
@@ -756,6 +802,17 @@ impl Coordinator {
              devices without a link continue over BLE"
         );
         Ok(())
+    }
+
+    /// A client for a new link to `mac_addr`: to the device over L2CAP, or under
+    /// the harness to the fake's socket, as decided at construction.
+    fn aap_client(&self, mac_addr: Address) -> aap::Client {
+        #[cfg(feature = "harness")]
+        if let Some(dir) = &self.aap_socket_dir {
+            let path = aap::client::unix_socket_path(dir, mac_addr);
+            return aap::Client::with_unix_socket(mac_addr, path);
+        }
+        aap::Client::new(mac_addr)
     }
 
     /// Clones a link's client out so callers never hold the lock across an
@@ -1082,6 +1139,8 @@ mod tests {
                 saved: HashMap::new(),
             }),
             updates,
+            #[cfg(feature = "harness")]
+            aap_socket_dir: None,
         });
         (coordinator, dir)
     }
@@ -1814,6 +1873,101 @@ mod tests {
             connected_macs: connected.to_vec(),
             known_keys: known.to_vec(),
             device_names: HashMap::new(),
+        }
+    }
+
+    /// Links over a Unix socket, as the harness opens them.
+    #[cfg(feature = "harness")]
+    mod unix_socket {
+        use tokio::time::timeout;
+        use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener};
+
+        use super::*;
+
+        /// Plenty for any of these, and a hang fails the test instead of CI.
+        const TIMEOUT: Duration = Duration::from_secs(5);
+
+        /// What `connect_aap` sends, in order: handshake, battery notifications,
+        /// special features, proximity keys. Spelled out rather than taken from
+        /// the client, so a change on the wire shows here.
+        const SEQUENCE: [&[u8]; 4] = [
+            &[
+                0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00,
+            ],
+            &[0x04, 0x00, 0x04, 0x00, 0x0F, 0x00, 0xFF, 0xFF, 0xFF, 0xFF],
+            &[
+                0x04, 0x00, 0x04, 0x00, 0x4D, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+            &[0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00],
+        ];
+
+        /// A battery packet: left at 83%, discharging.
+        const BATTERY: [u8; 12] = [
+            0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01, 0x04, 0x01, 0x53, 0x02, 0x01,
+        ];
+
+        /// A coordinator opening links to the sockets in a temporary directory,
+        /// its keys kept there too, and a fake listening there for MAC.
+        fn harnessed() -> (Arc<Coordinator>, UnixSeqpacketListener, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let coordinator =
+                Coordinator::with_aap_socket_dir(Some(keystore_in(&dir)), dir.path().to_path_buf());
+            let path = aap::client::unix_socket_path(dir.path(), MAC);
+            let listener = UnixSeqpacketListener::bind(path).unwrap();
+            (coordinator, listener, dir)
+        }
+
+        /// The next message the fake receives, whole.
+        async fn recv(fake: &UnixSeqpacket) -> Vec<u8> {
+            let mut buf = [0u8; 1024];
+            let info = timeout(TIMEOUT, fake.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            buf[..info.bytes_read()].to_vec()
+        }
+
+        /// A link to a fake runs as one to the device: the handshake sequence
+        /// goes out, the read loop takes what comes back, and the fake hanging
+        /// up takes the link down.
+        #[tokio::test]
+        async fn connect_aap_handshakes_and_starts_the_read_loop() {
+            let (coordinator, mut listener, _dir) = harnessed();
+            let (connected, fake) = tokio::join!(coordinator.connect_aap(MAC), listener.accept());
+            connected.unwrap();
+            let fake = fake.unwrap();
+            for (i, packet) in SEQUENCE.into_iter().enumerate() {
+                assert_eq!(recv(&fake).await, packet, "packet {i} of the sequence");
+            }
+
+            let mut rx = coordinator.subscribe();
+            assert!(rx.borrow_and_update().is_connected(MAC));
+            fake.send(&BATTERY).await.unwrap();
+            let state = timeout(TIMEOUT, rx.wait_for(|s| s.states.contains_key(&MAC)))
+                .await
+                .unwrap()
+                .unwrap()
+                .states[&MAC]
+                .clone();
+            assert_eq!(state.source, DataSource::Aap);
+            assert_eq!(state.left_battery, Some(83));
+
+            drop(fake);
+            timeout(TIMEOUT, rx.wait_for(|s| !s.is_connected(MAC)))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(coordinator.inner.read().await.links.is_empty());
+        }
+
+        /// Each pair has a socket of its own. BB has none, though MAC does, and
+        /// fails to connect rather than fall back to L2CAP and real AirPods.
+        #[tokio::test]
+        async fn connect_aap_without_a_listener_fails() {
+            let (coordinator, _listener, _dir) = harnessed();
+            assert!(coordinator.connect_aap(BB).await.is_err());
+            assert!(coordinator.subscribe().borrow().connected_macs.is_empty());
         }
     }
 }
