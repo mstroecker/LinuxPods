@@ -35,6 +35,7 @@ pub fn activate(
 ) -> adw::ApplicationWindow {
     let mut updates = coordinator.subscribe();
     let win = adw::ApplicationWindow::new(app);
+    win.set_widget_name("main-window");
     win.set_title(Some("LinuxPods"));
     // Tall enough for the whole Control page without scrolling.
     win.set_default_size(420, 680);
@@ -244,6 +245,7 @@ fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) {
     quit_section.append(Some("_Quit"), Some("app.quit"));
     menu.append_section(None, &quit_section);
     let menu_button = gtk::MenuButton::builder()
+        .name("main-menu")
         .icon_name("open-menu-symbolic")
         .menu_model(&menu)
         .primary(true)
@@ -254,6 +256,7 @@ fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) {
     // make, the way a view switcher would; with a single device the header shows
     // the app name as usual.
     let window_title = adw::WindowTitle::new("LinuxPods", "");
+    window_title.set_widget_name("window-title");
     control
         .device_dropdown
         .bind_property("visible", &window_title, "visible")
@@ -278,6 +281,7 @@ fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) {
 /// Built on demand: nothing in it changes while it is open.
 fn show_about(win: &adw::ApplicationWindow) {
     adw::AboutDialog::builder()
+        .name("about")
         .application_name("LinuxPods")
         .application_icon(APP_ICON)
         .comments("Manage Apple AirPods on Linux")

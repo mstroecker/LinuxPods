@@ -3,6 +3,11 @@
 //! Updates arrive from the coordinator over a watch channel consumed on the GTK
 //! main context. That is the only path into the UI: GTK types are !Send, so a
 //! background task can never touch a widget directly.
+//!
+//! The controls, and the labels a test reads, carry an ID set with
+//! `set_widget_name`, for the test harness (#74) to find them by. Every build
+//! sets them: they cost nothing, and a harness build then lays out the same
+//! widgets as the one users run.
 
 use std::time::Duration;
 
