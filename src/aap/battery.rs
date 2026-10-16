@@ -22,6 +22,17 @@ impl From<u8> for Component {
     }
 }
 
+impl From<Component> for u8 {
+    fn from(c: Component) -> Self {
+        match c {
+            Component::Right => 2,
+            Component::Left => 4,
+            Component::Case => 8,
+            Component::Unknown(other) => other,
+        }
+    }
+}
+
 impl std::fmt::Display for Component {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -48,6 +59,17 @@ impl From<u8> for Status {
             2 => Self::Discharging,
             4 => Self::Disconnected,
             other => Self::Unknown(other),
+        }
+    }
+}
+
+impl From<Status> for u8 {
+    fn from(s: Status) -> Self {
+        match s {
+            Status::Charging => 1,
+            Status::Discharging => 2,
+            Status::Disconnected => 4,
+            Status::Unknown(other) => other,
         }
     }
 }
@@ -92,9 +114,17 @@ pub enum BatteryParseError {
     Incomplete(usize),
 }
 
+/// Everything before the count byte.
+const HEADER: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x04, 0x00];
+
+/// What [`battery_packet`] writes for a level of `None`. Anything above 100
+/// reads as unavailable; which value the device itself sends is not recorded.
+#[cfg(any(test, feature = "harness"))]
+const LEVEL_UNAVAILABLE: u8 = 0xFF;
+
 /// Header check: 04 00 04 00 04 00 followed by a count byte.
 pub fn is_battery_packet(packet: &[u8]) -> bool {
-    packet.len() >= 7 && packet[..6] == [0x04, 0x00, 0x04, 0x00, 0x04, 0x00]
+    packet.len() >= 7 && packet[..6] == HEADER
 }
 
 pub fn parse_battery_packet(packet: &[u8]) -> Result<BatteryInfo, BatteryParseError> {
@@ -132,16 +162,100 @@ pub fn parse_battery_packet(packet: &[u8]) -> Result<BatteryInfo, BatteryParseEr
     Ok(info)
 }
 
+/// Builds the packet [`parse_battery_packet`] reads, one entry per battery in
+/// the order given. The device lists right, left, case.
+///
+/// The level goes out as given, so a test can write one above 100; `None` goes
+/// out as 0xFF.
+///
+/// # Panics
+///
+/// With more than 255 batteries, which the count byte cannot hold.
+#[cfg(any(test, feature = "harness"))]
+pub fn battery_packet(batteries: &[Battery]) -> Vec<u8> {
+    let count = u8::try_from(batteries.len()).expect("at most 255 batteries in a packet");
+    let mut packet = HEADER.to_vec();
+    packet.push(count);
+    for battery in batteries {
+        packet.extend_from_slice(&[
+            battery.component.into(),
+            0x01,
+            battery.level.unwrap_or(LEVEL_UNAVAILABLE),
+            battery.status.into(),
+            0x01,
+        ]);
+    }
+    packet
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Entries as the wire has them - component, level, status - through the
+    /// builder.
     fn packet(entries: &[(u8, u8, u8)]) -> Vec<u8> {
-        let mut p = vec![0x04, 0x00, 0x04, 0x00, 0x04, 0x00, entries.len() as u8];
-        for (component, level, status) in entries {
-            p.extend_from_slice(&[*component, 0x01, *level, *status, 0x01]);
+        let batteries: Vec<Battery> = entries
+            .iter()
+            .map(|&(component, level, status)| Battery {
+                component: component.into(),
+                level: Some(level),
+                status: status.into(),
+            })
+            .collect();
+        battery_packet(&batteries)
+    }
+
+    /// The AirPods Pro 2 example in LibrePods' `docs/AAP Definitions.md`, byte
+    /// for byte - read by its table of components, where 02 is the right pod.
+    #[test]
+    fn builds_the_librepods_example() {
+        let battery = |component, level, status| Battery {
+            component,
+            level: Some(level),
+            status,
+        };
+        let packet = battery_packet(&[
+            battery(Component::Right, 100, Status::Discharging),
+            battery(Component::Left, 99, Status::Charging),
+            battery(Component::Case, 17, Status::Discharging),
+        ]);
+        let hex: Vec<String> = packet.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex.join(" "),
+            "04 00 04 00 04 00 03 02 01 64 02 01 04 01 63 01 01 08 01 11 02 01"
+        );
+    }
+
+    #[test]
+    fn round_trips_through_the_parser() {
+        let info = BatteryInfo {
+            right: Some(Battery {
+                component: Component::Right,
+                level: Some(57),
+                status: Status::Charging,
+            }),
+            left: Some(Battery {
+                component: Component::Left,
+                level: None,
+                status: Status::Disconnected,
+            }),
+            case: Some(Battery {
+                component: Component::Case,
+                level: Some(0),
+                status: Status::Discharging,
+            }),
+        };
+        let packet = battery_packet(&[info.right.unwrap(), info.left.unwrap(), info.case.unwrap()]);
+        assert_eq!(parse_battery_packet(&packet), Ok(info));
+    }
+
+    #[test]
+    fn wire_values_round_trip() {
+        for v in 0..=u8::MAX {
+            assert_eq!(u8::from(Component::from(v)), v);
+            assert_eq!(u8::from(Status::from(v)), v);
         }
-        p
     }
 
     #[test]

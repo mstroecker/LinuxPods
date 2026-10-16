@@ -213,6 +213,120 @@ pub fn decode_battery(nibble: u8) -> Option<u8> {
     }
 }
 
+/// The inverse of [`decode_battery`]. Levels round down to their 10% step,
+/// which is how captured advertisements compare with their decrypted levels:
+/// 58% advertised as 50%, 14% as 10%.
+#[cfg(any(test, feature = "harness"))]
+fn encode_battery(level: Option<u8>) -> u8 {
+    match level {
+        None => 0xF,
+        Some(level) if level >= 100 => 0xA,
+        Some(level) => level / 10,
+    }
+}
+
+/// The cleartext of a proximity pairing advertisement, field by field: what
+/// [`Cleartext::to_bytes`] encodes and [`parse_proximity_data`] reads back.
+#[cfg(any(test, feature = "harness"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cleartext {
+    /// Apple's product ID - see [`decode_model_name`].
+    pub product_id: u16,
+    pub primary: PodSide,
+    /// Whether the pod sending the advertisement is in the case: status bit 6.
+    /// With the primary pod, it decides which bit carries which ear.
+    pub this_in_case: bool,
+    /// Percent, advertised in 10% steps.
+    pub left_battery: Option<u8>,
+    pub right_battery: Option<u8>,
+    pub case_battery: Option<u8>,
+    pub left_charging: bool,
+    pub right_charging: bool,
+    pub case_charging: bool,
+    pub left_in_ear: bool,
+    pub right_in_ear: bool,
+    /// `None` while the earbuds are out of the case, as [`ProximityData`] has it.
+    pub lid_open: Option<bool>,
+    pub color: u8,
+    pub connection_state: u8,
+}
+
+#[cfg(any(test, feature = "harness"))]
+impl Cleartext {
+    /// Payload bytes 0-8, everything before the encrypted portion, laid out the
+    /// way [`parse_proximity_data`] reads them - flip and ear swap included.
+    /// Status bits nobody has explained are left clear.
+    pub fn to_bytes(&self) -> [u8; 9] {
+        let primary_left = self.primary == PodSide::Left;
+        let is_flipped = !primary_left;
+        let xor_factor = primary_left != self.this_in_case;
+
+        let (bit3_in_ear, bit1_in_ear) = if xor_factor {
+            (self.right_in_ear, self.left_in_ear)
+        } else {
+            (self.left_in_ear, self.right_in_ear)
+        };
+        let status = u8::from(self.this_in_case) << 6
+            | u8::from(primary_left) << 5
+            | u8::from(bit3_in_ear) << 3
+            | u8::from(bit1_in_ear) << 1;
+
+        // The primary pod takes the high battery nibble and charging bit 4.
+        let (high, low) = if is_flipped {
+            (self.right_battery, self.left_battery)
+        } else {
+            (self.left_battery, self.right_battery)
+        };
+        let (bit5_charging, bit4_charging) = if is_flipped {
+            (self.left_charging, self.right_charging)
+        } else {
+            (self.right_charging, self.left_charging)
+        };
+        let charging = u8::from(self.case_charging) << 6
+            | u8::from(bit5_charging) << 5
+            | u8::from(bit4_charging) << 4
+            | encode_battery(self.case_battery);
+
+        // 0x1 in the high nibble with the earbuds out, 0x5 with them in and bit
+        // 3 set for a closed lid. The low bits read 001 in most captures.
+        let lid = match self.lid_open {
+            None => 0x11,
+            Some(true) => 0x51,
+            Some(false) => 0x59,
+        };
+
+        let [product_low, product_high] = self.product_id.to_le_bytes();
+        [
+            PAYLOAD_PREFIX,
+            product_low,
+            product_high,
+            status,
+            encode_battery(high) << 4 | encode_battery(low),
+            charging,
+            lid,
+            self.color,
+            self.connection_state,
+        ]
+    }
+}
+
+/// The value of the Apple (0x004C) entry in a device's `ManufacturerData`: the
+/// message type, the payload length, then `cleartext` and `encrypted` as the
+/// payload. This is what [`parse_proximity_data`] takes.
+///
+/// # Panics
+///
+/// With a payload longer than 255 bytes, which the length byte cannot hold.
+#[cfg(any(test, feature = "harness"))]
+pub fn proximity_message(cleartext: &[u8], encrypted: &[u8]) -> Vec<u8> {
+    let length =
+        u8::try_from(cleartext.len() + encrypted.len()).expect("a payload of at most 255 bytes");
+    let mut data = vec![PROXIMITY_TYPE, length];
+    data.extend_from_slice(cleartext);
+    data.extend_from_slice(encrypted);
+    data
+}
+
 pub fn decode_color(color: u8) -> String {
     match color {
         0x00 => "White".into(),
@@ -276,6 +390,7 @@ pub fn decode_model_name(product_id: u16) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ble::decrypt::{CONNECTED_SUFFIX, Plaintext};
 
     /// Builds a minimal well-formed advertisement with a controllable status byte.
     /// The lid byte defaults to a captured in-case, lid-open value.
@@ -284,7 +399,7 @@ mod tests {
     }
 
     fn advert_with_lid(status: u8, battery: u8, charging: u8, lid: u8) -> Vec<u8> {
-        let payload = vec![
+        let cleartext = [
             0x01,     // 0: prefix
             0x27,     // 1: product ID, low byte
             0x20,     // 2: product ID, high byte -> 0x2027, AirPods Pro 3
@@ -294,11 +409,134 @@ mod tests {
             lid,      // 6: in-case indicator + lid state
             0x00,     // 7: colour
             0x05,     // 8: connection state -> Music
-            0x00,     // 9: first byte of the encrypted portion
         ];
-        let mut v = vec![PROXIMITY_TYPE, payload.len() as u8];
-        v.extend_from_slice(&payload);
-        v
+        // Only the first byte of the encrypted portion: the shortest payload the
+        // parser takes.
+        proximity_message(&cleartext, &[0x00])
+    }
+
+    /// A [`Cleartext`] of everything [`ProximityData`] says.
+    fn cleartext_of(pd: &ProximityData) -> Cleartext {
+        Cleartext {
+            product_id: pd.product_id,
+            primary: pd.primary_pod(),
+            this_in_case: pd.status & 0x40 != 0,
+            left_battery: pd.left_battery,
+            right_battery: pd.right_battery,
+            case_battery: pd.case_battery,
+            left_charging: pd.left_charging,
+            right_charging: pd.right_charging,
+            case_charging: pd.case_charging,
+            left_in_ear: pd.left_in_ear,
+            right_in_ear: pd.right_in_ear,
+            lid_open: pd.lid_open,
+            color: pd.color,
+            connection_state: pd.connection_state,
+        }
+    }
+
+    /// What the parser makes of `cleartext`, as a [`Cleartext`] again.
+    fn reparsed(cleartext: &Cleartext) -> Cleartext {
+        let data = proximity_message(&cleartext.to_bytes(), &[0; ENCRYPTED_LEN]);
+        cleartext_of(&parse_proximity_data(&data).unwrap())
+    }
+
+    /// A decrypted payload carrying these batteries, each as level and charging:
+    /// the primary pod, the other, the case.
+    fn decrypted(primary: (u8, bool), secondary: (u8, bool), case: (u8, bool)) -> [u8; 16] {
+        Plaintext {
+            header: 0x10,
+            primary_battery: Some(primary.0),
+            primary_charging: primary.1,
+            secondary_battery: Some(secondary.0),
+            secondary_charging: secondary.1,
+            case_battery: Some(case.0),
+            case_charging: case.1,
+            mac_suffix: CONNECTED_SUFFIX,
+            tail: [0; 4],
+        }
+        .to_bytes()
+    }
+
+    /// Every combination of primary pod, the in-case bit, ears, charging and lid
+    /// comes back as it went in: the flip and the ear swap undo each other.
+    #[test]
+    fn cleartext_round_trips_through_the_parser() {
+        for primary in [PodSide::Left, PodSide::Right] {
+            for this_in_case in [false, true] {
+                for lid_open in [None, Some(true), Some(false)] {
+                    for bits in 0..32u8 {
+                        let bit = |n: u8| bits & (1 << n) != 0;
+                        let cleartext = Cleartext {
+                            product_id: 0x2024,
+                            primary,
+                            this_in_case,
+                            left_battery: Some(80),
+                            right_battery: Some(30),
+                            case_battery: None,
+                            left_charging: bit(0),
+                            right_charging: bit(1),
+                            case_charging: bit(2),
+                            left_in_ear: bit(3),
+                            right_in_ear: bit(4),
+                            lid_open,
+                            color: 0x01,
+                            connection_state: 0x04,
+                        };
+                        assert_eq!(reparsed(&cleartext), cleartext);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn advertises_batteries_in_10_percent_steps() {
+        for (level, advertised) in [
+            (None, None),
+            (Some(0), Some(0)),
+            (Some(9), Some(0)),
+            (Some(58), Some(50)),
+            (Some(99), Some(90)),
+            (Some(100), Some(100)),
+        ] {
+            let cleartext = Cleartext {
+                left_battery: level,
+                right_battery: level,
+                case_battery: level,
+                ..cleartext_of(&parse_proximity_data(&advert(0x20, 0x00, 0x00)).unwrap())
+            };
+            let back = reparsed(&cleartext);
+            assert_eq!(back.left_battery, advertised, "{level:?}");
+            assert_eq!(back.right_battery, advertised, "{level:?}");
+            assert_eq!(back.case_battery, advertised, "{level:?}");
+        }
+    }
+
+    /// The builder against hardware: the cleartext of captured advertisements -
+    /// the ones in `examples/decrypt_probe.rs` - parsed and rebuilt comes back
+    /// byte for byte, but for the bits nobody has explained: status bits 0, 2,
+    /// 4 and 7, charging bit 7 and the lid byte's low three bits.
+    #[test]
+    fn rebuilds_captured_advertisements() {
+        const KNOWN: [u8; 9] = [0xFF, 0xFF, 0xFF, 0x6A, 0xFF, 0x7F, 0xF8, 0xFF, 0xFF];
+        for captured in [
+            [0x01, 0x27, 0x20, 0x05, 0x66, 0xf3, 0x51, 0x00, 0x00],
+            [0x01, 0x27, 0x20, 0x14, 0x77, 0xf5, 0x59, 0x00, 0x00],
+            [0x01, 0x27, 0x20, 0x0b, 0x78, 0x8f, 0x11, 0x00, 0x04],
+            [0x01, 0x24, 0x20, 0x25, 0xaa, 0xf1, 0x51, 0x00, 0x00],
+            [0x01, 0x24, 0x20, 0x34, 0xaa, 0xf1, 0x51, 0x00, 0x00],
+        ] {
+            let data = proximity_message(&captured, &[0; ENCRYPTED_LEN]);
+            let rebuilt = cleartext_of(&parse_proximity_data(&data).unwrap()).to_bytes();
+            for (i, mask) in KNOWN.iter().enumerate() {
+                assert_eq!(
+                    rebuilt[i] & mask,
+                    captured[i] & mask,
+                    "byte {i} of {captured:02x?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -373,9 +611,7 @@ mod tests {
                 "AirPods Pro (2nd gen, USB-C)",
             ),
         ] {
-            let mut data = vec![PROXIMITY_TYPE, (header.len() + ENCRYPTED_LEN) as u8];
-            data.extend_from_slice(&header);
-            data.extend_from_slice(&[0; ENCRYPTED_LEN]);
+            let data = proximity_message(&header, &[0; ENCRYPTED_LEN]);
 
             let pd = parse_proximity_data(&data).unwrap();
             assert_eq!(pd.product_id, product_id);
@@ -421,12 +657,9 @@ mod tests {
     #[test]
     fn decrypted_data_overrides_coarse_levels() {
         let mut pd = parse_proximity_data(&advert(0b0010_0000, 0x87, 0x00)).unwrap();
-        let mut dec = [0u8; 16];
-        dec[4] = 0x2D;
-        dec[1] = 0x80 | 63; // first pod: charging, 63%
-        dec[2] = 41; // second pod: 41%
-        dec[3] = 77; // case: 77%
-        pd.add_decrypted_data(&dec).unwrap();
+        // First pod charging at 63%, second pod 41%, case 77%.
+        pd.add_decrypted_data(&decrypted((63, true), (41, false), (77, false)))
+            .unwrap();
 
         assert!(pd.has_decrypted);
         assert_eq!(pd.left_battery, Some(63));
@@ -439,12 +672,8 @@ mod tests {
     #[test]
     fn decrypted_data_respects_flip() {
         let mut pd = parse_proximity_data(&advert(0b0000_0000, 0x87, 0x00)).unwrap();
-        let mut dec = [0u8; 16];
-        dec[4] = 0x2D;
-        dec[1] = 63;
-        dec[2] = 41;
-        dec[3] = 77;
-        pd.add_decrypted_data(&dec).unwrap();
+        pd.add_decrypted_data(&decrypted((63, false), (41, false), (77, false)))
+            .unwrap();
         // Flipped: byte1 is the right pod.
         assert_eq!(pd.right_battery, Some(63));
         assert_eq!(pd.left_battery, Some(41));
@@ -453,11 +682,46 @@ mod tests {
     #[test]
     fn rejects_invalid_decrypted_levels() {
         let mut pd = parse_proximity_data(&advert(0b0010_0000, 0x87, 0x00)).unwrap();
-        let mut dec = [0u8; 16];
-        dec[4] = 0x2D;
-        dec[1] = 127; // > 100 -> unknown
-        pd.add_decrypted_data(&dec).unwrap();
+        // 127 > 100 -> unknown
+        pd.add_decrypted_data(&decrypted((127, false), (0, false), (0, false)))
+            .unwrap();
         assert_eq!(pd.left_battery, None);
+    }
+
+    /// The decrypted batteries as the builder writes them, read back on both
+    /// sides of the flip.
+    #[test]
+    fn decrypted_batteries_round_trip() {
+        for (status, primary_is_left) in [(0b0010_0000, true), (0b0000_0000, false)] {
+            let mut pd = parse_proximity_data(&advert(status, 0x87, 0x00)).unwrap();
+            let plain = Plaintext {
+                header: 0x00,
+                primary_battery: Some(12),
+                primary_charging: true,
+                secondary_battery: None,
+                secondary_charging: false,
+                case_battery: Some(100),
+                case_charging: true,
+                mac_suffix: CONNECTED_SUFFIX,
+                tail: [0; 4],
+            };
+            pd.add_decrypted_data(&plain.to_bytes()).unwrap();
+
+            let (primary, secondary) = if primary_is_left {
+                (
+                    (pd.left_battery, pd.left_charging),
+                    (pd.right_battery, pd.right_charging),
+                )
+            } else {
+                (
+                    (pd.right_battery, pd.right_charging),
+                    (pd.left_battery, pd.left_charging),
+                )
+            };
+            assert_eq!(primary, (Some(12), true));
+            assert_eq!(secondary, (None, false));
+            assert_eq!((pd.case_battery, pd.case_charging), (Some(100), true));
+        }
     }
 
     #[test]
