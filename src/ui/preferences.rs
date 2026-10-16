@@ -22,8 +22,11 @@ pub(super) fn create_preferences_dialog(
     // Neither setting exists yet: the app always connects, and nothing watches
     // for a low battery.
     let settings_group = adw::PreferencesGroup::builder().title("General").build();
-    for title in ["Auto-connect", "Battery notifications"] {
-        settings_group.add(&unavailable_row(title));
+    for (id, title) in [
+        ("auto-connect", "Auto-connect"),
+        ("battery-notifications", "Battery notifications"),
+    ] {
+        settings_group.add(&unavailable_row(id, title));
     }
     page.add(&settings_group);
 
@@ -33,7 +36,9 @@ pub(super) fn create_preferences_dialog(
         .build();
     page.add(&dev_group);
 
-    let dialog = adw::PreferencesDialog::new();
+    let dialog = adw::PreferencesDialog::builder()
+        .name("preferences")
+        .build();
     dialog.add(&page);
 
     let devices = DeviceRows {
@@ -50,7 +55,9 @@ pub(super) fn create_preferences_dialog(
 /// neither claims a state nor takes a click, and nothing listens to the switch.
 /// Once a feature lands, its state comes with the snapshot and a change goes
 /// out as a command, as noise control's does.
-pub(super) fn unavailable_row(title: &str) -> adw::ActionRow {
+///
+/// `id` names the switch, so that a test can find it and see it refuse.
+pub(super) fn unavailable_row(id: &str, title: &str) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(title)
         .subtitle("Not available yet")
@@ -58,6 +65,7 @@ pub(super) fn unavailable_row(title: &str) -> adw::ActionRow {
         .build();
     row.add_suffix(
         &gtk::Switch::builder()
+            .name(id)
             .active(false)
             .valign(gtk::Align::Center)
             .build(),
@@ -126,19 +134,25 @@ impl DeviceRow {
     /// Builds the row, with its Request Keys button wired to the coordinator.
     fn new(mac: Address, coordinator: &Arc<Coordinator>, runtime: &tokio::runtime::Handle) -> Self {
         // Title and subtitle carry device data, which must never be read as
-        // Pango markup - libadwaita's default.
+        // Pango markup - libadwaita's default. The IDs end in the MAC: there is
+        // a row per device.
         let row = adw::ActionRow::builder()
+            .name(format!("device-{mac}"))
             .title(mac.to_string())
             .use_markup(false)
             .build();
 
-        let status_label = gtk::Label::new(Some("Idle"));
+        let status_label = gtk::Label::builder()
+            .name(format!("device-status-{mac}"))
+            .label("Idle")
+            .build();
         status_label.add_css_class("dim-label");
         status_label.set_valign(gtk::Align::Center);
         status_label.set_margin_end(8);
         row.add_suffix(&status_label);
 
         let request_button = gtk::Button::builder()
+            .name(format!("request-keys-{mac}"))
             .label("Request Keys")
             .valign(gtk::Align::Center)
             .sensitive(false)

@@ -127,6 +127,7 @@ pub(super) fn create_control_view() -> ControlView {
     // sits, so the explanation lives in a tooltip.
     let device_list = gtk::StringList::new(&[]);
     let device_dropdown = gtk::DropDown::builder()
+        .name("device-dropdown")
         .model(&device_list)
         .tooltip_text("Which AirPods these readings are from")
         .visible(false)
@@ -146,7 +147,14 @@ pub(super) fn create_control_view() -> ControlView {
         .valign(gtk::Align::Start)
         .build();
 
-    let [left, right, case] = BATTERY_IMAGES.map(|name| {
+    // The percentage, which is what a test reads, carries the column's ID; its
+    // bar and icons extend it.
+    let [left, right, case] = [
+        ("battery-left", BATTERY_IMAGES[0]),
+        ("battery-right", BATTERY_IMAGES[1]),
+        ("battery-case", BATTERY_IMAGES[2]),
+    ]
+    .map(|(id, name)| {
         let column_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(10)
@@ -158,6 +166,7 @@ pub(super) fn create_control_view() -> ControlView {
         column_box.append(&image);
 
         let level = gtk::LevelBar::new();
+        level.set_widget_name(&format!("{id}-level"));
         level.set_mode(gtk::LevelBarMode::Continuous);
         level.set_value(0.0);
         level.set_size_request(100, 20);
@@ -165,12 +174,14 @@ pub(super) fn create_control_view() -> ControlView {
 
         // The percentage, then what the pod is doing. Symbolic icons rather than
         // emoji, so they take the theme's colour and dim along with the text.
-        let label = gtk::Label::new(Some("--"));
+        let label = gtk::Label::builder().name(id).label("--").build();
         let charging = gtk::Image::builder()
+            .name(format!("{id}-charging"))
             .tooltip_text("Charging")
             .visible(false)
             .build();
         let in_ear = gtk::Image::builder()
+            .name(format!("{id}-in-ear"))
             .icon_name(IN_EAR_ICON)
             .tooltip_text("In ear")
             .visible(false)
@@ -197,12 +208,18 @@ pub(super) fn create_control_view() -> ControlView {
 
     control_box.append(&battery_box);
 
-    let status_label = gtk::Label::new(Some("Searching for AirPods…"));
+    let status_label = gtk::Label::builder()
+        .name("status")
+        .label("Searching for AirPods…")
+        .build();
     status_label.add_css_class("dim-label");
     status_label.set_margin_top(10);
     control_box.append(&status_label);
 
-    let last_seen_label = gtk::Label::builder().visible(false).build();
+    let last_seen_label = gtk::Label::builder()
+        .name("last-seen")
+        .visible(false)
+        .build();
     last_seen_label.add_css_class("dim-label");
     last_seen_label.add_css_class("caption");
     control_box.append(&last_seen_label);
@@ -217,6 +234,7 @@ pub(super) fn create_control_view() -> ControlView {
 
     // Noise Control
     let noise_control_group = adw::PreferencesGroup::builder()
+        .name("noise-control")
         .title("Noise Control")
         .build();
 
@@ -246,8 +264,11 @@ pub(super) fn create_control_view() -> ControlView {
 
         // With an action and a target, a check button draws as a radio and is
         // active exactly when the action's state equals its target - which is
-        // what groups the four, so no set_group is needed.
-        let radio_button = gtk::CheckButton::new();
+        // what groups the four, so no set_group is needed. The target names the
+        // button too, so a test presses the mode it means whatever its label.
+        let radio_button = gtk::CheckButton::builder()
+            .name(format!("noise-{}", noise_target(mode)))
+            .build();
         radio_button
             .set_detailed_action_name(&format!("win.{NOISE_ACTION}::{}", noise_target(mode)));
 
@@ -261,10 +282,13 @@ pub(super) fn create_control_view() -> ControlView {
     // its row stays greyed out whatever the connection: on AAP, a live switch
     // would claim a setting the AirPods never received.
     let features_group = adw::PreferencesGroup::builder().title("Features").build();
-    features_group.add(&unavailable_row("Conversation Awareness"));
+    features_group.add(&unavailable_row(
+        "conversation-awareness",
+        "Conversation Awareness",
+    ));
     page.add(&features_group);
 
-    let content = gtk::Stack::new();
+    let content = gtk::Stack::builder().name("content").build();
     content.add_named(&page, Some("device"));
     content.add_named(&create_empty_state(), Some("empty"));
 
@@ -285,6 +309,7 @@ pub(super) fn create_control_view() -> ControlView {
 /// show. Connecting is the whole setup, so there is no button.
 fn create_empty_state() -> adw::StatusPage {
     adw::StatusPage::builder()
+        .name("empty-state")
         .icon_name(APP_SYMBOLIC_ICON)
         .title("Connect Your AirPods")
         .description(
