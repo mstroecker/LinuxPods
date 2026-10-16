@@ -8,19 +8,24 @@
 
 use std::time::Duration;
 
+use anyhow::Context;
+use bluer::Address;
 use linuxpods::podstate::Coordinator;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    let mac = std::env::args().nth(1).expect("usage: key_request <MAC>");
+    let arg = std::env::args().nth(1).expect("usage: key_request <MAC>");
+    let mac: Address = arg
+        .parse()
+        .with_context(|| format!("not a MAC address: {arg}"))?;
     let coordinator = Coordinator::new().await?;
 
     println!("connecting AAP to {mac}...");
-    coordinator.connect_aap(&mac).await?;
+    coordinator.connect_aap(mac).await?;
     println!("connected");
 
     // Let the read loop park in recv.
@@ -29,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("requesting encryption keys (read loop is parked in recv)...");
     match tokio::time::timeout(
         Duration::from_secs(5),
-        coordinator.request_encryption_keys(&mac),
+        coordinator.request_encryption_keys(mac),
     )
     .await
     {

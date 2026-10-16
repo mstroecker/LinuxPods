@@ -12,6 +12,8 @@
 
 use std::time::Duration;
 
+use anyhow::Context;
+use bluer::Address;
 use linuxpods::aap::noise::{NoiseMode, is_noise_mode_packet, parse_noise_mode_packet, set_packet};
 use linuxpods::aap::{Client, is_battery_packet, parse_battery_packet};
 
@@ -83,7 +85,7 @@ async fn listen(client: &Client, window: Duration, prefix: &str) -> usize {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -91,9 +93,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let mac = std::env::args().nth(1).expect("usage: noise_probe <MAC>");
+    let arg = std::env::args().nth(1).expect("usage: noise_probe <MAC>");
+    let mac: Address = arg
+        .parse()
+        .with_context(|| format!("not a MAC address: {arg}"))?;
 
-    let mut client = Client::new(&mac)?;
+    let mut client = Client::new(mac);
     println!("connecting AAP to {mac}...");
     client.connect().await?;
     client.handshake().await?;

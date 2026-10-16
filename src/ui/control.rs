@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 
 use adw::prelude::*;
+use bluer::Address;
 use gtk::{gio, glib};
 
 use super::preferences::unavailable_row;
@@ -94,7 +95,7 @@ pub struct ControlView {
     pub device_dropdown: gtk::DropDown,
     pub device_list: gtk::StringList,
     /// MAC per row in `device_list`, kept parallel so the display string can differ.
-    pub device_macs: RefCell<Vec<String>>,
+    pub device_macs: RefCell<Vec<Address>>,
     /// The labels currently in the model. Kept alongside the MACs so a rename or a
     /// newly decoded model name refreshes the switcher even though the MAC list is
     /// unchanged.
@@ -310,7 +311,7 @@ pub(super) fn noise_mode_from_target(target: &str) -> Option<NoiseMode> {
 }
 
 /// Repopulates the switcher, preserving the current selection where possible.
-pub(super) fn sync_device_list(view: &ControlView, macs: &[&str], snapshot: &Snapshot) {
+pub(super) fn sync_device_list(view: &ControlView, macs: &[Address], snapshot: &Snapshot) {
     let labels = device_labels(macs, snapshot);
     if *view.device_macs.borrow() == macs && *view.device_labels.borrow() == labels {
         return; // nothing changed; leave the selection alone
@@ -320,7 +321,7 @@ pub(super) fn sync_device_list(view: &ControlView, macs: &[&str], snapshot: &Sna
 
     let old_len = view.device_list.n_items();
     view.device_list.splice(0, old_len, &refs);
-    *view.device_macs.borrow_mut() = macs.iter().map(|m| m.to_string()).collect();
+    *view.device_macs.borrow_mut() = macs.to_vec();
     *view.device_labels.borrow_mut() = labels;
 
     // More than one device is the only case worth showing a switcher for.
@@ -334,14 +335,14 @@ pub(super) fn sync_device_list(view: &ControlView, macs: &[&str], snapshot: &Sna
 /// The MAC is appended whenever a label would otherwise be ambiguous - two pairs of
 /// the same model, or two devices the user gave the same name - since the entries
 /// would otherwise be impossible to tell apart.
-fn device_labels(macs: &[&str], snapshot: &Snapshot) -> Vec<String> {
+fn device_labels(macs: &[Address], snapshot: &Snapshot) -> Vec<String> {
     let names: Vec<Option<String>> = macs
         .iter()
-        .map(|mac| {
+        .map(|&mac| {
             snapshot.device_name(mac).map(str::to_string).or_else(|| {
                 snapshot
                     .states
-                    .get(*mac)
+                    .get(&mac)
                     .map(|s| s.model_name.clone())
                     .filter(|n| !n.is_empty())
             })
@@ -362,15 +363,15 @@ fn device_labels(macs: &[&str], snapshot: &Snapshot) -> Vec<String> {
 
 /// The device to show after an update: the one already shown while it is still
 /// listed, else the snapshot's default - the device the tray shows.
-pub(super) fn choose_device(current: Option<String>, snapshot: &Snapshot) -> Option<String> {
+pub(super) fn choose_device(current: Option<Address>, snapshot: &Snapshot) -> Option<Address> {
     current
-        .filter(|m| snapshot.devices().contains(&m.as_str()))
-        .or_else(|| snapshot.default_device().map(str::to_string))
+        .filter(|m| snapshot.devices().contains(m))
+        .or_else(|| snapshot.default_device())
 }
 
 /// Draws one device, and gates noise control on how the data arrived.
-pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<&str>) {
-    let state = mac.and_then(|m| snapshot.states.get(m));
+pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<Address>) {
+    let state = mac.and_then(|m| snapshot.states.get(&m));
     let connected = mac.is_some_and(|m| snapshot.is_connected(m));
 
     match state {
@@ -535,15 +536,15 @@ mod tests {
         assert_eq!(noise_mode_from_target(""), None);
     }
 
-    fn snapshot(names: &[(&str, &str)], models: &[(&str, &str)]) -> Snapshot {
+    fn snapshot(names: &[(Address, &str)], models: &[(Address, &str)]) -> Snapshot {
         Snapshot {
             states: models
                 .iter()
-                .map(|(mac, model)| {
+                .map(|&(mac, model)| {
                     (
-                        (*mac).to_string(),
+                        mac,
                         PodState {
-                            model_name: (*model).to_string(),
+                            model_name: model.to_string(),
                             ..Default::default()
                         },
                     )
@@ -551,26 +552,31 @@ mod tests {
                 .collect(),
             device_names: names
                 .iter()
-                .map(|(mac, name)| ((*mac).to_string(), (*name).to_string()))
+                .map(|&(mac, name)| (mac, name.to_string()))
                 .collect(),
             ..Default::default()
         }
     }
 
+    const MAC_1: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    const MAC_2: Address = Address::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    const MAC_3: Address = Address::new([0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC]);
+
     #[test]
     fn labels_prefer_the_bluetooth_name() {
-        let macs = ["AA:BB:CC:DD:EE:FF"];
+        let macs = [MAC_1];
         let snap = snapshot(
-            &[("AA:BB:CC:DD:EE:FF", "Marcel's AirPods Pro")],
-            &[("AA:BB:CC:DD:EE:FF", "AirPods Pro 2")],
+            &[(MAC_1, "Marcel's AirPods Pro")],
+            &[(MAC_1, "AirPods Pro 2")],
         );
         assert_eq!(device_labels(&macs, &snap), ["Marcel's AirPods Pro"]);
     }
 
+    /// The MAC as the rest of the desktop shows it, uppercase.
     #[test]
     fn labels_fall_back_to_the_model_then_the_mac() {
-        let macs = ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"];
-        let snap = snapshot(&[], &[("AA:BB:CC:DD:EE:FF", "AirPods Pro 2")]);
+        let macs = [MAC_1, MAC_2];
+        let snap = snapshot(&[], &[(MAC_1, "AirPods Pro 2")]);
         assert_eq!(
             device_labels(&macs, &snap),
             ["AirPods Pro 2", "11:22:33:44:55:66"]
@@ -581,16 +587,12 @@ mod tests {
     /// only the ambiguous ones carry their MAC.
     #[test]
     fn duplicate_names_keep_the_mac() {
-        let macs = [
-            "AA:BB:CC:DD:EE:FF",
-            "11:22:33:44:55:66",
-            "77:88:99:AA:BB:CC",
-        ];
+        let macs = [MAC_1, MAC_2, MAC_3];
         let snap = snapshot(
             &[
-                ("AA:BB:CC:DD:EE:FF", "AirPods Pro"),
-                ("11:22:33:44:55:66", "AirPods Pro"),
-                ("77:88:99:AA:BB:CC", "AirPods Max"),
+                (MAC_1, "AirPods Pro"),
+                (MAC_2, "AirPods Pro"),
+                (MAC_3, "AirPods Max"),
             ],
             &[],
         );
@@ -604,17 +606,16 @@ mod tests {
         );
     }
 
-    const A: &str = "AA:AA:AA:AA:AA:AA";
-    const B: &str = "BB:BB:BB:BB:BB:BB";
-    const C: &str = "CC:CC:CC:CC:CC:CC";
+    const A: Address = Address::new([0xAA; 6]);
+    const B: Address = Address::new([0xBB; 6]);
+    const C: Address = Address::new([0xCC; 6]);
 
     /// A snapshot holding keys for `known` and links to `connected`, in that
     /// order, and no readings.
-    fn listing(known: &[&str], connected: &[&str]) -> Snapshot {
-        let macs = |list: &[&str]| list.iter().map(|m| m.to_string()).collect();
+    fn listing(known: &[Address], connected: &[Address]) -> Snapshot {
         Snapshot {
-            known_keys: macs(known),
-            connected_macs: macs(connected),
+            known_keys: known.to_vec(),
+            connected_macs: connected.to_vec(),
             ..Default::default()
         }
     }
@@ -624,7 +625,7 @@ mod tests {
     #[test]
     fn choice_keeps_the_device_shown() {
         let snap = listing(&[A, B], &[A]);
-        assert_eq!(choose_device(Some(B.into()), &snap).as_deref(), Some(B));
+        assert_eq!(choose_device(Some(B), &snap), Some(B));
     }
 
     /// With nothing picked, or the pick gone, the default device: the one the
@@ -632,17 +633,17 @@ mod tests {
     #[test]
     fn choice_falls_back_to_the_default_device() {
         let snap = listing(&[A, B], &[B]);
-        assert_eq!(choose_device(None, &snap).as_deref(), Some(B));
-        assert_eq!(choose_device(Some(C.into()), &snap).as_deref(), Some(B));
-        assert_eq!(choose_device(Some(A.into()), &Snapshot::default()), None);
+        assert_eq!(choose_device(None, &snap), Some(B));
+        assert_eq!(choose_device(Some(C), &snap), Some(B));
+        assert_eq!(choose_device(Some(A), &Snapshot::default()), None);
     }
 
     /// A pair on AAP whose key has not arrived is listed, so it can be shown -
     /// rather than the window saying "Connect Your AirPods" to a connected pair.
     #[test]
     fn choice_takes_a_connected_device_without_a_key() {
-        assert_eq!(choose_device(None, &listing(&[], &[C])).as_deref(), Some(C));
+        assert_eq!(choose_device(None, &listing(&[], &[C])), Some(C));
         let snap = listing(&[A], &[B, C]);
-        assert_eq!(choose_device(Some(C.into()), &snap).as_deref(), Some(C));
+        assert_eq!(choose_device(Some(C), &snap), Some(C));
     }
 }

@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use bluer::Address;
 use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{Handle, MenuItem, Tray, TrayMethods};
 
@@ -23,12 +24,12 @@ const ICON_NAME: &str = "io.github.mstroecker.LinuxPods-symbolic";
 pub trait TrayActions: Send + Sync + 'static {
     fn show_window(&self);
     fn quit(&self);
-    fn set_noise_mode(&self, mac: String, mode: NoiseMode);
+    fn set_noise_mode(&self, mac: Address, mode: NoiseMode);
 }
 
 pub struct Indicator {
     /// The device shown, which is the one noise control commands go to.
-    mac: Option<String>,
+    mac: Option<Address>,
     left: Option<u8>,
     right: Option<u8>,
     case: Option<u8>,
@@ -82,7 +83,7 @@ impl Indicator {
             *self = Self::new(Arc::clone(&self.actions));
             return;
         };
-        self.mac = (!state.real_mac.is_empty()).then(|| state.real_mac.clone());
+        self.mac = (state.real_mac != Address::any()).then_some(state.real_mac);
         self.left = state.left_battery;
         self.right = state.right_battery;
         self.case = state.case_battery;
@@ -178,7 +179,7 @@ impl Tray for Indicator {
                     // away and broadcasts, so the menu follows a command that
                     // actually went out - and stays put on one that failed.
                     activate: Box::new(move |this: &mut Self| {
-                        if let Some(mac) = this.mac.clone() {
+                        if let Some(mac) = this.mac {
                             this.actions.set_noise_mode(mac, mode);
                         }
                     }),
@@ -227,7 +228,7 @@ pub async fn apply_snapshot(handle: &Handle<Indicator>, snapshot: &Snapshot) {
 fn tray_state(snapshot: &Snapshot) -> Option<&PodState> {
     snapshot
         .default_device()
-        .and_then(|mac| snapshot.states.get(mac))
+        .and_then(|mac| snapshot.states.get(&mac))
 }
 
 #[cfg(test)]
@@ -286,10 +287,10 @@ mod tests {
     impl TrayActions for NoActions {
         fn show_window(&self) {}
         fn quit(&self) {}
-        fn set_noise_mode(&self, _: String, _: NoiseMode) {}
+        fn set_noise_mode(&self, _: Address, _: NoiseMode) {}
     }
 
-    const MAC: &str = "AA:BB:CC:DD:EE:FF";
+    const MAC: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
     /// One pair on AAP, charging, in Transparency.
     fn reading() -> Snapshot {
@@ -302,12 +303,12 @@ mod tests {
             right_charging: true,
             case_charging: true,
             noise_mode: Some(NoiseMode::Transparency),
-            real_mac: MAC.into(),
+            real_mac: MAC,
             ..Default::default()
         };
         Snapshot {
-            states: [(MAC.to_string(), state)].into(),
-            connected_macs: vec![MAC.into()],
+            states: [(MAC, state)].into(),
+            connected_macs: vec![MAC],
             ..Default::default()
         }
     }
@@ -317,7 +318,7 @@ mod tests {
         let mut tray = Indicator::new(Arc::new(NoActions));
         tray.show(tray_state(&reading()));
 
-        assert_eq!(tray.mac.as_deref(), Some(MAC));
+        assert_eq!(tray.mac, Some(MAC));
         assert_eq!(
             (tray.left, tray.right, tray.case),
             (Some(73), Some(80), Some(41))
@@ -346,17 +347,17 @@ mod tests {
     /// not showing.
     #[test]
     fn a_default_device_without_a_reading_resets_the_tray() {
-        const OTHER: &str = "11:22:33:44:55:66";
+        const OTHER: Address = Address::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
         let other = PodState {
             source: DataSource::Ble,
             left_battery: Some(50),
             right_battery: Some(50),
-            real_mac: OTHER.into(),
+            real_mac: OTHER,
             ..Default::default()
         };
         let mut snapshot = reading();
-        snapshot.states = [(OTHER.to_string(), other)].into();
-        snapshot.known_keys = vec![OTHER.into()];
+        snapshot.states = [(OTHER, other)].into();
+        snapshot.known_keys = vec![OTHER];
 
         let mut tray = Indicator::new(Arc::new(NoActions));
         tray.show(tray_state(&reading()));

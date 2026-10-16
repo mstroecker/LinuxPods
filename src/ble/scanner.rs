@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use bluer::Address;
 use futures_util::StreamExt;
 use zbus::zvariant::{OwnedValue, Value};
 use zbus::{Connection, MatchRule, MessageStream, proxy};
@@ -34,7 +35,7 @@ trait Adapter1 {
 pub struct Advertisement {
     pub data: ProximityData,
     /// BLE MAC, which rotates periodically for privacy.
-    pub ble_mac: String,
+    pub ble_mac: Address,
 }
 
 pub struct Scanner {
@@ -102,7 +103,10 @@ impl Scanner {
             }
 
             let apple_data = apple_manufacturer_data(&changed)?;
-            let ble_mac = mac_from_path(&path)?;
+            let Some(ble_mac) = mac_from_path(&path) else {
+                tracing::debug!("BLE advertisement dropped: {path} names no device address");
+                return None;
+            };
 
             // Logged here rather than downstream so it covers every advertisement
             // that parses, including ones the coordinator later drops (for example
@@ -147,13 +151,10 @@ fn apple_manufacturer_data(changed: &HashMap<String, OwnedValue>) -> Option<Vec<
 }
 
 /// /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF -> AA:BB:CC:DD:EE:FF
-fn mac_from_path(path: &str) -> Option<String> {
+fn mac_from_path(path: &str) -> Option<Address> {
     let tail = path.rsplit('/').next()?;
     let hex = tail.strip_prefix("dev_")?;
-    if hex.len() != 17 {
-        return None;
-    }
-    Some(hex.replace('_', ":"))
+    hex.replace('_', ":").parse().ok()
 }
 
 #[cfg(test)]
@@ -162,9 +163,15 @@ mod tests {
 
     #[test]
     fn extracts_mac_from_device_path() {
+        let mac = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
         assert_eq!(
-            mac_from_path("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF").as_deref(),
-            Some("AA:BB:CC:DD:EE:FF")
+            mac_from_path("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"),
+            Some(mac)
+        );
+        assert_eq!(
+            mac_from_path("/org/bluez/hci0/dev_aa_bb_cc_dd_ee_ff"),
+            Some(mac),
+            "the spelling does not matter"
         );
     }
 
@@ -172,6 +179,7 @@ mod tests {
     fn rejects_non_device_paths() {
         assert_eq!(mac_from_path("/org/bluez/hci0"), None);
         assert_eq!(mac_from_path("/org/bluez/hci0/dev_TOO_SHORT"), None);
+        assert_eq!(mac_from_path("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_GG"), None);
         assert_eq!(mac_from_path(""), None);
     }
 }

@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // device, which an inline suffix comparison would silently skip.
             let mut plain = [0u8; 16];
             plain.copy_from_slice(pt);
-            if !matches_device(&plain, mac) {
+            if !matches_device(&plain, *mac) {
                 continue;
             }
             println!(

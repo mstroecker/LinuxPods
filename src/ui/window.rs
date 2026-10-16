@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use bluer::Address;
 use gtk::{gio, glib};
 
 use super::control::{
@@ -89,12 +90,12 @@ pub fn activate(
                 return;
             };
             // The device on show: with several pairs connected, each has its own link.
-            let Some(mac) = ui.selected.borrow().clone() else {
+            let Some(mac) = *ui.selected.borrow() else {
                 return;
             };
             let coord = coord.clone();
             rt.spawn(async move {
-                if let Err(e) = coord.set_noise_control(&mac, mode).await {
+                if let Err(e) = coord.set_noise_control(mac, mode).await {
                     tracing::warn!("failed to set noise control: {e:#}");
                 }
             });
@@ -152,7 +153,7 @@ struct Ui {
     /// The Development group in Preferences.
     devices: DeviceRows,
     /// Which device the Control page is showing.
-    selected: RefCell<Option<String>>,
+    selected: RefCell<Option<Address>>,
     /// The snapshot behind the display, so a switcher change or the clock can
     /// redraw without waiting for the next update.
     last_snapshot: RefCell<Option<Snapshot>>,
@@ -174,14 +175,12 @@ impl Ui {
         // the dropdown emit selected-notify, and if that ran unguarded it would clobber
         // the user's choice with index 0 - which is why switching device appeared
         // to snap back to the AAP-connected one.
-        let current = self.selected.borrow().clone();
+        let current = *self.selected.borrow();
 
         self.syncing.set(true);
         sync_device_list(&self.control, &macs, &snapshot);
         let chosen = choose_device(current, &snapshot);
-        let position = chosen
-            .as_ref()
-            .and_then(|mac| macs.iter().position(|m| m == mac));
+        let position = chosen.and_then(|mac| macs.iter().position(|&m| m == mac));
         *self.selected.borrow_mut() = chosen;
         if let Some(position) = position {
             self.control.device_dropdown.set_selected(position as u32);
@@ -201,8 +200,8 @@ impl Ui {
     /// Draws the selected device on the Control page, and every device in
     /// Preferences.
     fn render(&self, snapshot: &Snapshot) {
-        let mac = self.selected.borrow().clone();
-        render_device(&self.control, snapshot, mac.as_deref());
+        let mac = *self.selected.borrow();
+        render_device(&self.control, snapshot, mac);
         self.devices.update(snapshot);
     }
 
@@ -225,7 +224,7 @@ impl Ui {
             .device_macs
             .borrow()
             .get(position as usize)
-            .cloned();
+            .copied();
         if let Some(mac) = mac {
             *self.selected.borrow_mut() = Some(mac);
             self.redraw();

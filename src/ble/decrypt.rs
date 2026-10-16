@@ -5,6 +5,7 @@
 
 use aes::Aes128;
 use aes::cipher::{Block, BlockCipherDecrypt, KeyInit};
+use bluer::Address;
 
 /// Bytes 9..25 of the advertisement payload.
 pub const ENCRYPTED_LEN: usize = 16;
@@ -58,7 +59,7 @@ pub enum DecryptError {
 pub fn decrypt_for_device(
     encrypted: &[u8],
     key: &[u8],
-    mac_addr: &str,
+    mac_addr: Address,
 ) -> Result<[u8; ENCRYPTED_LEN], DecryptError> {
     let decrypted = decrypt_block_only(encrypted, key)?;
 
@@ -83,24 +84,8 @@ pub fn decrypt_for_device(
 /// Without the second rule, a device connected to a phone falls back to the
 /// cleartext's 10% buckets and stays unidentified behind its rotating address,
 /// which is the case `docs/ble-proximity-pairing.md` sets out to cover.
-pub fn matches_device(decrypted: &[u8; ENCRYPTED_LEN], mac_addr: &str) -> bool {
-    let Some(suffix) = mac_suffix(mac_addr) else {
-        return false;
-    };
-    decrypted[MAC_SUFFIX_RANGE] == suffix || decrypted[MAC_SUFFIX_RANGE] == CONNECTED_SUFFIX
-}
-
-/// Parses "AA:BB:CC:DD:EE:FF" into its last three bytes.
-fn mac_suffix(mac_addr: &str) -> Option<[u8; 3]> {
-    let mut bytes = mac_addr
-        .split(':')
-        .map(|b| u8::from_str_radix(b, 16).ok())
-        .collect::<Option<Vec<u8>>>()?;
-    if bytes.len() != 6 {
-        return None;
-    }
-    let tail = bytes.split_off(3);
-    Some([tail[0], tail[1], tail[2]])
+pub fn matches_device(decrypted: &[u8; ENCRYPTED_LEN], mac_addr: Address) -> bool {
+    decrypted[MAC_SUFFIX_RANGE] == mac_addr[3..] || decrypted[MAC_SUFFIX_RANGE] == CONNECTED_SUFFIX
 }
 
 /// Decrypts without any validation. Exposed for probes and tests.
@@ -130,14 +115,16 @@ fn decrypt_block_only(encrypted: &[u8], key: &[u8]) -> Result<[u8; ENCRYPTED_LEN
 mod tests {
     use super::*;
 
+    const MAC: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+
     #[test]
     fn rejects_wrong_lengths() {
         assert!(matches!(
-            decrypt_for_device(&[0u8; 8], &[0u8; 16], "AA:BB:CC:DD:EE:FF"),
+            decrypt_for_device(&[0u8; 8], &[0u8; 16], MAC),
             Err(DecryptError::BadDataLen(8))
         ));
         assert!(matches!(
-            decrypt_for_device(&[0u8; 16], &[0u8; 8], "AA:BB:CC:DD:EE:FF"),
+            decrypt_for_device(&[0u8; 16], &[0u8; 8], MAC),
             Err(DecryptError::BadKeyLen(8))
         ));
     }
@@ -146,7 +133,7 @@ mod tests {
     fn rejects_garbage_from_wrong_key() {
         // A random block under an arbitrary key will essentially never reproduce the
         // device's MAC suffix, which is the property identification relies on.
-        let err = decrypt_for_device(&[0xAB; 16], &[0xCD; 16], "AA:BB:CC:DD:EE:FF");
+        let err = decrypt_for_device(&[0xAB; 16], &[0xCD; 16], MAC);
         assert!(matches!(err, Err(DecryptError::ValidationFailed)));
     }
 
@@ -181,19 +168,19 @@ mod tests {
     #[test]
     fn accepts_pro3_layout_via_mac_suffix() {
         let key = [0x11u8; 16];
-        let mac = "AA:BB:CC:DD:EE:FF";
         let plain = pro3_plaintext([0xDD, 0xEE, 0xFF]);
         let ct = encrypt(&plain, &key);
 
-        assert_eq!(decrypt_for_device(&ct, &key, mac).unwrap(), plain);
+        assert_eq!(decrypt_for_device(&ct, &key, MAC).unwrap(), plain);
     }
 
     #[test]
     fn rejects_payload_belonging_to_another_device() {
         let key = [0x11u8; 16];
         let ct = encrypt(&pro3_plaintext([0xDD, 0xEE, 0xFF]), &key);
+        let other = Address::new([0x99, 0x88, 0x77, 0x66, 0x55, 0x44]);
         assert!(matches!(
-            decrypt_for_device(&ct, &key, "99:88:77:66:55:44"),
+            decrypt_for_device(&ct, &key, other),
             Err(DecryptError::ValidationFailed)
         ));
     }
@@ -207,10 +194,7 @@ mod tests {
         let plain = pro3_plaintext([0x00, 0x00, 0x00]);
         let ct = encrypt(&plain, &key);
 
-        assert_eq!(
-            decrypt_for_device(&ct, &key, "AA:BB:CC:DD:EE:FF").unwrap(),
-            plain
-        );
+        assert_eq!(decrypt_for_device(&ct, &key, MAC).unwrap(), plain);
     }
 
     /// The zeroed form is an exact value, not a wildcard: a partial match is still
@@ -220,16 +204,25 @@ mod tests {
         let key = [0x11u8; 16];
         let ct = encrypt(&pro3_plaintext([0x00, 0x00, 0x01]), &key);
         assert!(matches!(
-            decrypt_for_device(&ct, &key, "AA:BB:CC:DD:EE:FF"),
+            decrypt_for_device(&ct, &key, MAC),
             Err(DecryptError::ValidationFailed)
         ));
     }
 
+    /// The suffix is the address's last three bytes; the first three play no
+    /// part.
     #[test]
-    fn parses_mac_suffix() {
-        assert_eq!(mac_suffix("AA:BB:CC:DD:EE:FF"), Some([0xDD, 0xEE, 0xFF]));
-        assert_eq!(mac_suffix("not-a-mac"), None);
-        assert_eq!(mac_suffix("34:0E:22"), None);
+    fn the_suffix_is_the_last_three_bytes() {
+        let plain = pro3_plaintext([0xDD, 0xEE, 0xFF]);
+        assert!(matches_device(&plain, MAC));
+        assert!(matches_device(
+            &plain,
+            Address::new([0x11, 0x22, 0x33, 0xDD, 0xEE, 0xFF])
+        ));
+        assert!(!matches_device(
+            &plain,
+            Address::new([0xDD, 0xEE, 0xFF, 0xAA, 0xBB, 0xCC])
+        ));
     }
 
     #[test]
@@ -237,7 +230,7 @@ mod tests {
         // Gen 2 (0x2420) reports byte 0 = 0x00 where Pro 3 reports 0x10; both carry
         // the MAC suffix, which is why validation keys on that and nothing else.
         let key = [0x33u8; 16];
-        let mac = "11:22:33:44:55:66";
+        let mac = Address::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
         let mut plain = pro3_plaintext([0x44, 0x55, 0x66]);
         plain[0] = 0x00;
         plain[1] = 0x80 | 100;
