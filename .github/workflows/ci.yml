@@ -112,6 +112,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --locked --all-targets -- -D warnings
+      # A step, not a job: the job names are required checks of ruleset main-2
+      - run: cargo clippy --locked --all-targets --features harness -- -D warnings
 
   test:
     name: Test
@@ -127,6 +129,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --locked --all-targets
+      - run: cargo test --locked --all-targets --features harness
 
   coverage:
     name: Coverage

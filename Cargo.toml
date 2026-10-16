@@ -45,6 +45,11 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[features]
+# Test harness hooks: a fake BlueZ, fake AirPods and UI automation (#74).
+# Debug builds only - src/lib.rs refuses a release build with it.
+harness = []
+
 [build-dependencies]
 glib-build-tools = "0.22"
 
