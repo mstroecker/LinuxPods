@@ -15,6 +15,8 @@ compile_error!("the `harness` feature is for debug builds only - build without -
 pub mod aap;
 pub mod ble;
 pub mod bluez;
+#[cfg(feature = "harness")]
+pub mod harness;
 pub mod indicator;
 pub mod keystore;
 pub mod podstate;
