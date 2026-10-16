@@ -343,8 +343,8 @@ fn device_labels(macs: &[Address], snapshot: &Snapshot) -> Vec<String> {
                 snapshot
                     .states
                     .get(&mac)
-                    .map(|s| s.model_name.clone())
-                    .filter(|n| !n.is_empty())
+                    .and_then(|s| s.identity)
+                    .map(|identity| identity.model_name())
             })
         })
         .collect();
@@ -416,14 +416,18 @@ fn clear_battery_display(w: &BatteryWidgets, status: &str) {
     w.last_seen_label.set_visible(false);
 }
 
-/// Draws a reading into the battery display and the status line.
+/// Draws a reading into the battery display and the status line. A pod is
+/// drawn in an ear only while that is known: AAP alone does not say.
 fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
-    w.left
-        .show(state.left_battery, state.left_charging, state.left_in_ear);
+    w.left.show(
+        state.left_battery,
+        state.left_charging,
+        state.left_in_ear == Some(true),
+    );
     w.right.show(
         state.right_battery,
         state.right_charging,
-        state.right_in_ear,
+        state.right_in_ear == Some(true),
     );
     w.case.show(state.case_battery, state.case_charging, false);
 
@@ -446,43 +450,44 @@ fn status_line(state: &PodState) -> String {
         Some(false) => " • Lid: Closed",
         None => "",
     };
-    // What the AirPods are doing - playing, on a call - comes from the BLE
-    // advertisement only, so it is absent whenever the reading came over AAP.
+    // What the AirPods are doing - playing, on a call - comes from advertisements
+    // only: for a pair on AAP, the one cached. Absent while none is.
     let activity = state
         .connection_state
         .map(|s| format!(" • {}", decode_connection_state(s)))
         .unwrap_or_default();
-    // Which protocol produced these numbers.
-    let source = match state.source {
-        DataSource::Aap => "AAP",
-        DataSource::Ble => "BLE",
-        DataSource::Unknown => "unknown",
-    };
-    // Prefer the decoded name; fall back to the raw id only for models we do not
-    // recognise, and to a bare label when nothing has identified it yet.
-    let model = if !state.model_name.is_empty() {
-        state.model_name.clone()
-    } else if state.device_model != 0 {
-        format!("Unknown (0x{:04X})", state.device_model)
-    } else {
-        "AirPods".to_string()
-    };
+    // The decoded name, or the product ID for a model we do not recognise; a
+    // bare label while nothing has identified the device.
+    let model = state
+        .identity
+        .map_or_else(|| "AirPods".to_string(), |identity| identity.model_name());
 
-    format!("{model}{lid}{activity} • Source: {source}")
+    // The source is which protocol produced these numbers.
+    format!("{model}{lid}{activity} • Source: {}", state.source)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::podstate::Identity;
+
+    /// A reading identified by `product_id`.
+    fn identified(product_id: u16, source: DataSource) -> PodState {
+        PodState {
+            identity: Some(Identity {
+                product_id,
+                color: 0x00,
+            }),
+            ..PodState::empty(source)
+        }
+    }
 
     #[test]
     fn status_line_shows_what_the_airpods_are_doing() {
         let state = PodState {
-            source: DataSource::Ble,
-            model_name: "AirPods Pro 3".into(),
             lid_open: Some(true),
             connection_state: Some(0x05),
-            ..Default::default()
+            ..identified(0x2027, DataSource::Ble)
         };
         assert_eq!(
             status_line(&state),
@@ -490,17 +495,27 @@ mod tests {
         );
     }
 
-    /// AAP carries no connection state, and a stale carried-forward value would be
-    /// worse than none - so the segment is left out entirely.
+    /// A pair on AAP with no advertisement cached has no connection state, and
+    /// the segment is left out rather than guessed.
     #[test]
-    fn status_line_omits_activity_on_aap() {
-        let state = PodState {
-            source: DataSource::Aap,
-            model_name: "AirPods Pro 3".into(),
-            connection_state: None,
-            ..Default::default()
-        };
+    fn status_line_omits_what_nothing_reported() {
+        let state = identified(0x2027, DataSource::Aap);
         assert_eq!(status_line(&state), "AirPods Pro 3 • Source: AAP");
+    }
+
+    /// A model we do not know goes by its product ID; a device nothing has
+    /// identified yet - a pair on AAP before its first advertisement - by a
+    /// bare "AirPods".
+    #[test]
+    fn status_line_names_the_model_as_far_as_it_is_known() {
+        assert_eq!(
+            status_line(&identified(0xFFFF, DataSource::Ble)),
+            "Unknown (0xFFFF) • Source: BLE"
+        );
+        assert_eq!(
+            status_line(&PodState::empty(DataSource::Aap)),
+            "AirPods • Source: AAP"
+        );
     }
 
     #[test]
@@ -536,18 +551,18 @@ mod tests {
         assert_eq!(noise_mode_from_target(""), None);
     }
 
-    fn snapshot(names: &[(Address, &str)], models: &[(Address, &str)]) -> Snapshot {
+    /// A snapshot with these BlueZ names, and a reading for each of `readings`,
+    /// identified by the product ID given or not at all.
+    fn snapshot(names: &[(Address, &str)], readings: &[(Address, Option<u16>)]) -> Snapshot {
         Snapshot {
-            states: models
+            states: readings
                 .iter()
-                .map(|&(mac, model)| {
-                    (
-                        mac,
-                        PodState {
-                            model_name: model.to_string(),
-                            ..Default::default()
-                        },
-                    )
+                .map(|&(mac, product_id)| {
+                    let state = match product_id {
+                        Some(id) => identified(id, DataSource::Ble),
+                        None => PodState::empty(DataSource::Aap),
+                    };
+                    (mac, state)
                 })
                 .collect(),
             device_names: names
@@ -565,10 +580,7 @@ mod tests {
     #[test]
     fn labels_prefer_the_bluetooth_name() {
         let macs = [MAC_1];
-        let snap = snapshot(
-            &[(MAC_1, "Marcel's AirPods Pro")],
-            &[(MAC_1, "AirPods Pro 2")],
-        );
+        let snap = snapshot(&[(MAC_1, "Marcel's AirPods Pro")], &[(MAC_1, Some(0x2024))]);
         assert_eq!(device_labels(&macs, &snap), ["Marcel's AirPods Pro"]);
     }
 
@@ -576,10 +588,23 @@ mod tests {
     #[test]
     fn labels_fall_back_to_the_model_then_the_mac() {
         let macs = [MAC_1, MAC_2];
-        let snap = snapshot(&[], &[(MAC_1, "AirPods Pro 2")]);
+        let snap = snapshot(&[], &[(MAC_1, Some(0x2024))]);
         assert_eq!(
             device_labels(&macs, &snap),
-            ["AirPods Pro 2", "11:22:33:44:55:66"]
+            ["AirPods Pro (2nd gen, USB-C)", "11:22:33:44:55:66"]
+        );
+    }
+
+    /// A model we do not know is still a model, named by its product ID. A
+    /// reading nothing has identified - a pair on AAP before its first
+    /// advertisement - has no model, so the MAC stands in.
+    #[test]
+    fn labels_tell_an_unknown_model_from_no_model() {
+        let macs = [MAC_1, MAC_2];
+        let snap = snapshot(&[], &[(MAC_1, Some(0xFFFF)), (MAC_2, None)]);
+        assert_eq!(
+            device_labels(&macs, &snap),
+            ["Unknown (0xFFFF)", "11:22:33:44:55:66"]
         );
     }
 

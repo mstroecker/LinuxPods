@@ -30,11 +30,9 @@ pub enum ParseError {
     BadDecryptedLen(usize),
 }
 
-/// Which pod is primary. Mirrors podstate.PodSide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Which pod is primary - see the module docs for what that swaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PodSide {
-    #[default]
-    Unknown,
     Left,
     Right,
 }

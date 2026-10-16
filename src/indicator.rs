@@ -297,7 +297,6 @@ mod tests {
     /// One pair on AAP, charging, in Transparency.
     fn reading() -> Snapshot {
         let state = PodState {
-            source: DataSource::Aap,
             left_battery: Some(73),
             right_battery: Some(80),
             case_battery: Some(41),
@@ -305,7 +304,7 @@ mod tests {
             right_charging: true,
             case_charging: true,
             noise_mode: Some(NoiseMode::Transparency),
-            ..Default::default()
+            ..PodState::empty(DataSource::Aap)
         };
         Snapshot {
             states: [(MAC, state)].into(),
@@ -385,10 +384,9 @@ mod tests {
     fn a_default_device_without_a_reading_resets_the_tray() {
         const OTHER: Address = Address::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
         let other = PodState {
-            source: DataSource::Ble,
             left_battery: Some(50),
             right_battery: Some(50),
-            ..Default::default()
+            ..PodState::empty(DataSource::Ble)
         };
         let mut snapshot = reading();
         snapshot.states = [(OTHER, other)].into();

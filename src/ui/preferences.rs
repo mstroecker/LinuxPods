@@ -200,11 +200,7 @@ impl DeviceRow {
     /// whether a key is stored for it.
     fn show(&self, mac: Address, state: Option<&PodState>, known: bool, connected: bool) {
         self.row.set_title(&row_title(mac, state));
-
-        match state {
-            Some(s) if !s.model_name.is_empty() => self.row.set_subtitle(&s.model_name),
-            _ => self.row.set_subtitle(""),
-        }
+        self.row.set_subtitle(&row_subtitle(state));
 
         let (text, css) = row_status(known, connected, state);
         self.status_label.set_text(&text);
@@ -224,6 +220,14 @@ fn row_title(mac: Address, state: Option<&PodState>) -> String {
         Some(ble_mac) if ble_mac != mac => format!("{mac} • BLE: {ble_mac}"),
         _ => mac.to_string(),
     }
+}
+
+/// The model, or nothing until an advertisement has identified the device.
+fn row_subtitle(state: Option<&PodState>) -> String {
+    state
+        .and_then(|s| s.identity)
+        .map(|identity| identity.model_name())
+        .unwrap_or_default()
 }
 
 /// A row's status text, and the style class to draw it in.
@@ -248,6 +252,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::podstate::{DataSource, Identity};
 
     const A: Address = Address::new([0xAA; 6]);
     const B: Address = Address::new([0xBB; 6]);
@@ -258,7 +263,7 @@ mod tests {
     fn heard(age: Duration) -> PodState {
         PodState {
             last_seen: Some(Instant::now() - age),
-            ..Default::default()
+            ..PodState::empty(DataSource::Ble)
         }
     }
 
@@ -271,7 +276,7 @@ mod tests {
             connected_macs: vec![C, B],
             states: [B, C]
                 .into_iter()
-                .map(|m| (m, PodState::default()))
+                .map(|m| (m, PodState::empty(DataSource::Aap)))
                 .collect(),
             ..Default::default()
         };
@@ -282,7 +287,7 @@ mod tests {
     fn title_adds_a_differing_ble_address() {
         let rotating = PodState {
             current_ble_mac: Some(D),
-            ..Default::default()
+            ..PodState::empty(DataSource::Ble)
         };
         assert_eq!(
             row_title(A, Some(&rotating)),
@@ -291,14 +296,31 @@ mod tests {
 
         let same = PodState {
             current_ble_mac: Some(A),
-            ..Default::default()
+            ..PodState::empty(DataSource::Ble)
         };
         assert_eq!(row_title(A, Some(&same)), "AA:AA:AA:AA:AA:AA");
         assert_eq!(
-            row_title(A, Some(&PodState::default())),
+            row_title(A, Some(&PodState::empty(DataSource::Aap))),
             "AA:AA:AA:AA:AA:AA"
         );
         assert_eq!(row_title(A, None), "AA:AA:AA:AA:AA:AA");
+    }
+
+    /// The model's name; the product ID for a model we do not know; and
+    /// nothing while no advertisement has identified the device.
+    #[test]
+    fn subtitle_names_the_model_as_far_as_it_is_known() {
+        let identified = |product_id| PodState {
+            identity: Some(Identity {
+                product_id,
+                color: 0x00,
+            }),
+            ..PodState::empty(DataSource::Ble)
+        };
+        assert_eq!(row_subtitle(Some(&identified(0x2027))), "AirPods Pro 3");
+        assert_eq!(row_subtitle(Some(&identified(0xFFFF))), "Unknown (0xFFFF)");
+        assert_eq!(row_subtitle(Some(&PodState::empty(DataSource::Aap))), "");
+        assert_eq!(row_subtitle(None), "");
     }
 
     /// Connected wins over everything, even a missing key: the key is requested

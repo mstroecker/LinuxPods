@@ -13,7 +13,9 @@
 //! device's own advertisements while AAP supersedes them. When the link drops the
 //! cached reading takes over at once, rather than the device going blank until
 //! it next advertises - which, lid closed in the case, can be a long wait. AAP
-//! state is only ever the live link's and goes with it.
+//! state is only ever the live link's and goes with it. While the link is up,
+//! the device's snapshot takes from its cached advertisement what AAP does not
+//! carry: in-ear, lid, connection state and primary pod.
 //!
 //! # What is kept
 //!
@@ -43,10 +45,9 @@ use crate::keystore::Keystore;
 /// stored keys.
 pub const BLE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Which protocol a reading came over. Its `Display` is what the window shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataSource {
-    #[default]
-    Unknown,
     Ble,
     Aap,
 }
@@ -56,13 +57,35 @@ impl std::fmt::Display for DataSource {
         match self {
             Self::Ble => write!(f, "BLE"),
             Self::Aap => write!(f, "AAP"),
-            Self::Unknown => write!(f, "Unknown"),
         }
     }
 }
 
+/// Which device a reading is from, as its advertisements say. AAP never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    /// Apple's product ID, which names the model - see [`decode_model_name`].
+    pub product_id: u16,
+    /// The colour code, as advertised.
+    pub color: u8,
+}
+
+impl Identity {
+    /// The model's name, or for a product ID we do not know, the ID itself.
+    pub fn model_name(&self) -> String {
+        decode_model_name(self.product_id).map_or_else(
+            || format!("Unknown (0x{:04X})", self.product_id),
+            str::to_string,
+        )
+    }
+}
+
 /// Unified state, independent of which source produced it.
-#[derive(Debug, Clone, Default)]
+///
+/// Deliberately without `Default`: each source sets every field it knows and
+/// says `None` for the rest, rather than leaving a default to pass for a
+/// reading.
+#[derive(Debug, Clone)]
 pub struct PodState {
     pub source: DataSource,
 
@@ -74,29 +97,38 @@ pub struct PodState {
     pub right_charging: bool,
     pub case_charging: bool,
 
-    pub left_in_ear: bool,
-    pub right_in_ear: bool,
+    /// Whether each pod is in an ear, from an advertisement like the
+    /// [connection state](PodState::connection_state).
+    pub left_in_ear: Option<bool>,
+    pub right_in_ear: Option<bool>,
 
-    /// `None` when nothing has reported it: over AAP, which carries no lid data, or
-    /// from a BLE advertisement sent while the earbuds are out of the case.
+    /// From an advertisement like the
+    /// [connection state](PodState::connection_state), and `None` too when the
+    /// last one was sent while the earbuds were out of the case.
     pub lid_open: Option<bool>,
 
-    /// Decoded with `ble::decode_connection_state`. `None` while the reading came
-    /// from AAP, which carries no such field - it is deliberately not carried
-    /// forward from earlier BLE state the way the model and colour are, because
-    /// unlike those it changes as the user plays music or takes a call, and a
-    /// carried-forward value would sit there stale for the whole AAP session.
+    /// Decoded with `ble::decode_connection_state`.
+    ///
+    /// Only advertisements carry it, along with in-ear, lid and the primary pod.
+    /// Unlike the identity these change as the earbuds are used, so for a
+    /// device on AAP they are taken from its cached advertisement each time a
+    /// snapshot is built: a connected pair keeps advertising, which keeps them
+    /// current, and they expire with that cache entry. `None` while no
+    /// advertisement is cached.
     pub connection_state: Option<u8>,
+
+    /// From an advertisement like the
+    /// [connection state](PodState::connection_state).
+    pub primary_pod: Option<PodSide>,
 
     /// Active noise control mode. `None` until the connected device reports one:
     /// BLE advertisements do not carry it, and a default would show the wrong
     /// mode as selected in the interface.
     pub noise_mode: Option<aap::NoiseMode>,
 
-    pub device_model: u16,
-    pub model_name: String,
-    pub color: u8,
-    pub primary_pod: PodSide,
+    /// `None` until an advertisement has identified the device. For one on
+    /// AAP it is the link's, which outlives the cached advertisement.
+    pub identity: Option<Identity>,
 
     /// The randomized address the advertisement behind a BLE reading came
     /// from. `None` for AAP, which knows only the real one.
@@ -108,6 +140,29 @@ pub struct PodState {
 }
 
 impl PodState {
+    /// A reading from `source` that reports nothing, for tests to fill in.
+    #[cfg(test)]
+    pub(crate) fn empty(source: DataSource) -> Self {
+        Self {
+            source,
+            left_battery: None,
+            right_battery: None,
+            case_battery: None,
+            left_charging: false,
+            right_charging: false,
+            case_charging: false,
+            left_in_ear: None,
+            right_in_ear: None,
+            lid_open: None,
+            connection_state: None,
+            primary_pod: None,
+            noise_mode: None,
+            identity: None,
+            current_ble_mac: None,
+            last_seen: None,
+        }
+    }
+
     /// Lowest of the two earbuds, which is what the tray and GNOME Settings show.
     pub fn lowest_earbud(&self) -> Option<u8> {
         match (self.left_battery, self.right_battery) {
@@ -214,7 +269,7 @@ struct Link {
     /// session would show as selected after a reconnect, though it may have
     /// been changed from a phone meanwhile.
     noise_mode: Option<aap::NoiseMode>,
-    /// What the device last advertised about itself, which AAP never says.
+    /// Which device the link is to, as last advertised; AAP never says.
     /// Kept apart from the reading like the mode. Taken from the cached
     /// advertisement when the link comes up and refreshed by every one after,
     /// so it outlives that cache entry's expiry.
@@ -223,30 +278,34 @@ struct Link {
     since: Instant,
 }
 
-/// The parts of a reading that say which device it is rather than how it is
-/// doing. Only advertisements carry them.
-#[derive(Clone, PartialEq)]
-struct Identity {
-    device_model: u16,
-    model_name: String,
-    color: u8,
-    primary_pod: PodSide,
+/// The parts of an advertisement that change as the earbuds are used - a pod
+/// taken out, the lid opened, a call coming in. AAP carries none of them, so a
+/// linked device's snapshot takes them from its cached advertisement.
+#[derive(Clone, Copy, PartialEq)]
+struct Live {
+    left_in_ear: Option<bool>,
+    right_in_ear: Option<bool>,
+    lid_open: Option<bool>,
+    connection_state: Option<u8>,
+    primary_pod: Option<PodSide>,
 }
 
-impl Identity {
+impl Live {
     fn of(state: &PodState) -> Self {
         Self {
-            device_model: state.device_model,
-            model_name: state.model_name.clone(),
-            color: state.color,
+            left_in_ear: state.left_in_ear,
+            right_in_ear: state.right_in_ear,
+            lid_open: state.lid_open,
+            connection_state: state.connection_state,
             primary_pod: state.primary_pod,
         }
     }
 
-    fn apply_to(&self, state: &mut PodState) {
-        state.device_model = self.device_model;
-        state.model_name.clone_from(&self.model_name);
-        state.color = self.color;
+    fn apply_to(self, state: &mut PodState) {
+        state.left_in_ear = self.left_in_ear;
+        state.right_in_ear = self.right_in_ear;
+        state.lid_open = self.lid_open;
+        state.connection_state = self.connection_state;
         state.primary_pod = self.primary_pod;
     }
 }
@@ -329,8 +388,12 @@ impl Inner {
             // reading that arrived before the first advertisement kept a blank
             // model until the next packet, which over AAP comes only when a
             // level changes.
-            if let Some(identity) = &link.identity {
-                identity.apply_to(&mut state);
+            state.identity = link.identity;
+            // From the cache entry itself rather than the link, unlike the
+            // identity: these go stale, so they expire with the advertisement
+            // they came from.
+            if let Some(entry) = self.ble.get(&mac) {
+                Live::of(&entry.state).apply_to(&mut state);
             }
             states.insert(mac, state);
         }
@@ -539,6 +602,10 @@ impl Coordinator {
             return;
         };
 
+        let identity = Identity {
+            product_id: data.product_id,
+            color: data.color,
+        };
         let state = PodState {
             source: DataSource::Ble,
             left_battery: data.left_battery,
@@ -547,20 +614,15 @@ impl Coordinator {
             left_charging: data.left_charging,
             right_charging: data.right_charging,
             case_charging: data.case_charging,
-            left_in_ear: data.left_in_ear,
-            right_in_ear: data.right_in_ear,
+            left_in_ear: Some(data.left_in_ear),
+            right_in_ear: Some(data.right_in_ear),
             lid_open: data.lid_open,
             connection_state: Some(data.connection_state),
+            primary_pod: Some(data.primary_pod()),
             // BLE carries no noise control mode; `snapshot` attaches the one
             // reported over AAP for the connected device.
             noise_mode: None,
-            device_model: data.product_id,
-            model_name: decode_model_name(data.product_id).map_or_else(
-                || format!("Unknown (0x{:04X})", data.product_id),
-                str::to_string,
-            ),
-            color: data.color,
-            primary_pod: data.primary_pod(),
+            identity: Some(identity),
             current_ble_mac: Some(ble_mac),
             // Stamped from the entry in `snapshot`.
             last_seen: None,
@@ -577,8 +639,8 @@ impl Coordinator {
             state.right_battery,
             state.case_battery,
             state.lid_open,
-            state.left_in_ear,
-            state.right_in_ear
+            data.left_in_ear,
+            data.right_in_ear
         );
         tracing::debug!(
             "BLE {ble_mac} raw: {}",
@@ -589,13 +651,14 @@ impl Coordinator {
                 .join(" ")
         );
 
-        let identity = Identity::of(&state);
+        let live = Live::of(&state);
         let snapshot = {
             let mut inner = self.inner.write().await;
             let now = Instant::now();
             // Recorded even while AAP supersedes it, so that the reading is
-            // current the moment the link drops.
-            inner.ble.insert(
+            // current the moment the link drops - and a linked device's
+            // snapshot takes its live fields from it meanwhile.
+            let previous = inner.ble.insert(
                 real_mac,
                 Entry {
                     state,
@@ -606,13 +669,15 @@ impl Coordinator {
             let identified = inner
                 .links
                 .get_mut(&real_mac)
-                .is_some_and(|link| link.identity.replace(identity.clone()) != Some(identity));
+                .is_some_and(|link| link.identity.replace(identity) != Some(identity));
+            let live_changed = previous.is_none_or(|e| Live::of(&e.state) != live);
             // AAP data for this device is exact and current; its own
             // advertisements are coarser and lag behind. Nothing a snapshot
             // shows has changed - unless they told the link something new
             // about the device, typically its model on the first advertisement
-            // after connecting, or the prune dropped something.
-            if inner.supersedes_ble(real_mac) && !identified && !pruned {
+            // after connecting; or changed what the snapshot takes from them,
+            // such as a pod taken out of an ear; or the prune dropped something.
+            if inner.supersedes_ble(real_mac) && !identified && !live_changed && !pruned {
                 return;
             }
             inner.snapshot()
@@ -668,7 +733,7 @@ impl Coordinator {
                 return Ok(());
             }
             // Advertised before the link came up, if the cache still has it.
-            let identity = inner.ble.get(&mac_addr).map(|e| Identity::of(&e.state));
+            let identity = inner.ble.get(&mac_addr).and_then(|e| e.state.identity);
             inner.links.insert(
                 mac_addr,
                 Link {
@@ -796,9 +861,9 @@ impl Coordinator {
 
     /// Makes a battery packet the link's reading, and broadcasts.
     ///
-    /// AAP packets carry battery only - no model, colour or orientation. The
-    /// link holds what the device advertised about itself, and
-    /// [`Inner::snapshot`] merges it in.
+    /// AAP packets carry battery only. [`Inner::snapshot`] merges in the rest:
+    /// the identity the link holds, the mode, and what the cached
+    /// advertisement says about ears, lid, connection state and primary pod.
     async fn handle_battery_info(
         &self,
         info: aap::BatteryInfo,
@@ -813,9 +878,17 @@ impl Coordinator {
             left_charging: info.left.is_some_and(|b| b.is_charging()),
             right_charging: info.right.is_some_and(|b| b.is_charging()),
             case_charging: info.case.is_some_and(|b| b.is_charging()),
-            // AAP carries no in-ear, lid or connection-state data, nor a BLE
-            // address; those stay at their defaults.
-            ..Default::default()
+            // Not in a battery packet; merged in by `snapshot` where known.
+            left_in_ear: None,
+            right_in_ear: None,
+            lid_open: None,
+            connection_state: None,
+            primary_pod: None,
+            noise_mode: None,
+            identity: None,
+            // AAP knows only the real address, and is always live.
+            current_ble_mac: None,
+            last_seen: None,
         };
 
         tracing::debug!(
@@ -970,7 +1043,7 @@ mod tests {
 
     fn entry(age: Duration) -> Entry {
         Entry {
-            state: PodState::default(),
+            state: PodState::empty(DataSource::Ble),
             last_seen: Instant::now() - age,
         }
     }
@@ -1199,17 +1272,15 @@ mod tests {
 
     fn aap_state(left: u8) -> PodState {
         PodState {
-            source: DataSource::Aap,
             left_battery: Some(left),
-            ..Default::default()
+            ..PodState::empty(DataSource::Aap)
         }
     }
 
     fn ble_state(left: u8) -> PodState {
         PodState {
-            source: DataSource::Ble,
             left_battery: Some(left),
-            ..Default::default()
+            ..PodState::empty(DataSource::Ble)
         }
     }
 
@@ -1452,11 +1523,23 @@ mod tests {
 
     /// An AirPods Pro 3 advertisement that KEY decrypts, its suffix field zeroed
     /// as a connected device sends it. Encrypted here, so no real key is needed.
+    /// Both pods out of the ears, the left one at 80%.
     fn advertisement() -> ProximityData {
+        advertisement_with_left(80)
+    }
+
+    /// What [`advertisement`] identifies.
+    const PRO_3: Identity = Identity {
+        product_id: 0x2027,
+        color: 0x01,
+    };
+
+    /// [`advertisement`], with the left pod at `left`%.
+    fn advertisement_with_left(left: u8) -> ProximityData {
         use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
 
         let mut plain = [0u8; 16];
-        plain[1..4].copy_from_slice(&[80, 80, 50]); // left, right, case
+        plain[1..4].copy_from_slice(&[left, 80, 50]); // left, right, case
         let mut block = Block::<aes::Aes128>::try_from(&plain[..]).unwrap();
         aes::Aes128::new_from_slice(&KEY)
             .unwrap()
@@ -1484,7 +1567,7 @@ mod tests {
             .handle_battery_info(battery_packet(83), MAC, &client)
             .await;
         let mut rx = coordinator.subscribe();
-        assert_eq!(rx.borrow_and_update().states[&MAC].model_name, "");
+        assert_eq!(rx.borrow_and_update().states[&MAC].identity, None);
 
         coordinator
             .handle_advertisement(advertisement(), BLE_MAC)
@@ -1493,8 +1576,8 @@ mod tests {
         let state = rx.borrow_and_update().states[&MAC].clone();
         assert_eq!(state.source, DataSource::Aap);
         assert_eq!(state.left_battery, Some(83));
-        assert_eq!(state.model_name, "AirPods Pro 3");
-        assert_eq!(state.color, 0x01);
+        assert_eq!(state.identity, Some(PRO_3));
+        assert_eq!(PRO_3.model_name(), "AirPods Pro 3");
 
         coordinator
             .handle_advertisement(advertisement(), BLE_MAC)
@@ -1524,9 +1607,90 @@ mod tests {
             .await;
         let state = coordinator.subscribe().borrow().states[&MAC].clone();
         assert_eq!(state.left_battery, Some(82));
-        assert_eq!(state.device_model, 0x2027);
-        assert_eq!(state.model_name, "AirPods Pro 3");
-        assert_eq!(state.color, 0x01);
+        assert_eq!(state.identity, Some(PRO_3));
+    }
+
+    /// Regression (#45): the in-ear icons vanished the moment a pair connected
+    /// over AAP, whose battery packets say nothing about ears, although its
+    /// advertisements kept saying it. The snapshot takes it from the cached
+    /// advertisement - and drops it with that, rather than keeping a pod in
+    /// an ear long after it may have come out.
+    #[tokio::test]
+    async fn a_device_on_aap_shows_in_ear_from_its_cached_advertisement() {
+        let (coordinator, client, _dir) = linked();
+        coordinator
+            .handle_battery_info(battery_packet(83), MAC, &client)
+            .await;
+        let left_in = ProximityData {
+            left_in_ear: true,
+            connection_state: 0x05,
+            ..advertisement()
+        };
+        coordinator.handle_advertisement(left_in, BLE_MAC).await;
+
+        let state = coordinator.subscribe().borrow().states[&MAC].clone();
+        assert_eq!(state.source, DataSource::Aap);
+        assert_eq!(state.left_battery, Some(83), "AAP's level, not BLE's");
+        assert_eq!(
+            (state.left_in_ear, state.right_in_ear),
+            (Some(true), Some(false))
+        );
+        assert_eq!(state.connection_state, Some(0x05));
+        assert_eq!(state.primary_pod, Some(PodSide::Left));
+
+        assert!(
+            coordinator
+                .inner
+                .write()
+                .await
+                .prune(Instant::now() + BLE_CACHE_TTL)
+        );
+        let state = coordinator.inner.read().await.snapshot().states[&MAC].clone();
+        assert_eq!(state.source, DataSource::Aap);
+        assert_eq!((state.left_in_ear, state.right_in_ear), (None, None));
+        assert_eq!(state.connection_state, None);
+        assert_eq!(state.primary_pod, None);
+        assert_eq!(state.identity, Some(PRO_3), "the link's, unlike these");
+    }
+
+    /// A pod taken out of an ear is worth a broadcast for a device on AAP,
+    /// though nothing else in the advertisement changed. A level that changed
+    /// is not: the snapshot shows AAP's.
+    #[tokio::test]
+    async fn a_pod_taken_out_is_broadcast_for_a_device_on_aap() {
+        let (coordinator, client, _dir) = linked();
+        coordinator
+            .handle_battery_info(battery_packet(83), MAC, &client)
+            .await;
+        let both_in = ProximityData {
+            left_in_ear: true,
+            right_in_ear: true,
+            ..advertisement()
+        };
+        coordinator.handle_advertisement(both_in, BLE_MAC).await;
+        let mut rx = coordinator.subscribe();
+        assert_eq!(rx.borrow_and_update().states[&MAC].right_in_ear, Some(true));
+
+        let right_out = ProximityData {
+            left_in_ear: true,
+            ..advertisement()
+        };
+        coordinator.handle_advertisement(right_out, BLE_MAC).await;
+        assert!(
+            rx.has_changed().unwrap(),
+            "a pod taken out is worth a broadcast"
+        );
+        assert_eq!(
+            rx.borrow_and_update().states[&MAC].right_in_ear,
+            Some(false)
+        );
+
+        let lower = ProximityData {
+            left_in_ear: true,
+            ..advertisement_with_left(70)
+        };
+        coordinator.handle_advertisement(lower, BLE_MAC).await;
+        assert!(!rx.has_changed().unwrap(), "nothing new to show");
     }
 
     /// Regression (#47): a key stored under a lowercase MAC - as
@@ -1593,7 +1757,7 @@ mod tests {
         let mut s = PodState {
             left_battery: Some(80),
             right_battery: Some(60),
-            ..Default::default()
+            ..PodState::empty(DataSource::Ble)
         };
         assert_eq!(s.lowest_earbud(), Some(60));
 
@@ -1643,7 +1807,10 @@ mod tests {
     /// and a reading for each of `heard`.
     fn listing(known: &[Address], connected: &[Address], heard: &[Address]) -> Snapshot {
         Snapshot {
-            states: heard.iter().map(|&m| (m, PodState::default())).collect(),
+            states: heard
+                .iter()
+                .map(|&m| (m, PodState::empty(DataSource::Ble)))
+                .collect(),
             connected_macs: connected.to_vec(),
             known_keys: known.to_vec(),
             device_names: HashMap::new(),
