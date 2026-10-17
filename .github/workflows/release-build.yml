@@ -37,7 +37,7 @@ jobs:
         with:
           toolchain: stable
       # No build cache: a release builds from scratch
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: cargo-auditable@0.7.7,cargo-cyclonedx@0.5.9
       # Embeds the dependency list in the binary, for scanners such as cargo audit bin
