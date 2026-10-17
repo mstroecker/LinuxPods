@@ -20,6 +20,13 @@ name = "fakepods"
 path = "src/bin/fakepods.rs"
 required-features = ["harness"]
 
+# The pipeline against the fake world (#73). Built only with the feature it
+# runs on.
+[[test]]
+name = "pipeline"
+path = "tests/pipeline.rs"
+required-features = ["harness"]
+
 [dependencies]
 # UI
 gtk = { package = "gtk4", version = "0.11", features = ["v4_4"] }
