@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 use zbus::{Connection, MatchRule, MessageStream, interface, proxy};
 
-const BLUEZ_SERVICE: &str = "org.bluez";
+pub const BLUEZ_SERVICE: &str = "org.bluez";
 const ADAPTER_PATH: &str = "/org/bluez/hci0";
 const PROVIDER_PATH: &str = "/com/github/mstroecker/linuxpods/battery";
 const BATTERY_NAME: &str = "airpods_battery";
@@ -22,7 +22,7 @@ const SOURCE: &str = "LinuxPods";
 /// The service UUID every AirPods lists in `Device1.UUIDs` - the identifier
 /// LibrePods uses too. Unlike the alias it survives a rename, and unlike Apple's
 /// vendor ID in `Modalias` it does not also match Apple keyboards and mice.
-const AIRPODS_UUID: &str = "74ec2172-0bad-4d01-8f77-997b2be0722a";
+pub const AIRPODS_UUID: &str = "74ec2172-0bad-4d01-8f77-997b2be0722a";
 
 #[proxy(
     interface = "org.bluez.BatteryProviderManager1",
@@ -167,7 +167,13 @@ impl BatteryProvider {
         let conn = Connection::system()
             .await
             .context("failed to connect to system bus")?;
+        Self::with_connection(conn).await
+    }
 
+    /// [`BatteryProvider::new`] on `conn`, with whichever BlueZ answers there -
+    /// under the test harness, a fake on a private bus (#72). The device watch
+    /// and lookups go over the same connection.
+    pub async fn with_connection(conn: Connection) -> Result<Self> {
         // Serving ObjectManager at the provider root is what makes BlueZ pick up
         // batteries added underneath it.
         conn.object_server()

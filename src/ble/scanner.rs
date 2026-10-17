@@ -17,7 +17,8 @@ use zbus::{Connection, MatchRule, MessageStream, proxy};
 
 use super::parser::{ProximityData, parse_proximity_data};
 
-const APPLE_COMPANY_ID: u16 = 0x004C;
+/// The key of Apple's entry in a device's `ManufacturerData`.
+pub const APPLE_COMPANY_ID: u16 = 0x004C;
 
 #[proxy(
     interface = "org.bluez.Adapter1",
@@ -43,11 +44,18 @@ pub struct Scanner {
 }
 
 impl Scanner {
+    /// A scanner on the system bus, where BlueZ is.
     pub async fn new() -> Result<Self> {
         let conn = Connection::system()
             .await
             .context("failed to connect to system bus")?;
-        Ok(Self { conn })
+        Ok(Self::with_connection(conn))
+    }
+
+    /// A scanner on `conn`, for whichever BlueZ answers there - under the test
+    /// harness, a fake on a private bus (#72).
+    pub fn with_connection(conn: Connection) -> Self {
+        Self { conn }
     }
 
     /// Sets an LE-only discovery filter and starts scanning.
