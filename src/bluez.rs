@@ -1,4 +1,7 @@
-//! BlueZ BatteryProvider1 integration.
+//! BlueZ integration: its device objects, read and watched by [`Devices`], and
+//! the batteries [`BatteryProvider`] exports to it for GNOME Settings. Both go
+//! over a connection they are given - the system bus, or under the test
+//! harness a fake BlueZ on a private one (#72).
 //!
 //! zbus ships `fdo::ObjectManager` and derives properties, so none of the usual
 //! ObjectManager boilerplate is needed - no GetManagedObjects, no introspection
@@ -72,12 +75,13 @@ impl BatteryProvider1 {
     }
 }
 
-/// Owns the D-Bus connection and the registered provider.
+/// The registered provider, exporting one battery object per device.
+///
+/// Which objects are exported, and at what level, is the caller's to keep:
+/// `attachment` keeps it with the rest of what it knows about each pair, so
+/// the two cannot drift apart.
 pub struct BatteryProvider {
     conn: Connection,
-    /// The level each exported battery object shows, keyed by MAC. An attached
-    /// device has one only while it has a reading - see [`battery_actions`].
-    batteries: HashMap<Address, u8>,
 }
 
 /// Where one device's battery object lives, under the provider root.
@@ -89,7 +93,7 @@ fn battery_path(mac: Address) -> Result<OwnedObjectPath> {
     OwnedObjectPath::try_from(path.as_str()).with_context(|| format!("invalid battery path {path}"))
 }
 
-/// One change to the exported battery objects - see [`battery_actions`].
+/// One change to the exported battery objects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatteryAction {
     /// Export a device's object, starting at its first reading.
@@ -109,70 +113,16 @@ pub enum BatteryAction {
 }
 
 impl BatteryAction {
-    fn mac(&self) -> Address {
+    pub fn mac(&self) -> Address {
         match self {
             Self::Add { mac, .. } | Self::Update { mac, .. } | Self::Remove { mac } => *mac,
         }
     }
 }
 
-/// Decides how the exported battery objects change so that GNOME Settings shows
-/// every attached device's reading, and nothing for one without a reading.
-///
-/// `Battery1` has no "unknown". An object exported ahead of the first reading sat
-/// at 0% - a real level, so GNOME Settings and anything else reading BlueZ
-/// batteries saw a flat battery, for the whole connection if neither AAP nor a
-/// decryptable advertisement came through - and one that outlived its reading kept
-/// showing a stale level. Absence is the only honest way to say "unknown".
-///
-/// `attached` maps BlueZ device paths to MACs. `levels` holds the reading of each
-/// device that has one, `exported` the level each exported object shows, both
-/// keyed by MAC. Sorted by MAC, so the order does not depend on the maps'.
-pub fn battery_actions(
-    attached: &HashMap<String, Address>,
-    levels: &HashMap<Address, u8>,
-    exported: &HashMap<Address, u8>,
-) -> Vec<BatteryAction> {
-    let mut actions: Vec<BatteryAction> = attached
-        .iter()
-        .filter_map(
-            |(device_path, &mac)| match (levels.get(&mac), exported.get(&mac)) {
-                (Some(&percentage), None) => Some(BatteryAction::Add {
-                    mac,
-                    device_path: device_path.clone(),
-                    percentage,
-                }),
-                // An unchanged level would only be signal traffic.
-                (Some(&percentage), Some(&shown)) if percentage != shown => {
-                    Some(BatteryAction::Update { mac, percentage })
-                }
-                (None, Some(_)) => Some(BatteryAction::Remove { mac }),
-                _ => None,
-            },
-        )
-        .chain(
-            exported
-                .keys()
-                .filter(|mac| !attached.values().any(|m| m == *mac))
-                .map(|&mac| BatteryAction::Remove { mac }),
-        )
-        .collect();
-    actions.sort_by_key(BatteryAction::mac);
-    actions
-}
-
 impl BatteryProvider {
-    /// Connects to the system bus, serves the ObjectManager, and registers with BlueZ.
-    pub async fn new() -> Result<Self> {
-        let conn = Connection::system()
-            .await
-            .context("failed to connect to system bus")?;
-        Self::with_connection(conn).await
-    }
-
-    /// [`BatteryProvider::new`] on `conn`, with whichever BlueZ answers there -
-    /// under the test harness, a fake on a private bus (#72). The device watch
-    /// and lookups go over the same connection.
+    /// Serves the ObjectManager on `conn` and registers with whichever BlueZ
+    /// answers there.
     pub async fn with_connection(conn: Connection) -> Result<Self> {
         // Serving ObjectManager at the provider root is what makes BlueZ pick up
         // batteries added underneath it.
@@ -190,18 +140,10 @@ impl BatteryProvider {
             .await
             .context("failed to register battery provider")?;
 
-        Ok(Self {
-            conn,
-            batteries: HashMap::new(),
-        })
+        Ok(Self { conn })
     }
 
-    /// The level each exported battery object shows, keyed by MAC.
-    pub fn exported(&self) -> &HashMap<Address, u8> {
-        &self.batteries
-    }
-
-    /// Carries out one of [`battery_actions`]' decisions.
+    /// Carries out one change to the exported battery objects.
     pub async fn apply(&mut self, action: &BatteryAction) -> Result<()> {
         match action {
             BatteryAction::Add {
@@ -235,8 +177,6 @@ impl BatteryProvider {
             )
             .await
             .context("failed to export battery object")?;
-
-        self.batteries.insert(mac, percentage);
         Ok(())
     }
 
@@ -255,25 +195,43 @@ impl BatteryProvider {
             .percentage_changed(iface_ref.signal_emitter())
             .await
             .context("failed to emit PropertiesChanged")?;
-
-        self.batteries.insert(mac, percentage);
         Ok(())
     }
 
-    /// Removes one device's battery object, emitting InterfacesRemoved.
+    /// Removes one device's battery object, emitting InterfacesRemoved. Fails
+    /// when there is none to remove.
     async fn remove_battery(&mut self, mac: Address) -> Result<()> {
-        if self.batteries.remove(&mac).is_some() {
-            self.conn
-                .object_server()
-                .remove::<BatteryProvider1, _>(&battery_path(mac)?)
-                .await
-                .context("failed to remove battery object")?;
-        }
+        self.conn
+            .object_server()
+            .remove::<BatteryProvider1, _>(&battery_path(mac)?)
+            .await
+            .context("failed to remove battery object")?;
         Ok(())
     }
 
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Unregisters the provider. BlueZ drops its batteries along with it.
+    pub async fn close(&self) -> Result<()> {
+        let manager = BatteryProviderManager1Proxy::new(&self.conn).await?;
+        let path = ObjectPath::try_from(PROVIDER_PATH)?;
+        manager.unregister_battery_provider(&path).await?;
+        Ok(())
+    }
+}
+
+/// BlueZ's device objects: which are connected AirPods, what each is called,
+/// and the connection watch.
+pub struct Devices {
+    conn: Connection,
+}
+
+impl Devices {
+    /// The devices of whichever BlueZ answers on `conn`.
+    pub fn new(conn: Connection) -> Self {
+        Self { conn }
     }
 
     /// Every connected AirPods - see [`is_airpods`].
@@ -385,18 +343,6 @@ impl BatteryProvider {
             .await
             .ok()
     }
-
-    /// Unregisters the provider. Called on shutdown.
-    pub async fn close(&mut self) -> Result<()> {
-        let macs: Vec<Address> = self.batteries.keys().copied().collect();
-        for mac in macs {
-            let _ = self.remove_battery(mac).await;
-        }
-        let manager = BatteryProviderManager1Proxy::new(&self.conn).await?;
-        let path = ObjectPath::try_from(PROVIDER_PATH)?;
-        manager.unregister_battery_provider(&path).await?;
-        Ok(())
-    }
 }
 
 /// A device connecting or disconnecting, or its services marking it as AirPods.
@@ -409,12 +355,12 @@ pub struct ConnectionEvent {
     pub connected: Option<bool>,
 }
 
-impl BatteryProvider {
+impl Devices {
     /// Stream of Connected changes on org.bluez.Device1, and of UUIDs changes
     /// that mark a device as AirPods.
     ///
-    /// Port of the Go WatchForAirPods signal loop. Without this the provider only
-    /// ever saw devices that were already connected at startup, so plugging the
+    /// Port of the Go WatchForAirPods signal loop. Without this the app only ever
+    /// saw devices that were already connected at startup, so plugging the
     /// AirPods in later did nothing.
     pub async fn watch_connections(
         &self,
@@ -611,91 +557,7 @@ mod tests {
     }
 
     const MAC_A: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-    const PATH_A: &str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
     const MAC_B: Address = Address::new([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-    const PATH_B: &str = "/org/bluez/hci0/dev_11_22_33_44_55_66";
-
-    fn map<K: Clone + Eq + std::hash::Hash, V: Clone>(entries: &[(K, V)]) -> HashMap<K, V> {
-        entries.iter().cloned().collect()
-    }
-
-    /// Pair A attached, as `bluez_task` keeps it: by device path, to its MAC.
-    fn attached_a() -> HashMap<String, Address> {
-        map(&[(PATH_A.to_string(), MAC_A)])
-    }
-
-    /// Nothing is exported until the first reading, and then at that level -
-    /// never at a placeholder 0% ahead of it.
-    #[test]
-    fn first_reading_adds_the_battery_at_that_level() {
-        assert!(battery_actions(&attached_a(), &map(&[]), &map(&[])).is_empty());
-        assert_eq!(
-            battery_actions(&attached_a(), &map(&[(MAC_A, 73)]), &map(&[])),
-            [BatteryAction::Add {
-                mac: MAC_A,
-                device_path: PATH_A.to_string(),
-                percentage: 73,
-            }]
-        );
-    }
-
-    /// A snapshot that leaves the level alone sends no PropertiesChanged.
-    #[test]
-    fn unchanged_level_is_left_alone() {
-        let levels = map(&[(MAC_A, 73)]);
-        assert!(battery_actions(&attached_a(), &levels, &map(&[(MAC_A, 73)])).is_empty());
-    }
-
-    #[test]
-    fn changed_level_updates_the_battery() {
-        assert_eq!(
-            battery_actions(&attached_a(), &map(&[(MAC_A, 72)]), &map(&[(MAC_A, 73)])),
-            [BatteryAction::Update {
-                mac: MAC_A,
-                percentage: 72,
-            }]
-        );
-    }
-
-    /// The link dropped or the BLE reading expired, with the pair still
-    /// connected: the last level would be stale, and there is no "unknown".
-    #[test]
-    fn reading_gone_withdraws_the_battery() {
-        assert_eq!(
-            battery_actions(&attached_a(), &map(&[]), &map(&[(MAC_A, 73)])),
-            [BatteryAction::Remove { mac: MAC_A }]
-        );
-    }
-
-    /// A disconnected pair loses its battery, though BLE may still hold a
-    /// reading for it.
-    #[test]
-    fn detached_device_loses_its_battery() {
-        assert_eq!(
-            battery_actions(&map(&[]), &map(&[(MAC_A, 73)]), &map(&[(MAC_A, 73)])),
-            [BatteryAction::Remove { mac: MAC_A }]
-        );
-    }
-
-    /// Each pair is decided on its own, and the order is by MAC.
-    #[test]
-    fn pairs_are_decided_independently() {
-        let attached = map(&[(PATH_A.to_string(), MAC_A), (PATH_B.to_string(), MAC_B)]);
-        assert_eq!(
-            battery_actions(
-                &attached,
-                &map(&[(MAC_A, 50)]),
-                &map(&[(MAC_A, 60), (MAC_B, 40)])
-            ),
-            [
-                BatteryAction::Remove { mac: MAC_B },
-                BatteryAction::Update {
-                    mac: MAC_A,
-                    percentage: 50,
-                },
-            ]
-        );
-    }
 
     #[test]
     fn identifies_airpods_by_service_uuid() {

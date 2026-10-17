@@ -922,7 +922,7 @@ mod tests {
 
     use super::*;
     use crate::ble::scanner::Scanner;
-    use crate::bluez::{BatteryAction, BatteryProvider};
+    use crate::bluez::{BatteryAction, BatteryProvider, Devices};
     use crate::harness::PrivateBus;
     use crate::harness::pods::{PRO_3, Pods};
 
@@ -1022,25 +1022,23 @@ mod tests {
         }
     }
 
-    /// Everything `bluez::BatteryProvider` reads about a device, it finds.
+    /// Everything `bluez::Devices` reads about a device, it finds.
     #[tokio::test]
-    async fn serves_what_the_battery_provider_reads() {
+    async fn serves_what_bluez_devices_reads() {
         let (bus, bluez) = served().await;
-        let provider = BatteryProvider::with_connection(bus.connect().await.unwrap())
-            .await
-            .unwrap();
+        let devices = Devices::new(bus.connect().await.unwrap());
         let path = device_path(PAIR).to_string();
 
-        assert!(provider.connected_airpods().await.unwrap().is_empty());
+        assert!(devices.connected_airpods().await.unwrap().is_empty());
         bluez.set_connected(PAIR, true).await.unwrap();
         assert_eq!(
-            provider.connected_airpods().await.unwrap(),
+            devices.connected_airpods().await.unwrap(),
             std::slice::from_ref(&path)
         );
-        assert_eq!(provider.device_address(&path).await.unwrap(), PAIR);
-        assert_eq!(provider.device_alias(&path).await, ALIAS);
-        assert!(provider.device_is_airpods(&path).await);
-        assert!(provider.device_connected(&path).await);
+        assert_eq!(devices.device_address(&path).await.unwrap(), PAIR);
+        assert_eq!(devices.device_alias(&path).await, ALIAS);
+        assert!(devices.device_is_airpods(&path).await);
+        assert!(devices.device_connected(&path).await);
 
         // An advertiser in range is a device too, but not a paired one.
         Scanner::with_connection(bus.connect().await.unwrap())
@@ -1049,20 +1047,18 @@ mod tests {
             .unwrap();
         assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
         assert_eq!(
-            provider.device_aliases().await,
+            devices.device_aliases().await,
             HashMap::from([(PAIR, ALIAS.to_string())])
         );
-        assert!(!provider.device_is_airpods(&device_path(RANDOM)).await);
+        assert!(!devices.device_is_airpods(&device_path(RANDOM)).await);
     }
 
     /// A connection changing is signalled; setting it as it was is not.
     #[tokio::test]
     async fn connections_reach_the_watch() {
         let (bus, bluez) = served().await;
-        let provider = BatteryProvider::with_connection(bus.connect().await.unwrap())
-            .await
-            .unwrap();
-        let events = provider.watch_connections().await.unwrap();
+        let devices = Devices::new(bus.connect().await.unwrap());
+        let events = devices.watch_connections().await.unwrap();
         tokio::pin!(events);
 
         bluez.set_connected(PAIR, true).await.unwrap();
