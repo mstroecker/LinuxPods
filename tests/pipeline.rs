@@ -42,12 +42,14 @@ use tempfile::TempDir;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use zbus::Connection;
 
 use linuxpods::aap::NoiseMode;
 use linuxpods::aap::noise::{allow_off_packet, set_packet};
 use linuxpods::attachment::Attachment;
 use linuxpods::ble::decrypt_for_device;
 use linuxpods::ble::scanner::{Advertisement, Scanner};
+use linuxpods::bluez::BatteryProvider;
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3, Part};
 use linuxpods::harness::{PrivateBus, World};
 use linuxpods::keystore::Keystore;
@@ -205,6 +207,12 @@ impl Fixture {
 
     /// Starts the app on this world - see [`App`].
     async fn start_app(&self) -> App {
+        self.start_app_on(self.bus.connect().await.unwrap()).await
+    }
+
+    /// [`Fixture::start_app`], with attachment on `bluez`, a connection to the
+    /// test's bus that the test may have used first.
+    async fn start_app_on(&self, bluez: Connection) -> App {
         let coordinator = Coordinator::with_aap_socket_dir(
             Some(self.keystore()),
             self.sockets.path().to_path_buf(),
@@ -237,7 +245,6 @@ impl Fixture {
         // As main.rs's attachment task, on a connection of its own. Back from
         // `new`, the startup sweep is over: a pair the test connects from here
         // on is one attachment is told about, not one the sweep may find.
-        let bluez = self.bus.connect().await.unwrap();
         let attachment = Attachment::new(bluez, coordinator.clone())
             .await
             .expect("attachment starts");
@@ -891,4 +898,28 @@ async fn two_pairs_attach_and_detach_independently() {
         .until_batteries(&HashMap::from([(OTHER, lowest(changed))]))
         .await;
     assert_eq!(app.updates.borrow().connected_macs, [OTHER]);
+}
+
+/// A pair is attached though BlueZ refuses the battery provider, as it does
+/// with no BatteryProviderManager1 at `/org/bluez/hci0` - a BlueZ without one,
+/// or an adapter by another name (#51). It gets AAP, if no GNOME Settings
+/// battery. Regression: a refused provider stopped attachment altogether, and
+/// every pair stayed on BLE, a pair new to the app with no key to be read by.
+///
+/// Refused here because the app's connection has a provider registered at the
+/// same path already.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_battery_provider_leaves_attachment_working() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let bluez = fixture.bus.connect().await.unwrap();
+    let _registered = BatteryProvider::with_connection(bluez.clone())
+        .await
+        .unwrap();
+    let mut app = fixture.start_app_on(bluez).await;
+
+    app.attach(PAIR).await;
+    app.until("the key and an AAP reading", |s| {
+        s.known_keys == [PAIR] && levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
 }

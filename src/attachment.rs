@@ -10,6 +10,10 @@
 //! pipeline tests run against the harness's fake BlueZ the code the app runs
 //! against bluetoothd.
 //!
+//! The battery is the only part that needs BlueZ to take the battery provider.
+//! When it refuses, pairs are attached all the same, and get AAP - and their
+//! keys, without which a pair new to the app never shows over BLE at all.
+//!
 //! # One record
 //!
 //! What attachment knows about a pair is one [`Attached`] entry, by real MAC: its
@@ -61,7 +65,8 @@ pub async fn run(coordinator: Arc<Coordinator>) {
 pub struct Attachment {
     coordinator: Arc<Coordinator>,
     devices: Devices,
-    provider: BatteryProvider,
+    /// `None` when BlueZ refused it - see the module docs.
+    provider: Option<BatteryProvider>,
     /// BlueZ's connection events, from before the startup sweep on.
     events: Pin<Box<dyn Stream<Item = ConnectionEvent> + Send + Sync>>,
     /// Every attached pair, by real MAC. A disconnect names the BlueZ object;
@@ -84,10 +89,17 @@ impl Attachment {
     /// registers the battery provider, watches for connections, and attaches
     /// the pairs that are connected already. Back from here, the startup sweep
     /// is over, and [`Attachment::run`] takes every connection from then on.
+    ///
+    /// Fails only when connections cannot be watched.
     pub async fn new(conn: Connection, coordinator: Arc<Coordinator>) -> Result<Self> {
-        let provider = BatteryProvider::with_connection(conn.clone())
-            .await
-            .context("failed to create BlueZ battery provider")?;
+        let provider = match BatteryProvider::with_connection(conn.clone()).await {
+            Ok(provider) => Some(provider),
+            Err(e) => {
+                tracing::warn!("failed to create BlueZ battery provider: {e:#}");
+                tracing::warn!("Battery won't appear in GNOME Settings, but the UI still works");
+                None
+            }
+        };
         let devices = Devices::new(conn);
 
         // Subscribe before the sweep so a connection racing startup is not missed.
@@ -276,7 +288,12 @@ impl Attachment {
     /// Carries out one battery change, logging what came of it. Returns whether
     /// it went through.
     async fn apply(&mut self, action: &BatteryAction) -> bool {
-        if let Err(e) = self.provider.apply(action).await {
+        // Without a provider nothing goes through, and nothing is logged: that
+        // was said once, at startup.
+        let Some(provider) = &mut self.provider else {
+            return false;
+        };
+        if let Err(e) = provider.apply(action).await {
             tracing::warn!("failed to apply {action:?} to the BlueZ battery: {e:#}");
             return false;
         }
