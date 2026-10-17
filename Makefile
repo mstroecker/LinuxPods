@@ -44,7 +44,8 @@ deny:
 # build-only dependencies are left out: they never reach the binary. The
 # timestamp is the last commit's, so the same commit gives the same file.
 # cargo-cyclonedx then omits the serial number, which actions/attest requires,
-# so one is derived from the commit (UUIDv5).
+# so one is derived from the commit (UUIDv5). It also describes fakepods, the
+# harness's binary, though no release builds it: that file is dropped.
 SBOM_DIR = target/sbom
 sbom:
 	@command -v cargo-cyclonedx >/dev/null || { echo "cargo-cyclonedx not found: cargo install --locked cargo-cyclonedx"; exit 1; }
@@ -57,6 +58,7 @@ sbom:
 		linuxpods_bin.cdx.json "https://github.com/mstroecker/LinuxPods/commit/$$(git rev-parse HEAD)" \
 		$(SBOM_DIR)/linuxpods.cdx.json
 	rm linuxpods_bin.cdx.json
+	rm -f fakepods_bin.cdx.json
 	@echo "SBOM: $(SBOM_DIR)/linuxpods.cdx.json"
 
 # Install the pre-commit secret scan into this checkout

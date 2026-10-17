@@ -153,11 +153,12 @@ jobs:
           tool: cargo-llvm-cov@0.9.1
       # With the harness, so its tests count for the app code they run - the
       # Unix-socket AAP link, and the pipeline tests (#73). The harness's own
-      # code is left out: the fake AirPods are test fixtures, and automation.rs
-      # serves a test interface, mostly GTK code CI has no display for.
+      # code is left out: the fake AirPods, BlueZ and world are test fixtures,
+      # fakepods runs them, and automation.rs serves a test interface, mostly
+      # GTK code CI has no display for.
       - run: >-
           cargo llvm-cov --locked --all-targets --features harness
-          --ignore-filename-regex '(src/harness/|src/ui/automation\.rs)'
+          --ignore-filename-regex '(src/harness/|src/ui/automation\.rs|src/bin/fakepods\.rs)'
           --lcov --output-path lcov.info
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:

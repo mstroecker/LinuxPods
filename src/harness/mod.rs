@@ -3,12 +3,15 @@
 //!
 //! - [`pods`]: one pair of fake AirPods, pure state in and bytes out.
 //! - [`bluez`]: a fake `org.bluez` for the app's scanner and battery provider.
+//! - [`world`]: pairs, the fake BlueZ and their AAP sockets running together,
+//!   changed over D-Bus or from the same process. `fakepods` runs one.
 //!
 //! Built only with the `harness` feature, which `lib.rs` refuses outside debug
 //! builds.
 
 pub mod bluez;
 pub mod pods;
+pub mod world;
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -17,6 +20,7 @@ use anyhow::{Context, Result};
 
 pub use bluez::FakeBluez;
 pub use pods::Pods;
+pub use world::World;
 
 /// A bus configuration for a private `dbus-daemon` listening in `dir`: a
 /// session-type bus open to every connection of this user, with no service

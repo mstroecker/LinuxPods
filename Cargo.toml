@@ -13,6 +13,13 @@ path = "src/lib.rs"
 name = "linuxpods"
 path = "src/main.rs"
 
+# The fake world of the test harness (#72). Built only with the feature, so
+# release builds - which have none - leave it out.
+[[bin]]
+name = "fakepods"
+path = "src/bin/fakepods.rs"
+required-features = ["harness"]
+
 [dependencies]
 # UI
 gtk = { package = "gtk4", version = "0.11", features = ["v4_4"] }
