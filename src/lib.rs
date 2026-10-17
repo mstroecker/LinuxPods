@@ -13,6 +13,7 @@
 compile_error!("the `harness` feature is for debug builds only - build without --release");
 
 pub mod aap;
+pub mod attachment;
 pub mod ble;
 pub mod bluez;
 #[cfg(feature = "harness")]
