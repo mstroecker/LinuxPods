@@ -1,6 +1,7 @@
-//! The pipeline end to end (#73): from an advertisement on D-Bus, or a packet
-//! on the AAP socket, through the real scanner, coordinator and keystore, to
-//! the snapshot the UI renders.
+//! The pipeline end to end (#73): from an advertisement or a connection on
+//! D-Bus, or a packet on the AAP socket, through the real scanner, attachment,
+//! coordinator and keystore, to the snapshot the UI renders and the battery
+//! GNOME Settings shows.
 //!
 //! The coordinator's unit tests set its state up by hand and call one function
 //! at a time. The per-device bugs of the past lived between those functions:
@@ -12,15 +13,14 @@
 //!   session bus
 //! - a [`World`] on it: the fake BlueZ, and pairs of fake AirPods that
 //!   advertise through it and answer AAP on a Unix socket each
-//! - the real [`Scanner`] feeding the real [`Coordinator`], as `main.rs`'s
-//!   `ble_task` does, with a [`Keystore`] in a temporary directory
+//! - the app as `main.rs` wires it, less the UI and tray: the real [`Scanner`]
+//!   feeding the real [`Coordinator`], with a [`Keystore`] in a temporary
+//!   directory, and the real [`Attachment`] taking up the pairs BlueZ reports
+//!   connected
 //!
-//! Device attachment - connection events, the AirPods check, the GNOME
-//! Settings battery - lives in `main.rs` until #48, out of a test's reach.
-//! Where a test needs a pair attached, it calls `connect_aap` or
-//! `disconnect_aap` itself, beside the world's `connect` or `disconnect`, as
-//! `main.rs` does when BlueZ reports the change. #48 adds the attachment
-//! scenarios to this suite.
+//! A test attaches a pair as a user would, by connecting it, and the app takes
+//! it from there: an AAP link, and a battery for GNOME Settings, which the fake
+//! BlueZ reports through [`World::batteries`].
 //!
 //! Time runs at real speed: each pair advertises once a second, from an
 //! address that rotates every ten. Tests wait for what they expect to see,
@@ -45,6 +45,7 @@ use tokio::time::timeout;
 
 use linuxpods::aap::NoiseMode;
 use linuxpods::aap::noise::{allow_off_packet, set_packet};
+use linuxpods::attachment::Attachment;
 use linuxpods::ble::decrypt_for_device;
 use linuxpods::ble::scanner::{Advertisement, Scanner};
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3, Part};
@@ -67,6 +68,9 @@ const POLL: Duration = Duration::from_millis(20);
 /// documentation.
 const PAIR: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x01]);
 const OTHER: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x02]);
+/// A third pair, which a test may have the fake BlueZ show without the AirPods
+/// service: headphones, as far as the app can tell.
+const HEADPHONES: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x03]);
 
 /// Battery levels - left, right, case - none a multiple of ten. Advertised in
 /// the clear they round down to their 10% step, so a BLE reading that shows
@@ -174,6 +178,18 @@ impl Fixture {
         .await;
     }
 
+    /// Waits until GNOME Settings shows `expected` and nothing else: a level for
+    /// each attached pair with a reading, by MAC. Read off the fake BlueZ, which
+    /// tells no one when it changes.
+    async fn until_batteries(&self, expected: &HashMap<Address, u8>) {
+        let world = &self.world;
+        eventually(
+            &format!("GNOME Settings to show {expected:?}"),
+            move || async move { world.batteries() == *expected },
+        )
+        .await;
+    }
+
     /// Waits until a pair is in `mode`, whichever way it got there.
     async fn until_mode(&self, mac: Address, mode: NoiseMode) {
         let world = &self.world;
@@ -218,18 +234,28 @@ impl Fixture {
             .expect("timed out starting the scanner")
             .expect("the scanner started");
 
+        // As main.rs's attachment task, on a connection of its own. Back from
+        // `new`, the startup sweep is over: a pair the test connects from here
+        // on is one attachment is told about, not one the sweep may find.
+        let bluez = self.bus.connect().await.unwrap();
+        let attachment = Attachment::new(bluez, coordinator.clone())
+            .await
+            .expect("attachment starts");
+        let attaching = tokio::spawn(attachment.run());
+
         App {
             world: self.world.clone(),
             coordinator,
             updates,
             handled: handled_rx,
             listening,
+            attaching,
         }
     }
 }
 
-/// The app as `main.rs` wires it, less the UI and device attachment: the real
-/// scanner on the test's bus feeding the real coordinator, which keeps its
+/// The app as `main.rs` wires it, less the UI and tray: the real scanner and
+/// attachment on the test's bus, feeding the real coordinator, which keeps its
 /// keys in the fixture's keystore and opens AAP to the pairs' sockets.
 struct App {
     world: World,
@@ -240,24 +266,26 @@ struct App {
     handled: mpsc::UnboundedReceiver<Advertisement>,
     /// The scanner's task.
     listening: JoinHandle<()>,
+    /// Attachment's task.
+    attaching: JoinHandle<()>,
 }
 
 impl App {
-    /// Connects a pair and opens AAP to it, as `main.rs` does when BlueZ
-    /// reports AirPods connected.
-    async fn attach(&self, mac: Address) {
+    /// Connects a pair, and waits until the app has attached it: its AAP link
+    /// is up. One connected already is the sweep's to attach; this only waits.
+    async fn attach(&mut self, mac: Address) {
         self.world.connect(mac).await.unwrap();
-        self.coordinator
-            .connect_aap(mac)
-            .await
-            .unwrap_or_else(|e| panic!("AAP to {mac} failed: {e:#}"));
+        self.until(&format!("{mac} on AAP"), |s| s.is_connected(mac))
+            .await;
     }
 
-    /// Disconnects a pair and closes its AAP link, as `main.rs` does when
-    /// BlueZ reports AirPods disconnected.
-    async fn detach(&self, mac: Address) {
+    /// Disconnects a pair, and waits until its AAP link is gone. Attachment may
+    /// not have detached it by then: the pair hanging up AAP as it disconnects
+    /// takes the link down as well.
+    async fn detach(&mut self, mac: Address) {
         self.world.disconnect(mac).await.unwrap();
-        self.coordinator.disconnect_aap(mac).await;
+        self.until(&format!("{mac} off AAP"), |s| !s.is_connected(mac))
+            .await;
     }
 
     /// Waits until the latest snapshot is `done`, and returns it.
@@ -317,6 +345,7 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.listening.abort();
+        self.attaching.abort();
     }
 }
 
@@ -345,6 +374,11 @@ fn levels(snapshot: &Snapshot, mac: Address, source: DataSource) -> Option<[u8; 
         state.right_battery?,
         state.case_battery?,
     ])
+}
+
+/// What GNOME Settings shows for a pair at `levels`: the lower earbud.
+fn lowest([left, right, _]: [u8; 3]) -> u8 {
+    left.min(right)
 }
 
 /// Whether `advert` came from the pair at `mac`: whether its key decrypts it.
@@ -702,4 +736,159 @@ async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast
         fixture.keystore().load().unwrap(),
         HashMap::from([(PAIR, key)])
     );
+}
+
+/// A pair connected when the app starts is attached by the startup sweep, as
+/// BlueZ signals nothing for it: its AAP link comes up, and once a reading
+/// arrives, GNOME Settings shows its lower earbud.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_connected_before_startup_is_attached_by_the_sweep() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.world.connect(PAIR).await.unwrap();
+    let mut app = fixture.start_app().await;
+
+    app.until("an AAP reading", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+}
+
+/// A pair connecting while the app runs is attached, and disconnecting
+/// detaches it: its link goes, and its battery is withdrawn - for being
+/// detached, not for want of a reading, as the cached advertisement shows in
+/// the link's place at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_connecting_later_is_attached_and_detached_when_it_disconnects() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let mut app = fixture.start_app().await;
+    app.until("a BLE reading", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+
+    app.attach(PAIR).await;
+    app.until("an AAP reading", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+
+    app.detach(PAIR).await;
+    fixture.until_batteries(&HashMap::new()).await;
+    let snapshot = app.updates.borrow().clone();
+    assert_eq!(
+        levels(&snapshot, PAIR, DataSource::Ble),
+        Some(PAIR_LEVELS),
+        "a reading, though no battery"
+    );
+}
+
+/// Only AirPods are attached, as their service tells (#40): a paired device
+/// that does not list it gets no AAP link, connected when the app starts or
+/// connecting later, and so no battery either. Its alias says AirPods, which
+/// plays no part. Behind it is a fake pair that answers AAP, so attaching it
+/// would show, as a link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_that_isnt_airpods_is_never_attached() {
+    let fixture =
+        Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS), (HEADPHONES, PRO_3, PAIR_LEVELS)]).await;
+    let bluez = fixture.world.bluez();
+    bluez.set_airpods_service(HEADPHONES, false).await.unwrap();
+    fixture.world.connect(HEADPHONES).await.unwrap();
+    let mut app = fixture.start_app().await;
+    assert!(
+        app.updates.borrow().connected_macs.is_empty(),
+        "attached by the sweep"
+    );
+
+    fixture.world.disconnect(HEADPHONES).await.unwrap();
+    fixture.world.connect(HEADPHONES).await.unwrap();
+    // Connection events are handled one at a time, in order: once the pair is
+    // attached, the headphones' connection has been handled.
+    app.attach(PAIR).await;
+    assert_eq!(
+        app.updates.borrow().connected_macs,
+        [PAIR],
+        "attached as they connected"
+    );
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+}
+
+/// A pair being paired for the first time connects before service discovery
+/// lists the AirPods service, so it is not recognised as it connects. It is
+/// attached when its services change to list it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_is_attached_once_its_services_mark_it_as_airpods() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    let bluez = fixture.world.bluez();
+    bluez.set_airpods_service(PAIR, false).await.unwrap();
+    let mut app = fixture.start_app().await;
+
+    fixture.world.connect(PAIR).await.unwrap();
+    // Connection events are handled one at a time, in order: once the other
+    // pair is attached, the first one's connection has been handled.
+    app.attach(OTHER).await;
+    assert!(
+        !app.updates.borrow().is_connected(PAIR),
+        "attached before it could be recognised"
+    );
+
+    bluez.set_airpods_service(PAIR, true).await.unwrap();
+    app.until("the pair attached", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
+}
+
+/// Two pairs are attached and detached each on its own: the sweep attaches
+/// both, each battery follows its own pair's reading, and one disconnecting
+/// takes its own link and battery along, and leaves the other's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_pairs_attach_and_detach_independently() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    fixture.world.connect(PAIR).await.unwrap();
+    fixture.world.connect(OTHER).await.unwrap();
+    let mut app = fixture.start_app().await;
+    app.until("both pairs on AAP", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+            && levels(s, OTHER, DataSource::Aap) == Some(OTHER_LEVELS)
+    })
+    .await;
+    fixture
+        .until_batteries(&HashMap::from([
+            (PAIR, lowest(PAIR_LEVELS)),
+            (OTHER, lowest(OTHER_LEVELS)),
+        ]))
+        .await;
+
+    let changed = [OTHER_LEVELS[0] - 5, OTHER_LEVELS[1], OTHER_LEVELS[2]];
+    fixture.set_levels(OTHER, changed).await;
+    fixture
+        .until_batteries(&HashMap::from([
+            (PAIR, lowest(PAIR_LEVELS)),
+            (OTHER, lowest(changed)),
+        ]))
+        .await;
+
+    app.detach(PAIR).await;
+    fixture
+        .until_batteries(&HashMap::from([(OTHER, lowest(changed))]))
+        .await;
+    assert_eq!(app.updates.borrow().connected_macs, [OTHER]);
 }
