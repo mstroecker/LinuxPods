@@ -9,6 +9,7 @@
 //!   `BatteryProviderManager1`
 //! - a `Device1` for each paired pair, at its real address: `Address`,
 //!   `Alias`, `Connected`, `Paired` and `UUIDs`, the AirPods service among them
+//!   unless [`FakeBluez::set_airpods_service`] took it out
 //! - a `Device1` for each random address an advertisement came from, with its
 //!   `ManufacturerData`
 //! - `Battery1` on a device once a registered provider gives it a level - the
@@ -275,6 +276,7 @@ impl FakeBluez {
             address,
             alias: alias.to_string(),
             connected: false,
+            airpods_service: true,
         };
         self.conn
             .object_server()
@@ -296,6 +298,27 @@ impl FakeBluez {
         if device.connected != connected {
             device.connected = connected;
             device.connected_changed(iface.signal_emitter()).await?;
+        }
+        Ok(())
+    }
+
+    /// Lists the AirPods service among a paired device's services, or takes it
+    /// out, signalling the change as bluetoothd signals services found. Without
+    /// it, the device is ordinary headphones to the app; and a pair that
+    /// connects before it is listed is one being paired for the first time,
+    /// connected before service discovery is done.
+    pub async fn set_airpods_service(&self, address: Address, listed: bool) -> Result<()> {
+        let iface = self
+            .conn
+            .object_server()
+            .interface::<_, PairedDevice>(device_path(address))
+            .await
+            .with_context(|| format!("no paired device {address}"))?;
+        let mut device = iface.get_mut().await;
+        if device.airpods_service != listed {
+            device.airpods_service = listed;
+            // Named by zbus after the D-Bus name, `UUIDs`, capital by capital.
+            device.u_u_i_ds_changed(iface.signal_emitter()).await?;
         }
         Ok(())
     }
@@ -775,6 +798,8 @@ struct PairedDevice {
     address: Address,
     alias: String,
     connected: bool,
+    /// Whether `UUIDs` lists the AirPods service.
+    airpods_service: bool,
 }
 
 #[interface(name = "org.bluez.Device1")]
@@ -826,7 +851,11 @@ impl PairedDevice {
 
     #[zbus(property, name = "UUIDs")]
     fn uuids(&self) -> Vec<String> {
-        PAIR_UUIDS.iter().map(|u| u.to_string()).collect()
+        PAIR_UUIDS
+            .iter()
+            .filter(|uuid| self.airpods_service || **uuid != AIRPODS_UUID)
+            .map(|uuid| uuid.to_string())
+            .collect()
     }
 }
 
@@ -1068,6 +1097,31 @@ mod tests {
             let event = timeout(TIMEOUT, events.next()).await.unwrap().unwrap();
             assert_eq!(event.device_path, device_path(PAIR).as_str());
             assert_eq!(event.connected, Some(connected));
+        }
+    }
+
+    /// Without the AirPods service a pair is not AirPods to the app, connected
+    /// or not; listing it is signalled, and reaches the watch as a change of
+    /// services rather than of the connection.
+    #[tokio::test]
+    async fn services_reach_the_watch() {
+        let (bus, bluez) = served().await;
+        let devices = Devices::new(bus.connect().await.unwrap());
+        let events = devices.watch_connections().await.unwrap();
+        tokio::pin!(events);
+        let path = device_path(PAIR).to_string();
+
+        bluez.set_airpods_service(PAIR, false).await.unwrap();
+        bluez.set_connected(PAIR, true).await.unwrap();
+        assert!(!devices.device_is_airpods(&path).await);
+        assert!(devices.connected_airpods().await.unwrap().is_empty());
+
+        bluez.set_airpods_service(PAIR, true).await.unwrap();
+        assert!(devices.device_is_airpods(&path).await);
+        for connected in [Some(true), None] {
+            let event = timeout(TIMEOUT, events.next()).await.unwrap().unwrap();
+            assert_eq!(event.device_path, path);
+            assert_eq!(event.connected, connected);
         }
     }
 
