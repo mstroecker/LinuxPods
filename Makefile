@@ -1,4 +1,4 @@
-.PHONY: all build build-release run run-debug test fmt lint secrets deny sbom hooks clean install uninstall dist
+.PHONY: all build build-release run run-debug fake-world fake-world-stop test fmt lint secrets deny sbom hooks clean install uninstall dist
 
 # Default target
 all: fmt build
@@ -21,6 +21,19 @@ run-debug:
 # Run with protocol tracing (BLE parse/decrypt, AAP packets)
 run-trace:
 	RUST_LOG=linuxpods=debug cargo run
+
+# Run against fake AirPods and a fake BlueZ on private buses, out of reach of
+# the real bluetoothd and session (scripts/fake-world.sh). SCENARIO is in-range,
+# connected, two-pairs, flood or empty; HEADLESS=1 shows the app on Broadway,
+# in a browser, instead of the desktop. Change the world and drive the UI with
+# scripts/fake-world.sh world|app|tree - see .claude/skills/fake-world/SKILL.md.
+SCENARIO ?= in-range
+fake-world:
+	cargo build --features harness
+	HEADLESS=$(HEADLESS) scripts/fake-world.sh start $(SCENARIO)
+
+fake-world-stop:
+	scripts/fake-world.sh stop
 
 test:
 	cargo test
