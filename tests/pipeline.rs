@@ -923,3 +923,31 @@ async fn a_refused_battery_provider_leaves_attachment_working() {
     })
     .await;
 }
+
+/// Advertisements piling up while attachment is busy - a flood, or a crowd,
+/// while a pair's AAP link comes up - never stall it. Regression: they filled
+/// the connection watch's queue, zbus stopped reading the connection until
+/// there was room, and the reply to attachment's next call to BlueZ never
+/// came. No pair was attached or detached again.
+///
+/// All of it while the first pair's link comes up, which takes half a second,
+/// so the second pair's connection is handled after it, with one flood
+/// queued ahead of it and another behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flood_while_a_pair_attaches_does_not_stall_attachment() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    let mut app = fixture.start_app().await;
+
+    fixture.world.connect(PAIR).await.unwrap();
+    fixture.world.flood(FLOOD as u32).await.unwrap();
+    fixture.world.connect(OTHER).await.unwrap();
+    fixture.world.flood(2 * FLOOD as u32).await.unwrap();
+    app.until("both pairs on AAP", |s| {
+        s.is_connected(PAIR) && s.is_connected(OTHER)
+    })
+    .await;
+}

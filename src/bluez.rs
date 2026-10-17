@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use bluer::Address;
 use futures_util::StreamExt;
+use tokio::sync::mpsc;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 use zbus::{Connection, MatchRule, MessageStream, interface, proxy};
 
@@ -362,6 +363,14 @@ impl Devices {
     /// Port of the Go WatchForAirPods signal loop. Without this the app only ever
     /// saw devices that were already connected at startup, so plugging the
     /// AirPods in later did nothing.
+    ///
+    /// The stream may be read at the caller's pace, with calls to BlueZ on the
+    /// same connection in between: a task of its own drains the signals as they
+    /// arrive. The rule takes in every advertisement while the app scans; left
+    /// queued in zbus for the caller, 64 of them - a second's worth in a crowd -
+    /// stopped zbus reading the connection until there was room, so a reply the
+    /// caller was waiting for never arrived, and attachment hung for good. The
+    /// task ends with the connection, or when the stream is dropped.
     pub async fn watch_connections(
         &self,
     ) -> Result<impl futures_util::Stream<Item = ConnectionEvent> + use<>> {
@@ -376,7 +385,7 @@ impl Devices {
             .await
             .context("failed to subscribe to device PropertiesChanged")?;
 
-        Ok(stream.filter_map(|msg| async move {
+        let events = stream.filter_map(|msg| async move {
             let msg = msg.ok()?;
             let device_path = msg.header().path()?.to_string();
 
@@ -401,6 +410,28 @@ impl Devices {
                 device_path,
                 connected,
             })
+        });
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            tokio::pin!(events);
+            loop {
+                tokio::select! {
+                    () = sender.closed() => return,
+                    event = events.next() => match event {
+                        // Only connections and the AirPods service get this far,
+                        // a handful next to an advertisement every few
+                        // milliseconds, so the channel needs no bound.
+                        Some(event) => {
+                            let _ = sender.send(event);
+                        }
+                        None => return,
+                    },
+                }
+            }
+        });
+        Ok(futures_util::stream::poll_fn(move |cx| {
+            receiver.poll_recv(cx)
         }))
     }
 }
