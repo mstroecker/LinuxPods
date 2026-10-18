@@ -16,6 +16,10 @@ updates:
     multi-ecosystem-group: "all-dependencies"
     cooldown:
       default-days: 7
+    ignore:
+      # ksni still needs zbus 5; move to 6 together with it (iovxw/ksni#44)
+      - dependency-name: "zbus"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
     directory: "/"
     patterns: ["*"]

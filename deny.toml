@@ -11,6 +11,13 @@ all-features = true
 [advisories]
 # RustSec advisories: vulnerabilities, unmaintained crates and yanked versions fail
 yanked = "deny"
+# zbus 6 absorbed these crates, but ksni (the tray) still needs zbus 5, which pulls
+# them in. Drop these once ksni moves to zbus 6: https://github.com/iovxw/ksni/issues/44
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zvariant is part of zbus 6; ksni still needs zbus 5" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names is part of zbus 6; ksni still needs zbus 5" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is part of zbus 6; ksni still needs zbus 5" },
+]
 
 [licenses]
 # Every license here is compatible with GPL-3.0-or-later
