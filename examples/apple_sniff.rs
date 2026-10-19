@@ -18,9 +18,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let scanner = Scanner::new().await?;
-    scanner.start_discovery().await?;
+    // Subscribed first, as the first advertisement from an address comes
+    // with its device.
     let stream = scanner.advertisements().await?;
     tokio::pin!(stream);
+    scanner.start_discovery().await?;
 
     tracing::info!("sniffing Apple manufacturer data - ctrl-c to stop");
     while let Some(advert) = stream.next().await {

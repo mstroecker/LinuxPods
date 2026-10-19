@@ -9,6 +9,10 @@
 //! the first advertisement from every address, and AirPods rotate theirs every
 //! few seconds while disconnected (#86).
 //!
+//! Discovery runs on every powered adapter, whatever it is called (#51). The
+//! signals come from devices under any of them, as the subscription takes in
+//! every signal bluetoothd sends.
+//!
 //! Accuracy note carried over from the Go docs: cleartext advertisements give
 //! battery in 10% steps. Decrypting with a stored ENC_KEY yields 1% accuracy.
 
@@ -21,22 +25,18 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, MatchRule, Message, MessageStream, proxy};
 
 use super::parser::{ProximityData, parse_proximity_data};
-use crate::bluez::{BLUEZ_SERVICE, Queue, drain};
+use crate::bluez::{self, BLUEZ_SERVICE, Queue, drain};
 
 /// The key of Apple's entry in a device's `ManufacturerData`.
 pub const APPLE_COMPANY_ID: u16 = 0x004C;
 
 const DEVICE_INTERFACE: &str = "org.bluez.Device1";
 
-#[proxy(
-    interface = "org.bluez.Adapter1",
-    default_service = "org.bluez",
-    default_path = "/org/bluez/hci0"
-)]
+/// On every adapter's object.
+#[proxy(interface = "org.bluez.Adapter1", default_service = "org.bluez")]
 trait Adapter1 {
     fn set_discovery_filter(&self, filter: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
     fn start_discovery(&self) -> zbus::Result<()>;
-    fn stop_discovery(&self) -> zbus::Result<()>;
 }
 
 /// One parsed advertisement plus the (randomized) MAC it arrived from.
@@ -66,9 +66,47 @@ impl Scanner {
         Self { conn }
     }
 
-    /// Sets an LE-only discovery filter and starts scanning.
-    pub async fn start_discovery(&self) -> Result<()> {
-        let adapter = Adapter1Proxy::new(&self.conn).await?;
+    /// Starts scanning on every powered adapter BlueZ has. One that fails is
+    /// logged, and the others scan all the same. Returns the adapters now
+    /// scanning, by path.
+    ///
+    /// Subscribe to [`Scanner::advertisements`] first: an address's first
+    /// advertisement comes in the InterfacesAdded that announces its device,
+    /// and one sent before the subscription is lost.
+    ///
+    /// Fails when BlueZ cannot be asked for its adapters, or scanning started
+    /// on none of them.
+    pub async fn start_discovery(&self) -> Result<Vec<String>> {
+        let adapters = bluez::adapters(&self.conn)
+            .await
+            .context("failed to list Bluetooth adapters")?;
+        anyhow::ensure!(!adapters.is_empty(), "BlueZ has no Bluetooth adapter");
+
+        let mut scanning = Vec::new();
+        for adapter in adapters {
+            // bluetoothd refuses discovery on an adapter that is off.
+            if !adapter.powered {
+                tracing::info!("not scanning on {}: it is powered off", adapter.path);
+                continue;
+            }
+            match self.start_discovery_on(&adapter.path).await {
+                Ok(()) => {
+                    tracing::info!("BLE discovery started on {}", adapter.path);
+                    scanning.push(adapter.path);
+                }
+                Err(e) => {
+                    tracing::warn!("failed to start BLE discovery on {}: {e:#}", adapter.path)
+                }
+            }
+        }
+        anyhow::ensure!(!scanning.is_empty(), "no Bluetooth adapter is scanning");
+        Ok(scanning)
+    }
+
+    /// Sets an LE-only discovery filter on the adapter at `adapter`, and
+    /// starts scanning there.
+    pub async fn start_discovery_on(&self, adapter: &str) -> Result<()> {
+        let adapter = Adapter1Proxy::new(&self.conn, adapter).await?;
 
         let mut filter = HashMap::new();
         filter.insert("Transport", Value::from("le"));
@@ -84,25 +122,17 @@ impl Scanner {
         Ok(())
     }
 
-    pub async fn stop_discovery(&self) -> Result<()> {
-        let adapter = Adapter1Proxy::new(&self.conn).await?;
-        adapter
-            .stop_discovery()
-            .await
-            .context("failed to stop discovery")
-    }
-
     /// Yields advertisements as they arrive. Replaces the Go version's
     /// ScanForAirPods(timeout) polling call with a stream the coordinator drives.
     ///
     /// The stream may be read at the caller's pace, with calls to BlueZ on the
-    /// scanner's connection in between. A task of its own drains the
-    /// subscription as the signals arrive, as [`crate::bluez::drain`] does:
-    /// left in zbus's queue, 64 advertisements would stop zbus reading the
-    /// connection, and the reply to such a call would never come. What waits
-    /// for the reader is the latest advertisement from each address - see
-    /// [`Latest`]. The task ends with the connection, or when the stream is
-    /// dropped.
+    /// scanner's connection in between - [`Scanner::start_discovery`] makes
+    /// them after subscribing. A task of its own drains the subscription as
+    /// the signals arrive, as [`crate::bluez::drain`] does: left in zbus's
+    /// queue, 64 advertisements would stop zbus reading the connection, and
+    /// the reply to such a call would never come. What waits for the reader
+    /// is the latest advertisement from each address - see [`Latest`]. The
+    /// task ends with the connection, or when the stream is dropped.
     pub async fn advertisements(
         &self,
     ) -> Result<impl futures_util::Stream<Item = Advertisement> + use<>> {
@@ -248,7 +278,8 @@ fn apple_manufacturer_data(properties: &HashMap<String, OwnedValue>) -> Option<V
     <Vec<u8>>::try_from(apple.clone()).ok()
 }
 
-/// /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF -> AA:BB:CC:DD:EE:FF
+/// /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF -> AA:BB:CC:DD:EE:FF, under any
+/// adapter.
 fn mac_from_path(path: &str) -> Option<Address> {
     let tail = path.rsplit('/').next()?;
     let hex = tail.strip_prefix("dev_")?;
@@ -270,6 +301,11 @@ mod tests {
             mac_from_path("/org/bluez/hci0/dev_aa_bb_cc_dd_ee_ff"),
             Some(mac),
             "the spelling does not matter"
+        );
+        assert_eq!(
+            mac_from_path("/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF"),
+            Some(mac),
+            "nor the adapter"
         );
     }
 
@@ -440,6 +476,7 @@ mod tests {
     #[test]
     fn rejects_non_device_paths() {
         assert_eq!(mac_from_path("/org/bluez/hci0"), None);
+        assert_eq!(mac_from_path("/org/bluez/hci1"), None);
         assert_eq!(mac_from_path("/org/bluez/hci0/dev_TOO_SHORT"), None);
         assert_eq!(mac_from_path("/org/bluez/hci0/dev_AA_BB_CC_DD_EE_GG"), None);
         assert_eq!(mac_from_path(""), None);

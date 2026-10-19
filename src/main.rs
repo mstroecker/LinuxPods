@@ -246,7 +246,7 @@ fn main() -> glib::ExitCode {
     code
 }
 
-/// Feeds BLE advertisements into the coordinator.
+/// Feeds BLE advertisements from every powered adapter into the coordinator.
 async fn ble_task(coordinator: Arc<Coordinator>) {
     let scanner = match ble::scanner::Scanner::new().await {
         Ok(s) => s,
@@ -256,11 +256,8 @@ async fn ble_task(coordinator: Arc<Coordinator>) {
         }
     };
 
-    if let Err(e) = scanner.start_discovery().await {
-        tracing::error!("failed to start BLE discovery: {e}");
-        return;
-    }
-
+    // Subscribed before discovery starts, so that no advertisement falls in
+    // between: the first from each address comes with its device.
     let stream = match scanner.advertisements().await {
         Ok(s) => s,
         Err(e) => {
@@ -269,6 +266,11 @@ async fn ble_task(coordinator: Arc<Coordinator>) {
         }
     };
     tokio::pin!(stream);
+
+    if let Err(e) = scanner.start_discovery().await {
+        tracing::error!("failed to start BLE discovery: {e:#}");
+        return;
+    }
 
     while let Some(advert) = stream.next().await {
         coordinator
