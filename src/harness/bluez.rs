@@ -1228,8 +1228,8 @@ mod tests {
         let adverts = scanner.advertisements().await.unwrap();
         tokio::pin!(adverts);
 
-        // Twice from the one address: once as the object appears, once as a
-        // change, so that this holds whichever of them the scanner reads.
+        // Twice from the one address, once as the object appears and once as a
+        // change: the scanner reads both, and either may come out first.
         let pods = Pods::new(PRO_3, PAIR);
         let address = pods.address_at(Duration::ZERO);
         for ms in [0, 1] {

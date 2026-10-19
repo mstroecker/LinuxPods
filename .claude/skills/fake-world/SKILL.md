@@ -125,10 +125,10 @@ Change, settle, then read: `SetBattery`, `Settle`, `tree`.
   out; take one of the popover by its path. Screenshots go to
   `$XDG_RUNTIME_DIR/linuxpods-harness/`.
 - **BLE timing.** Each pair advertises once a second from a random address that
-  rotates every 10 s, and the fake BlueZ drops an address 30 s after it goes quiet. The
-  app reads only `PropertiesChanged`, and an address's first advertisement comes in
-  `InterfacesAdded`, so it misses that one: 9 readings out of 10 per address, and a
-  first reading 1-2 s after start.
+  rotates every 10 s, and the fake BlueZ drops an address 30 s after it goes quiet. An
+  address's first advertisement comes in `InterfacesAdded`, the rest in
+  `PropertiesChanged`, and the app reads both: 10 readings out of 10 per address, and a
+  first reading within about a second of start.
 - **Logs** are in `$XDG_RUNTIME_DIR/linuxpods-harness/world/log/`: `linuxpods.log` at
   `RUST_LOG=linuxpods=debug`, `fakepods.log` and `broadwayd.log`. Set `RUST_LOG` before
   `make` to change the level. They stay until the next start.
