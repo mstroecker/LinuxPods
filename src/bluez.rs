@@ -416,19 +416,30 @@ impl Devices {
             })
         });
 
-        Ok(drain(events))
+        Ok(drain::<Pending, _>(events))
     }
 }
 
-/// Reads `events` as they come, in a task of its own, into [`Pending`], from
-/// where the returned stream takes them at its reader's pace. The task ends
-/// with `events`, or once the stream is dropped; the stream ends once the task
-/// has and nothing is pending.
-fn drain<S>(events: S) -> impl Stream<Item = ConnectionEvent>
+/// What [`drain`] holds for its reader, kept as the subscription needs it:
+/// [`Pending`] for the connection watch, the latest advertisement from each
+/// address for the scanner. Neither `push` nor `pop` may panic halfway - see
+/// [`lock`].
+pub(crate) trait Queue: Default + Send + 'static {
+    type Item: Send + 'static;
+    fn push(&mut self, item: Self::Item);
+    fn pop(&mut self) -> Option<Self::Item>;
+}
+
+/// Reads `events` as they come, in a task of its own, into a `Q`, from where
+/// the returned stream takes them at its reader's pace. The task ends with
+/// `events`, or once the stream is dropped; the stream ends once the task has
+/// and nothing is pending.
+pub(crate) fn drain<Q, S>(events: S) -> impl Stream<Item = Q::Item>
 where
-    S: Stream<Item = ConnectionEvent> + Send + 'static,
+    Q: Queue,
+    S: Stream<Item = Q::Item> + Send + 'static,
 {
-    let pending = Arc::new(Mutex::new(Pending::default()));
+    let pending = Arc::new(Mutex::new(Q::default()));
     // Rung after every push. It holds one ring at most, so the task never
     // waits on the reader: a ring waiting already means the reader will look.
     let (bell, mut rung) = mpsc::channel(1);
@@ -492,7 +503,9 @@ struct Pending {
     queued: HashSet<String>,
 }
 
-impl Pending {
+impl Queue for Pending {
+    type Item = ConnectionEvent;
+
     fn push(&mut self, event: ConnectionEvent) {
         match event.connected {
             Some(_) => self.connections.push_back(event),
@@ -517,9 +530,9 @@ impl Pending {
     }
 }
 
-/// Neither `push` nor `pop` can panic halfway, so a poisoned lock holds a
-/// whole queue.
-fn lock(pending: &Mutex<Pending>) -> MutexGuard<'_, Pending> {
+/// Neither a [`Queue`]'s `push` nor its `pop` can panic halfway, so a poisoned
+/// lock holds a whole queue.
+fn lock<Q>(pending: &Mutex<Q>) -> MutexGuard<'_, Q> {
     pending.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -802,7 +815,9 @@ mod tests {
         events.extend(std::iter::repeat_n(services(PATH_B), 1000));
         events.push(connection(PATH_A, false));
 
-        let taken: Vec<_> = drain(futures_util::stream::iter(events)).collect().await;
+        let taken: Vec<_> = drain::<Pending, _>(futures_util::stream::iter(events))
+            .collect()
+            .await;
         assert_eq!(
             taken,
             [
@@ -817,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_the_stream_ends_the_task() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        let events = drain(futures_util::stream::poll_fn(move |cx| {
+        let events = drain::<Pending, _>(futures_util::stream::poll_fn(move |cx| {
             receiver.poll_recv(cx)
         }));
         drop(events);

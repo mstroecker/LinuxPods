@@ -216,8 +216,8 @@ impl Fixture {
         );
         let updates = coordinator.subscribe();
 
-        // As main.rs's ble_task, on the test's bus. The stream borrows the
-        // scanner, so the two live in the task together.
+        // As main.rs's ble_task, on the test's bus. Stopping the task stops
+        // both.
         let conn = self.bus.connect().await.unwrap();
         let (ready, started) = oneshot::channel();
         let (handled, handled_rx) = mpsc::unbounded_channel();

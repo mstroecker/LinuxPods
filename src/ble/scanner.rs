@@ -12,7 +12,7 @@
 //! Accuracy note carried over from the Go docs: cleartext advertisements give
 //! battery in 10% steps. Decrypting with a stored ENC_KEY yields 1% accuracy.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use anyhow::{Context, Result};
 use bluer::Address;
@@ -21,7 +21,7 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, MatchRule, Message, MessageStream, proxy};
 
 use super::parser::{ProximityData, parse_proximity_data};
-use crate::bluez::BLUEZ_SERVICE;
+use crate::bluez::{BLUEZ_SERVICE, Queue, drain};
 
 /// The key of Apple's entry in a device's `ManufacturerData`.
 pub const APPLE_COMPANY_ID: u16 = 0x004C;
@@ -95,35 +95,35 @@ impl Scanner {
     /// Yields advertisements as they arrive. Replaces the Go version's
     /// ScanForAirPods(timeout) polling call with a stream the coordinator drives.
     ///
-    /// One stream for both signals, so reading it drains both subscriptions:
-    /// one left unread would fill zbus's queue, and zbus would stop reading the
-    /// connection. Merged as they arrive, an address's first advertisement may
-    /// come out after its second, which the next one puts right.
-    pub async fn advertisements(&self) -> Result<impl futures_util::Stream<Item = Advertisement>> {
-        let changed = MatchRule::builder()
-            .msg_type(zbus::message::Type::Signal)
-            .interface("org.freedesktop.DBus.Properties")?
-            .member("PropertiesChanged")?
-            .path_namespace("/org/bluez")?
-            .build();
-        // Sent from bluetoothd's ObjectManager at `/`, so the sender is what
-        // tells it from another service's.
-        let added = MatchRule::builder()
+    /// The stream may be read at the caller's pace, with calls to BlueZ on the
+    /// scanner's connection in between. A task of its own drains the
+    /// subscription as the signals arrive, as [`crate::bluez::drain`] does:
+    /// left in zbus's queue, 64 advertisements would stop zbus reading the
+    /// connection, and the reply to such a call would never come. What waits
+    /// for the reader is the latest advertisement from each address - see
+    /// [`Latest`]. The task ends with the connection, or when the stream is
+    /// dropped.
+    pub async fn advertisements(
+        &self,
+    ) -> Result<impl futures_util::Stream<Item = Advertisement> + use<>> {
+        // One rule, so one subscription: of two, the first's signals would go
+        // unread while the bus confirmed the second, and 64 of them would stop
+        // zbus reading the connection before the drain task began. It takes
+        // in every signal bluetoothd sends - InterfacesAdded from its
+        // ObjectManager at `/`, PropertiesChanged from each device - and one
+        // stream keeps them in the order they were sent. zbus cannot check a
+        // well-known sender, so whatever signal the connection gets comes
+        // through: `device_properties` drops all but the two it reads by
+        // their headers, before reading a body.
+        let rule = MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .sender(BLUEZ_SERVICE)?
-            .interface("org.freedesktop.DBus.ObjectManager")?
-            .member("InterfacesAdded")?
             .build();
-
-        let changed = MessageStream::for_match_rule(changed, &self.conn, None)
+        let signals = MessageStream::for_match_rule(rule, &self.conn, None)
             .await
-            .context("failed to subscribe to PropertiesChanged")?;
-        let added = MessageStream::for_match_rule(added, &self.conn, None)
-            .await
-            .context("failed to subscribe to InterfacesAdded")?;
+            .context("failed to subscribe to BlueZ's signals")?;
 
-        let signals = futures_util::stream::select(changed, added);
-        Ok(signals.filter_map(|msg| async move {
+        let adverts = signals.filter_map(|msg| async move {
             let msg = msg.ok()?;
             let (path, properties) = device_properties(&msg)?;
             let apple_data = apple_manufacturer_data(&properties)?;
@@ -162,7 +162,41 @@ impl Scanner {
                     None
                 }
             }
-        }))
+        });
+        Ok(drain::<Latest, _>(adverts))
+    }
+}
+
+/// The advertisements waiting for the scanner's reader: the latest from each
+/// address, in the order each address first came since it was last taken.
+///
+/// An advertiser sends as often as it likes, and a flood brings new addresses
+/// as fast as it likes. Queued one per signal, they would pile up without
+/// bound behind a reader that cannot keep up. An address's latest
+/// advertisement says all its earlier ones did, as each carries the device's
+/// whole state, so keeping only that one loses nothing. No address is dropped:
+/// the one dropped could be a pair's.
+#[derive(Debug, Default)]
+struct Latest {
+    /// Addresses with an advertisement waiting, oldest first.
+    order: VecDeque<Address>,
+    /// The latest advertisement from each address in `order`.
+    adverts: HashMap<Address, Advertisement>,
+}
+
+impl Queue for Latest {
+    type Item = Advertisement;
+
+    fn push(&mut self, advert: Advertisement) {
+        let address = advert.ble_mac;
+        if self.adverts.insert(address, advert).is_none() {
+            self.order.push_back(address);
+        }
+    }
+
+    fn pop(&mut self) -> Option<Advertisement> {
+        let address = self.order.pop_front()?;
+        self.adverts.remove(&address)
     }
 }
 
@@ -172,12 +206,17 @@ impl Scanner {
 /// signal.
 ///
 /// InterfacesAdded comes from the ObjectManager and names the device in its
-/// body; PropertiesChanged comes from the device itself.
+/// body; PropertiesChanged comes from the device itself. Either way the device
+/// is under `/org/bluez`, where BlueZ keeps its adapters and their devices.
 fn device_properties(msg: &Message) -> Option<(String, HashMap<String, OwnedValue>)> {
+    let under_bluez = |path: &str| path.starts_with("/org/bluez/");
     let header = msg.header();
     match (header.interface()?.as_str(), header.member()?.as_str()) {
         ("org.freedesktop.DBus.Properties", "PropertiesChanged") => {
             let path = header.path()?.to_string();
+            if !under_bluez(&path) {
+                return None;
+            }
             let (iface, changed, _invalidated) = msg
                 .body()
                 .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
@@ -192,8 +231,7 @@ fn device_properties(msg: &Message) -> Option<(String, HashMap<String, OwnedValu
                     HashMap<String, HashMap<String, OwnedValue>>,
                 )>()
                 .ok()?;
-            // Under /org/bluez, as the PropertiesChanged rule has it.
-            if !path.as_str().starts_with("/org/bluez/") {
+            if !under_bluez(path.as_str()) {
                 return None;
             }
             Some((path.to_string(), interfaces.remove(DEVICE_INTERFACE)?))
@@ -233,6 +271,54 @@ mod tests {
             Some(mac),
             "the spelling does not matter"
         );
+    }
+
+    /// An advertisement from `address`, told apart by `status`.
+    fn advert(address: u8, status: u8) -> Advertisement {
+        Advertisement {
+            data: ProximityData {
+                status,
+                ..ProximityData::default()
+            },
+            ble_mac: Address::new([0x4A, 0, 0, 0, 0, address]),
+        }
+    }
+
+    /// What `latest` gives out, as (address, status).
+    fn take_all(latest: &mut Latest) -> Vec<(u8, u8)> {
+        std::iter::from_fn(|| latest.pop())
+            .map(|a| (a.ble_mac.0[5], a.data.status))
+            .collect()
+    }
+
+    /// An address advertising over and over while the reader is busy is one
+    /// advertisement waiting, the latest; once that is taken, the next is
+    /// waiting again.
+    #[test]
+    fn an_address_has_its_latest_advertisement_waiting() {
+        let mut latest = Latest::default();
+        for status in 0..100 {
+            latest.push(advert(1, status));
+        }
+        assert_eq!(take_all(&mut latest), [(1, 99)]);
+
+        latest.push(advert(1, 100));
+        assert_eq!(take_all(&mut latest), [(1, 100)]);
+    }
+
+    /// Every address keeps its own, in the order it first came: a flood of new
+    /// addresses loses none of them.
+    #[test]
+    fn addresses_keep_their_advertisements_apart() {
+        let mut latest = Latest::default();
+        for address in 0..=255 {
+            latest.push(advert(address, 0));
+        }
+        latest.push(advert(7, 1));
+        let taken = take_all(&mut latest);
+        assert_eq!(taken.len(), 256);
+        assert_eq!(taken[..3], [(0, 0), (1, 0), (2, 0)]);
+        assert_eq!(taken[7], (7, 1), "the latest, where the address first came");
     }
 
     /// A device at a random address, as an advertisement comes from.
@@ -317,7 +403,26 @@ mod tests {
             .is_none(),
             "an object outside /org/bluez"
         );
+        assert!(
+            device_properties(&changed(
+                "/org/example/dev_5C_4D_3F_B5_41_B6",
+                DEVICE_INTERFACE,
+                device1(&[0x07])
+            ))
+            .is_none(),
+            "a change outside /org/bluez"
+        );
 
+        // The rest of what the subscription takes in goes by its headers.
+        let acquired = Message::signal(
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameAcquired",
+        )
+        .unwrap()
+        .build(&(":1.7",))
+        .unwrap();
+        assert!(device_properties(&acquired).is_none());
         let removed = Message::signal(
             "/",
             "org.freedesktop.DBus.ObjectManager",
