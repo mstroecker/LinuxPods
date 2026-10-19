@@ -258,7 +258,7 @@ src/
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
 ├── aap/           # Apple Accessory Protocol: client, battery, keys, noise control
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
-├── bluez.rs       # BatteryProvider1 and the device connection watch
+├── bluez.rs       # Adapters, the device watch, a BatteryProvider1 per adapter
 ├── keystore.rs    # Key storage under XDG data dir
 ├── indicator.rs   # System tray (StatusNotifierItem)
 └── ui/            # GTK4/libadwaita: window, Control page, Preferences

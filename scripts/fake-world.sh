@@ -12,8 +12,10 @@
 #   scripts/fake-world.sh tree                   prints Automation1.Tree's JSON
 #
 # HEADLESS=1 puts the app on its own Broadway display, to watch in a browser,
-# instead of the desktop. `make fake-world` builds the binaries first; this
-# runs them as they are, from ${CARGO_TARGET_DIR:-target}/debug.
+# instead of the desktop. ADAPTER=hci1 puts the fake BlueZ's one adapter at
+# /org/bluez/hci1 in place of hci0, as on a machine whose only adapter is not
+# the first. `make fake-world` builds the binaries first; this runs them as
+# they are, from ${CARGO_TARGET_DIR:-target}/debug.
 #
 # Everything lives in $XDG_RUNTIME_DIR/linuxpods-harness/world: the buses'
 # sockets, the AAP sockets, the app's data and config directories, the logs,
@@ -104,6 +106,7 @@ free_display() {
 
 start() {
     scenario=${1:-in-range}
+    adapter=${ADAPTER:-hci0}
     for b in fakepods linuxpods; do
         [ -x "$bin/$b" ] || die "$bin/$b is missing: build with cargo build --features harness, or run make fake-world"
     done
@@ -122,6 +125,7 @@ start() {
         echo "SESSION_BUS='$(cat "$run/session.address")'"
         echo "AAP_SOCKET_DIR='$run/aap'"
         echo "SCENARIO='$scenario'"
+        echo "ADAPTER='$adapter'"
     } > "$run/env"
     load_env
 
@@ -133,7 +137,7 @@ start() {
     spawn fakepods "$run/log/fakepods.log" env $common \
         RUST_LOG="${RUST_LOG:-linuxpods=debug,fakepods=debug}" \
         "$bin/fakepods" --address "$SYSTEM_BUS" --socket-dir "$run/aap" \
-        --scenario "$scenario" --keystore "$run/home/data/linuxpods"
+        --scenario "$scenario" --adapter "$adapter" --keystore "$run/home/data/linuxpods"
     fakepods=$(tail -n 1 "$pids" | cut -d' ' -f1)
     i=0
     until has_name "$SYSTEM_BUS" "$WORLD_NAME"; do
@@ -187,7 +191,7 @@ start() {
 
     echo "Fake world '$scenario' is running."
     echo "  system bus:  $SYSTEM_BUS"
-    echo "               fake BlueZ, and $WORLD_NAME at $WORLD_PATH"
+    echo "               fake BlueZ with /org/bluez/$adapter, and $WORLD_NAME at $WORLD_PATH"
     echo "  session bus: $SESSION_BUS"
     echo "               the app, and Automation1 at $AUTOMATION_PATH"
     [ -z "$display" ] || echo "  watch:       http://127.0.0.1:$port"

@@ -11,8 +11,9 @@
 //!
 //! - a `dbus-daemon` of its own ([`PrivateBus`]), never the real system or
 //!   session bus
-//! - a [`World`] on it: the fake BlueZ, and pairs of fake AirPods that
-//!   advertise through it and answer AAP on a Unix socket each
+//! - a [`World`] on it: the fake BlueZ, with one adapter or several, and pairs
+//!   of fake AirPods that advertise through it and answer AAP on a Unix socket
+//!   each
 //! - the app as `main.rs` wires it, less the UI and tray: the real [`Scanner`]
 //!   feeding the real [`Coordinator`], with a [`Keystore`] in a temporary
 //!   directory, and the real [`Attachment`] taking up the pairs BlueZ reports
@@ -55,8 +56,8 @@ use linuxpods::podstate::{Coordinator, DataSource, Snapshot};
 
 /// The longest any one wait may take, so that a regression fails the test
 /// instead of hanging CI. The slowest wait is for a pair's first BLE reading:
-/// up to an advertising interval, or two should one go out while the scanner
-/// is still subscribing. The rest is headroom for a loaded runner.
+/// up to an advertising interval, as the scanner subscribes before it starts
+/// discovery. The rest is headroom for a loaded runner.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How often a wait on what nothing signals - the key file, the fake pair's
@@ -80,6 +81,11 @@ const OTHER_LEVELS: [u8; 3] = [36, 84, 22];
 
 /// How many advertisers a flood brings.
 const FLOOD: usize = 100;
+
+/// The fake BlueZ's adapters, by name. Most tests have the first alone, as
+/// most machines do.
+const HCI0: &str = "hci0";
+const HCI1: &str = "hci1";
 
 /// Logs to the test's output, which is shown when it fails. `RUST_LOG` picks
 /// what; by default the app's info lines.
@@ -105,9 +111,23 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// A published world with `pairs` in it - each a real address, a product
-    /// ID and its battery levels - in range and disconnected.
+    /// A published world with one adapter, `hci0`, and `pairs` in it - each a
+    /// real address, a product ID and its battery levels - paired with that
+    /// adapter, in range and disconnected.
     async fn new(pairs: &[(Address, u16, [u8; 3])]) -> Self {
+        let pairs: Vec<_> = pairs
+            .iter()
+            .map(|&(mac, product_id, levels)| (HCI0, mac, product_id, levels))
+            .collect();
+        Self::with_adapters(&[(HCI0, true)], &pairs).await
+    }
+
+    /// [`Fixture::new`], with `adapters` - each a name and whether it is
+    /// powered - and each pair paired with the adapter named ahead of it.
+    async fn with_adapters(
+        adapters: &[(&str, bool)],
+        pairs: &[(&str, Address, u16, [u8; 3])],
+    ) -> Self {
         init_logs();
         let bus = PrivateBus::start().expect("dbus-daemon starts");
         let sockets = tempfile::Builder::new()
@@ -115,17 +135,19 @@ impl Fixture {
             .tempdir()
             .unwrap();
         let data = tempfile::tempdir().unwrap();
-        let world = World::new(bus.address(), sockets.path()).await.unwrap();
+        let world = World::with_adapters(bus.address(), sockets.path(), adapters)
+            .await
+            .unwrap();
         let fixture = Self {
             world,
             sockets,
             data,
             bus,
         };
-        for &(mac, product_id, levels) in pairs {
+        for &(adapter, mac, product_id, levels) in pairs {
             fixture
                 .world
-                .add_pods(mac, product_id, "Fake AirPods")
+                .add_pods_on(adapter, mac, product_id, "Fake AirPods")
                 .await
                 .unwrap();
             fixture.set_levels(mac, levels).await;
@@ -189,6 +211,18 @@ impl Fixture {
         .await;
     }
 
+    /// Waits until the manager of the adapter called `adapter` holds
+    /// `expected` and nothing else: the battery of each pair whose provider
+    /// registered with that adapter's manager.
+    async fn until_batteries_on(&self, adapter: &str, expected: &HashMap<Address, u8>) {
+        let bluez = self.world.bluez();
+        eventually(
+            &format!("{adapter}'s manager to hold {expected:?}"),
+            move || async move { bluez.batteries_on(adapter) == *expected },
+        )
+        .await;
+    }
+
     /// Waits until a pair is in `mode`, whichever way it got there.
     async fn until_mode(&self, mac: Address, mode: NoiseMode) {
         let world = &self.world;
@@ -216,17 +250,17 @@ impl Fixture {
         );
         let updates = coordinator.subscribe();
 
-        // As main.rs's ble_task, on the test's bus. Stopping the task stops
-        // both.
+        // As main.rs's ble_task, on the test's bus: subscribed, then
+        // discovering on every powered adapter. Stopping the task stops both.
         let conn = self.bus.connect().await.unwrap();
         let (ready, started) = oneshot::channel();
         let (handled, handled_rx) = mpsc::unbounded_channel();
         let feed = coordinator.clone();
         let listening = tokio::spawn(async move {
             let scanner = Scanner::with_connection(conn);
-            scanner.start_discovery().await.expect("discovery starts");
             let adverts = scanner.advertisements().await.expect("the scanner listens");
             tokio::pin!(adverts);
+            scanner.start_discovery().await.expect("discovery starts");
             let _ = ready.send(());
             while let Some(advert) = adverts.next().await {
                 feed.handle_advertisement(advert.data.clone(), advert.ble_mac)
@@ -766,7 +800,10 @@ async fn an_address_that_advertises_once_reaches_the_coordinator() {
 
     let advert = pods.advertisement(Duration::ZERO);
     let bluez = fixture.world.bluez();
-    let heard = bluez.advertise(advert.address, &advert.data).await.unwrap();
+    let heard = bluez
+        .advertise(HCI0, advert.address, &advert.data)
+        .await
+        .unwrap();
     assert!(heard, "advertised while the app discovers");
     app.until("the reading it brings", |s| {
         levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
@@ -930,28 +967,138 @@ async fn two_pairs_attach_and_detach_independently() {
     assert_eq!(app.updates.borrow().connected_macs, [OTHER]);
 }
 
-/// A pair is attached though BlueZ refuses the battery provider, as it does
-/// with no BatteryProviderManager1 at `/org/bluez/hci0` - a BlueZ without one,
-/// or an adapter by another name (#51). It gets AAP, if no GNOME Settings
-/// battery. Regression: a refused provider stopped attachment altogether, and
-/// every pair stayed on BLE, a pair new to the app with no key to be read by.
+/// A pair is attached though BlueZ refuses the battery provider on its
+/// adapter, as an adapter does with no BatteryProviderManager1 - a BlueZ
+/// without one. It gets AAP, if no GNOME Settings battery, and a pair on an
+/// adapter that took its provider gets its battery all the same. Regression:
+/// a refused provider stopped attachment altogether, and every pair stayed on
+/// BLE, a pair new to the app with no key to be read by.
 ///
 /// Refused here because the app's connection has a provider registered at the
-/// same path already.
+/// same root with the first adapter already.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_battery_provider_leaves_attachment_working() {
-    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+async fn a_battery_provider_refused_on_one_adapter_leaves_attachment_working() {
+    let fixture = Fixture::with_adapters(
+        &[(HCI0, true), (HCI1, true)],
+        &[
+            (HCI0, PAIR, PRO_3, PAIR_LEVELS),
+            (HCI1, OTHER, PRO_2_USB_C, OTHER_LEVELS),
+        ],
+    )
+    .await;
     let bluez = fixture.bus.connect().await.unwrap();
-    let _registered = BatteryProvider::with_connection(bluez.clone())
+    let _registered = BatteryProvider::register(bluez.clone(), "/org/bluez/hci0")
         .await
         .unwrap();
     let mut app = fixture.start_app_on(bluez).await;
 
     app.attach(PAIR).await;
-    app.until("the key and an AAP reading", |s| {
-        s.known_keys == [PAIR] && levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    app.attach(OTHER).await;
+    app.until("both keys and AAP readings", |s| {
+        s.known_keys == [PAIR, OTHER]
+            && levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+            && levels(s, OTHER, DataSource::Aap) == Some(OTHER_LEVELS)
     })
     .await;
+    fixture
+        .until_batteries(&HashMap::from([(OTHER, lowest(OTHER_LEVELS))]))
+        .await;
+}
+
+/// A machine whose only adapter is not `hci0` - a USB dongle, an internal
+/// adapter switched off, a re-enumeration after resume (#51). Its pair is
+/// heard over BLE, attaches over AAP, and its battery goes to that adapter's
+/// manager. Regression: `/org/bluez/hci0` was hardcoded, so discovery and the
+/// battery provider failed at startup, and nothing was heard over BLE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_on_an_adapter_other_than_hci0_is_heard_attached_and_given_its_battery() {
+    let fixture =
+        Fixture::with_adapters(&[(HCI1, true)], &[(HCI1, PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let mut app = fixture.start_app().await;
+    app.until("a BLE reading", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+
+    app.attach(PAIR).await;
+    app.until("an AAP reading", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
+    fixture
+        .until_batteries_on(HCI1, &HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+}
+
+/// Two adapters with a pair on each: both pairs are heard, each through its
+/// own adapter, and each pair's battery goes to its own adapter's manager.
+/// Not the other's: neither manager is offered a battery for a device on the
+/// other adapter, which bluetoothd would ignore with a warning. Regression:
+/// only `hci0` was scanned and had a provider, so a pair on another adapter
+/// was not heard over BLE and got no battery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairs_on_two_adapters_are_heard_and_each_battery_goes_to_its_own_adapter() {
+    let fixture = Fixture::with_adapters(
+        &[(HCI0, true), (HCI1, true)],
+        &[
+            (HCI0, PAIR, PRO_3, PAIR_LEVELS),
+            (HCI1, OTHER, PRO_2_USB_C, OTHER_LEVELS),
+        ],
+    )
+    .await;
+    fixture.seed_keys(&[PAIR, OTHER]).await;
+    let mut app = fixture.start_app().await;
+    app.until("both pairs' BLE readings", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+            && levels(s, OTHER, DataSource::Ble) == Some(OTHER_LEVELS)
+    })
+    .await;
+
+    app.attach(PAIR).await;
+    app.attach(OTHER).await;
+    app.until("both pairs' AAP readings", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+            && levels(s, OTHER, DataSource::Aap) == Some(OTHER_LEVELS)
+    })
+    .await;
+    fixture
+        .until_batteries_on(HCI0, &HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+    fixture
+        .until_batteries_on(HCI1, &HashMap::from([(OTHER, lowest(OTHER_LEVELS))]))
+        .await;
+    let ignored = fixture.world.bluez().ignored_batteries();
+    assert!(ignored.is_empty(), "offered the wrong manager: {ignored:?}");
+}
+
+/// An adapter that is off is not scanned, as bluetoothd would refuse, and
+/// the one that is on scans all the same: its pair is heard. Regression:
+/// `hci0` was the one adapter scanned, and discovery failed there for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adapter_powered_off_is_not_scanned_and_the_other_is() {
+    let fixture = Fixture::with_adapters(
+        &[(HCI0, false), (HCI1, true)],
+        &[
+            (HCI0, OTHER, PRO_2_USB_C, OTHER_LEVELS),
+            (HCI1, PAIR, PRO_3, PAIR_LEVELS),
+        ],
+    )
+    .await;
+    fixture.seed_keys(&[PAIR, OTHER]).await;
+    let mut app = fixture.start_app().await;
+    let bluez = fixture.world.bluez();
+    assert!(
+        !bluez.is_discovering(HCI0),
+        "discovering on an adapter that is off"
+    );
+    assert!(bluez.is_discovering(HCI1));
+
+    app.until("the pair on the adapter that is on", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+    assert!(!app.updates.borrow().states.contains_key(&OTHER));
 }
 
 /// Advertisements piling up while attachment is busy - a flood, or a crowd,
@@ -998,7 +1145,10 @@ async fn a_device_resignalling_its_services_does_not_delay_attachment() {
     const ADVERTISER: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x04]);
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
     let bluez = fixture.world.bluez();
-    bluez.add_device(ADVERTISER, "Advertiser").await.unwrap();
+    bluez
+        .add_device(HCI0, ADVERTISER, "Advertiser")
+        .await
+        .unwrap();
     let mut app = fixture.start_app().await;
 
     // Taken out and listed again: only a list with the AirPods service passes

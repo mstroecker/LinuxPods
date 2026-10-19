@@ -1,12 +1,14 @@
-//! BlueZ integration: its device objects, read and watched by [`Devices`], and
-//! the batteries [`BatteryProvider`] exports to it for GNOME Settings. Both go
-//! over a connection they are given - the system bus, or under the test
-//! harness a fake BlueZ on a private one (#72).
+//! BlueZ integration: its adapters, found by [`adapters`], its device objects,
+//! read and watched by [`Devices`], and the batteries [`BatteryProvider`]
+//! exports to it for GNOME Settings. All go over a connection they are given -
+//! the system bus, or under the test harness a fake BlueZ on a private one
+//! (#72).
 //!
-//! zbus ships `fdo::ObjectManager` and derives properties, so none of the usual
-//! ObjectManager boilerplate is needed - no GetManagedObjects, no introspection
-//! XML, no manual InterfacesAdded / InterfacesRemoved / PropertiesChanged:
-//! registering the interface at a child path emits InterfacesAdded on its own.
+//! zbus ships `fdo::ObjectManager` and derives properties, so serving the
+//! provider root needs none of the usual ObjectManager boilerplate - no
+//! GetManagedObjects of our own, no introspection XML, no manual
+//! InterfacesAdded / InterfacesRemoved / PropertiesChanged: registering the
+//! interface at a child path emits InterfacesAdded on its own.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -16,11 +18,12 @@ use anyhow::{Context, Result};
 use bluer::Address;
 use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
+use zbus::fdo::ManagedObjects;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 use zbus::{Connection, MatchRule, MessageStream, interface, proxy};
 
 pub const BLUEZ_SERVICE: &str = "org.bluez";
-const ADAPTER_PATH: &str = "/org/bluez/hci0";
+const ADAPTER_INTERFACE: &str = "org.bluez.Adapter1";
 const PROVIDER_PATH: &str = "/com/github/mstroecker/linuxpods/battery";
 const BATTERY_NAME: &str = "airpods_battery";
 const SOURCE: &str = "LinuxPods";
@@ -30,10 +33,10 @@ const SOURCE: &str = "LinuxPods";
 /// vendor ID in `Modalias` it does not also match Apple keyboards and mice.
 pub const AIRPODS_UUID: &str = "74ec2172-0bad-4d01-8f77-997b2be0722a";
 
+/// On every adapter's object, each keeping the providers registered with it.
 #[proxy(
     interface = "org.bluez.BatteryProviderManager1",
-    default_service = "org.bluez",
-    default_path = "/org/bluez/hci0"
+    default_service = "org.bluez"
 )]
 trait BatteryProviderManager1 {
     fn register_battery_provider(&self, provider: &ObjectPath<'_>) -> zbus::Result<()>;
@@ -46,6 +49,8 @@ trait Device1 {
     fn alias(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn address(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn adapter(&self) -> zbus::Result<OwnedObjectPath>;
     #[zbus(property)]
     fn connected(&self) -> zbus::Result<bool>;
     #[zbus(property, name = "UUIDs")]
@@ -78,19 +83,42 @@ impl BatteryProvider1 {
     }
 }
 
-/// The registered provider, exporting one battery object per device.
+/// One adapter's registered provider, exporting one battery object per device
+/// on that adapter.
+///
+/// Each adapter's `BatteryProviderManager1` keeps providers of its own, and
+/// takes a battery only for a device on its own adapter: bluetoothd looks the
+/// battery's `Device` up among that adapter's devices, and ignores the battery,
+/// with a warning in its log, when it is not one of them (`src/battery.c`). So
+/// every adapter has a provider of its own, at a root of its own. One root
+/// registered with every adapter would work too, but every manager would read
+/// every battery, and warn of each on another adapter.
 ///
 /// Which objects are exported, and at what level, is the caller's to keep:
 /// `attachment` keeps it with the rest of what it knows about each pair, so
 /// the two cannot drift apart.
 pub struct BatteryProvider {
     conn: Connection,
+    /// The adapter whose manager took it.
+    adapter: String,
+    /// Where its batteries are - see [`provider_root`].
+    root: OwnedObjectPath,
 }
 
-/// Where one device's battery object lives, under the provider root.
-fn battery_path(mac: Address) -> Result<OwnedObjectPath> {
+/// Where the provider for the adapter at `adapter` keeps its batteries: a root
+/// named after the adapter, as `.../battery/hci1` for `/org/bluez/hci1`.
+/// bluetoothd reads a provider's objects from the ObjectManager at its root.
+fn provider_root(adapter: &str) -> Result<OwnedObjectPath> {
+    let name = adapter.rsplit('/').next().unwrap_or_default();
+    let path = format!("{PROVIDER_PATH}/{name}");
+    OwnedObjectPath::try_from(path.as_str())
+        .with_context(|| format!("invalid provider root {path} for adapter {adapter}"))
+}
+
+/// Where one device's battery object lives, under its provider's root.
+fn battery_path(root: &str, mac: Address) -> Result<OwnedObjectPath> {
     let path = format!(
-        "{PROVIDER_PATH}/{BATTERY_NAME}_{}",
+        "{root}/{BATTERY_NAME}_{}",
         mac.to_string().replace(':', "_")
     );
     OwnedObjectPath::try_from(path.as_str()).with_context(|| format!("invalid battery path {path}"))
@@ -124,26 +152,31 @@ impl BatteryAction {
 }
 
 impl BatteryProvider {
-    /// Serves the ObjectManager on `conn` and registers with whichever BlueZ
-    /// answers there.
-    pub async fn with_connection(conn: Connection) -> Result<Self> {
+    /// Serves the provider root for the adapter at `adapter` on `conn`, and
+    /// registers it with that adapter's manager, in whichever BlueZ answers
+    /// there.
+    pub async fn register(conn: Connection, adapter: &str) -> Result<Self> {
+        let root = provider_root(adapter)?;
         // Serving ObjectManager at the provider root is what makes BlueZ pick up
         // batteries added underneath it.
         conn.object_server()
-            .at(PROVIDER_PATH, zbus::fdo::ObjectManager)
+            .at(&root, zbus::fdo::ObjectManager)
             .await
             .context("failed to serve ObjectManager")?;
 
-        let manager = BatteryProviderManager1Proxy::new(&conn)
+        let manager = BatteryProviderManager1Proxy::new(&conn, adapter)
             .await
             .context("failed to reach BatteryProviderManager1")?;
-        let path = ObjectPath::try_from(PROVIDER_PATH)?;
         manager
-            .register_battery_provider(&path)
+            .register_battery_provider(&root)
             .await
             .context("failed to register battery provider")?;
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            adapter: adapter.to_string(),
+            root,
+        })
     }
 
     /// Carries out one change to the exported battery objects.
@@ -164,7 +197,7 @@ impl BatteryProvider {
     /// Exports one device's battery object at its first reading. Registering the
     /// interface emits InterfacesAdded.
     async fn add_battery(&mut self, mac: Address, device_path: &str, percentage: u8) -> Result<()> {
-        let battery_path = battery_path(mac)?;
+        let battery_path = battery_path(&self.root, mac)?;
         let device = OwnedObjectPath::try_from(device_path.to_string())
             .with_context(|| format!("invalid device path {device_path}"))?;
 
@@ -188,7 +221,7 @@ impl BatteryProvider {
         let iface_ref = self
             .conn
             .object_server()
-            .interface::<_, BatteryProvider1>(&battery_path(mac)?)
+            .interface::<_, BatteryProvider1>(&battery_path(&self.root, mac)?)
             .await
             .context("battery interface not found")?;
 
@@ -206,7 +239,7 @@ impl BatteryProvider {
     async fn remove_battery(&mut self, mac: Address) -> Result<()> {
         self.conn
             .object_server()
-            .remove::<BatteryProvider1, _>(&battery_path(mac)?)
+            .remove::<BatteryProvider1, _>(&battery_path(&self.root, mac)?)
             .await
             .context("failed to remove battery object")?;
         Ok(())
@@ -218,11 +251,57 @@ impl BatteryProvider {
 
     /// Unregisters the provider. BlueZ drops its batteries along with it.
     pub async fn close(&self) -> Result<()> {
-        let manager = BatteryProviderManager1Proxy::new(&self.conn).await?;
-        let path = ObjectPath::try_from(PROVIDER_PATH)?;
-        manager.unregister_battery_provider(&path).await?;
+        let manager = BatteryProviderManager1Proxy::new(&self.conn, self.adapter.as_str()).await?;
+        manager.unregister_battery_provider(&self.root).await?;
         Ok(())
     }
+}
+
+/// One of BlueZ's adapters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adapter {
+    /// Its object, `/org/bluez/hci0` and on, where `Adapter1` and its
+    /// `BatteryProviderManager1` are.
+    pub path: String,
+    pub powered: bool,
+}
+
+/// Every adapter of whichever BlueZ answers on `conn`, powered or not, by
+/// path. Which is first, and what it is called, depends on the machine: a USB
+/// dongle, a disabled internal adapter or a re-enumeration after resume can
+/// leave none at `hci0` (#51).
+pub async fn adapters(conn: &Connection) -> Result<Vec<Adapter>> {
+    Ok(adapters_in(managed_objects(conn).await?))
+}
+
+/// Picks the adapters out of a GetManagedObjects reply: every object with
+/// `Adapter1`, by path. A `Powered` that is absent or mistyped reads as off.
+fn adapters_in(objects: ManagedObjects) -> Vec<Adapter> {
+    let mut adapters: Vec<Adapter> = objects
+        .into_iter()
+        .filter_map(|(path, interfaces)| {
+            let props = interfaces.get(ADAPTER_INTERFACE)?;
+            Some(Adapter {
+                path: path.to_string(),
+                powered: bool_prop(props, "Powered"),
+            })
+        })
+        .collect();
+    adapters.sort_by(|a, b| a.path.cmp(&b.path));
+    adapters
+}
+
+/// Every object of whichever BlueZ answers on `conn`, with its interfaces and
+/// their properties.
+async fn managed_objects(conn: &Connection) -> Result<ManagedObjects> {
+    let om = zbus::fdo::ObjectManagerProxy::builder(conn)
+        .destination(BLUEZ_SERVICE)?
+        .path("/")?
+        .build()
+        .await?;
+    om.get_managed_objects()
+        .await
+        .context("failed to get managed objects")
 }
 
 /// BlueZ's device objects: which are connected AirPods, what each is called,
@@ -239,17 +318,7 @@ impl Devices {
 
     /// Every connected AirPods - see [`is_airpods`].
     pub async fn connected_airpods(&self) -> Result<Vec<String>> {
-        let om = zbus::fdo::ObjectManagerProxy::builder(&self.conn)
-            .destination(BLUEZ_SERVICE)?
-            .path("/")?
-            .build()
-            .await?;
-
-        let objects = om
-            .get_managed_objects()
-            .await
-            .context("failed to get managed objects")?;
-
+        let objects = managed_objects(&self.conn).await?;
         Ok(objects
             .into_iter()
             .filter(|(_, interfaces)| {
@@ -261,7 +330,13 @@ impl Devices {
             .collect())
     }
 
-    pub async fn device_address(&self, device_path: &str) -> Result<Address> {
+    /// A device's address, and the path of the adapter it is on - its
+    /// `Adapter` - read through one proxy, so in one `GetAll`. Fails when the
+    /// address cannot be read; the adapter alone failing is the inner error.
+    pub async fn device_address_and_adapter(
+        &self,
+        device_path: &str,
+    ) -> Result<(Address, Result<String>)> {
         let proxy = Device1Proxy::builder(&self.conn)
             .path(device_path.to_string())?
             .build()
@@ -270,9 +345,15 @@ impl Devices {
             .address()
             .await
             .context("failed to get device address")?;
-        address
+        let address = address
             .parse()
-            .with_context(|| format!("invalid device address {address:?}"))
+            .with_context(|| format!("invalid device address {address:?}"))?;
+        let adapter = proxy
+            .adapter()
+            .await
+            .map(|adapter| adapter.to_string())
+            .context("failed to get device adapter");
+        Ok((address, adapter))
     }
 
     /// Every paired device's BlueZ alias, by MAC.
@@ -293,17 +374,7 @@ impl Devices {
     }
 
     async fn read_device_aliases(&self) -> Result<HashMap<Address, String>> {
-        let om = zbus::fdo::ObjectManagerProxy::builder(&self.conn)
-            .destination(BLUEZ_SERVICE)?
-            .path("/")?
-            .build()
-            .await?;
-
-        let objects = om
-            .get_managed_objects()
-            .await
-            .context("failed to get managed objects")?;
-
+        let objects = managed_objects(&self.conn).await?;
         Ok(objects
             .into_values()
             .filter_map(|interfaces| device_name_entry(interfaces.get("org.bluez.Device1")?))
@@ -593,10 +664,6 @@ fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(Address, St
     }
 }
 
-pub const fn adapter_path() -> &'static str {
-    ADAPTER_PATH
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,14 +744,80 @@ mod tests {
         );
     }
 
-    /// One object per device, and a MAC's colons are not legal in an object path.
+    /// One object per device, under its adapter's root, and a MAC's colons
+    /// are not legal in an object path.
     #[test]
-    fn battery_paths_are_per_device() {
+    fn battery_paths_are_per_device_and_adapter() {
+        let root = provider_root("/org/bluez/hci1").unwrap();
         assert_eq!(
-            battery_path(MAC_A).unwrap().as_str(),
-            "/com/github/mstroecker/linuxpods/battery/airpods_battery_AA_BB_CC_DD_EE_FF"
+            root.as_str(),
+            "/com/github/mstroecker/linuxpods/battery/hci1"
         );
-        assert_ne!(battery_path(MAC_A).unwrap(), battery_path(MAC_B).unwrap());
+        assert_eq!(
+            battery_path(&root, MAC_A).unwrap().as_str(),
+            "/com/github/mstroecker/linuxpods/battery/hci1/airpods_battery_AA_BB_CC_DD_EE_FF"
+        );
+        assert_ne!(
+            battery_path(&root, MAC_A).unwrap(),
+            battery_path(&root, MAC_B).unwrap()
+        );
+        assert_ne!(provider_root("/org/bluez/hci0").unwrap(), root);
+        assert!(provider_root("/").is_err(), "names no adapter");
+    }
+
+    /// A GetManagedObjects reply, of `objects` each with `interfaces`.
+    fn managed<'a>(
+        objects: impl IntoIterator<Item = (&'a str, Vec<(&'a str, HashMap<String, OwnedValue>)>)>,
+    ) -> ManagedObjects {
+        objects
+            .into_iter()
+            .map(|(path, interfaces)| {
+                let interfaces = interfaces
+                    .into_iter()
+                    .map(|(name, props)| (name.try_into().unwrap(), props))
+                    .collect();
+                (path.try_into().unwrap(), interfaces)
+            })
+            .collect()
+    }
+
+    /// Every object with `Adapter1` is an adapter, whatever it is called, and
+    /// nothing else is: not a device, nor the root object.
+    #[test]
+    fn adapters_are_the_objects_with_adapter1() {
+        let powered = |on: bool| device([("Powered", Value::from(on))]);
+        let objects = managed([
+            ("/org/bluez", vec![("org.bluez.AgentManager1", device([]))]),
+            (
+                "/org/bluez/hci1",
+                vec![
+                    (ADAPTER_INTERFACE, powered(true)),
+                    ("org.bluez.BatteryProviderManager1", device([])),
+                ],
+            ),
+            (
+                "/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF",
+                vec![(
+                    "org.bluez.Device1",
+                    device([("Connected", Value::from(true))]),
+                )],
+            ),
+            ("/org/bluez/hci0", vec![(ADAPTER_INTERFACE, powered(false))]),
+            ("/org/bluez/hci2", vec![(ADAPTER_INTERFACE, device([]))]),
+        ]);
+        let adapter = |path: &str, powered| Adapter {
+            path: path.to_string(),
+            powered,
+        };
+        assert_eq!(
+            adapters_in(objects),
+            [
+                adapter("/org/bluez/hci0", false),
+                adapter("/org/bluez/hci1", true),
+                adapter("/org/bluez/hci2", false),
+            ]
+        );
+        assert!(adapters_in(ManagedObjects::new()).is_empty());
     }
 
     const MAC_A: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);

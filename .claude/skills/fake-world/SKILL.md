@@ -48,6 +48,17 @@ Noise Cancelling. A scenario's pairs have their keys saved in the app's keystore
 it starts, as though each had connected once before. A pair added later with `AddPods`
 has no key until it connects, so until then the app shows nothing of it.
 
+The fake BlueZ has one adapter, powered, at `/org/bluez/hci0`. `ADAPTER=hci1` puts it
+at `/org/bluez/hci1` instead, as on a machine whose only adapter is not the first
+(#51); any scenario runs on it, and `AddPods` pairs with it:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=line-tables-only make fake-world SCENARIO=connected ADAPTER=hci1 HEADLESS=1
+```
+
+Several adapters, and one that is off, are for the pipeline tests
+(`World::with_adapters`); `fakepods` makes one.
+
 ## Change the world
 
 ```sh
@@ -62,7 +73,7 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 
 | Method | Does |
 |---|---|
-| `AddPods(s mac, q model, s alias)` | pairs new AirPods, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C) |
+| `AddPods(s mac, q model, s alias)` | pairs new AirPods with the adapter, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C) |
 | `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP |
 | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case` |
 | `SetLid(s mac, b open)` | the case lid |

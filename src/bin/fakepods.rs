@@ -1,7 +1,9 @@
 //! fakepods: a fake world of AirPods for LinuxPods to run against (#72).
 //!
 //! Serves a fake BlueZ and `FakeWorld1` on the bus at `--address`, with a
-//! pair's AAP socket in `--socket-dir`, and runs until killed.
+//! pair's AAP socket in `--socket-dir`, and runs until killed. The fake BlueZ
+//! has one adapter, `hci0` unless `--adapter` names another, as on a machine
+//! whose only adapter is not the first (#51).
 //! `scripts/fake-world.sh` starts it on a private bus with the app beside it,
 //! and `make fake-world` builds both first. See `harness::world` for what the
 //! world does and how to change it.
@@ -25,14 +27,18 @@ use anyhow::{Context, Result};
 use bluer::Address;
 use linuxpods::harness::World;
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3};
+use linuxpods::harness::world::DEFAULT_ADAPTER;
 use linuxpods::keystore::{self, KEYS_FILE, Keystore};
 
 const USAGE: &str = "\
-usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--keystore DIR]
+usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--adapter NAME]
+                [--keystore DIR]
 
   --address ADDRESS  the bus to serve on - a private one, never the system bus
   --socket-dir DIR   where each pair's AAP socket goes: LINUXPODS_AAP_SOCKET_DIR
   --scenario NAME    in-range (default), connected, two-pairs, flood or empty
+  --adapter NAME     the fake BlueZ's one adapter, at /org/bluez/NAME: hci0 (default),
+                     or another such as hci1
   --keystore DIR     save the pairs' keys in DIR/keys.json for the fake world's app;
                      never the app's own data directory, nor a DIR holding keys
 
@@ -104,6 +110,7 @@ struct Args {
     address: String,
     socket_dir: PathBuf,
     scenario: Scenario,
+    adapter: String,
     keystore: Option<PathBuf>,
 }
 
@@ -115,6 +122,7 @@ fn parse_args(
 ) -> Result<Option<Args>, String> {
     let (mut address, mut socket_dir, mut keystore) = (None, None, None);
     let mut scenario = Scenario::InRange;
+    let mut adapter = DEFAULT_ADAPTER.to_string();
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             return Ok(None);
@@ -123,6 +131,7 @@ fn parse_args(
         match arg.as_str() {
             "--address" => address = Some(value),
             "--socket-dir" => socket_dir = Some(PathBuf::from(value)),
+            "--adapter" => adapter = value,
             "--keystore" => keystore = Some(PathBuf::from(value)),
             "--scenario" => {
                 scenario =
@@ -143,6 +152,7 @@ fn parse_args(
         address,
         socket_dir: socket_dir.ok_or("--socket-dir is required")?,
         scenario,
+        adapter,
         keystore,
     }))
 }
@@ -187,7 +197,8 @@ fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 async fn run(args: Args) -> Result<()> {
-    let world = World::new(&args.address, &args.socket_dir).await?;
+    let adapters = [(args.adapter.as_str(), true)];
+    let world = World::with_adapters(&args.address, &args.socket_dir, &adapters).await?;
     args.scenario.set_up(&world).await?;
     let macs = world.macs().await;
     if let Some(dir) = &args.keystore {
@@ -201,10 +212,11 @@ async fn run(args: Args) -> Result<()> {
     }
     world.publish().await?;
     tracing::info!(
-        "{} ready on {} with {} pair(s)",
+        "{} ready on {} with {} pair(s) on {}",
         args.scenario.name(),
         args.address,
-        macs.len()
+        macs.len(),
+        args.adapter
     );
 
     if args.scenario == Scenario::Flood {
@@ -269,8 +281,21 @@ mod tests {
         .unwrap();
         assert_eq!(args.scenario, Scenario::TwoPairs);
         assert_eq!(args.socket_dir, PathBuf::from("/run/user/1000/aap"));
+        assert_eq!(args.adapter, "hci0");
         assert_eq!(args.keystore, None);
         assert_eq!(parse(&["--help"]), Ok(None));
+
+        let args = parse(&[
+            "--adapter",
+            "hci1",
+            "--address",
+            "unix:path=/tmp/b",
+            "--socket-dir",
+            "/tmp/a",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(args.adapter, "hci1");
     }
 
     #[test]

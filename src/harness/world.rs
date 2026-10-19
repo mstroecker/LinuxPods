@@ -2,13 +2,17 @@
 //! through, and their AAP sockets, running for the app to meet in place of
 //! real ones (#72).
 //!
-//! Each pair is a [`Pods`] model at a real address, paired with the fake
-//! adapter. The world carries out what the model asks for and nothing else:
+//! The fake BlueZ has the adapters the world is made with: one, `hci0`, unless
+//! [`World::with_adapters`] says otherwise. Each pair is a [`Pods`] model at a
+//! real address, paired with one of them. The world carries out what the
+//! model asks for and nothing else:
 //!
 //! - **BLE.** Every [`ADVERTISING_INTERVAL`] each pair's advertisement goes to
-//!   the fake BlueZ, which signals it while the app discovers - from the
-//!   random address the model rotates, so a new device object every ten
-//!   seconds.
+//!   the fake BlueZ, which signals it while the app discovers on the pair's
+//!   adapter - from the random address the model rotates, so a new device
+//!   object every ten seconds. Only the pair's own adapter hears it, as though
+//!   the others were out of range, so which adapter the app heard a pair on
+//!   is never in doubt.
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
@@ -24,7 +28,7 @@
 //!
 //! | Method | Does |
 //! |---|---|
-//! | `AddPods(s mac, q model, s alias)` | Pairs new AirPods - model by product ID, such as `0x2027` for Pro 3 - in range and disconnected |
+//! | `AddPods(s mac, q model, s alias)` | Pairs new AirPods with the world's first adapter - model by product ID, such as `0x2027` for Pro 3 - in range and disconnected |
 //! | `Connect(s mac)` | Connects them to the host, which the app takes up |
 //! | `Disconnect(s mac)` | Disconnects them, which takes the AAP connection along |
 //! | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case`; a level above 100 is unknown |
@@ -32,7 +36,7 @@
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
 //! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, `echo_delay_ms` in milliseconds |
-//! | `Flood(u count)` | That many advertisers no key decrypts, each from an address of its own |
+//! | `Flood(u count)` | That many advertisers no key decrypts, each from an address of its own, heard by every adapter |
 //! | `Received(s mac) → aay` | Every AAP packet the app sent the pair, in order |
 //! | `Batteries() → a{sy}` | What GNOME Settings shows: the level a battery provider gave each device, by MAC |
 //!
@@ -69,6 +73,10 @@ pub const SERVICE: &str = "io.github.mstroecker.LinuxPods.FakeWorld";
 pub const PATH: &str = "/io/github/mstroecker/LinuxPods/FakeWorld";
 pub const INTERFACE: &str = "io.github.mstroecker.LinuxPods.FakeWorld1";
 
+/// The adapter a world has unless it is made with others: the one bluetoothd
+/// puts first.
+pub const DEFAULT_ADAPTER: &str = "hci0";
+
 /// How often each pair advertises. Real AirPods do so many times a second;
 /// once a second keeps the logs readable and still gives an address ten
 /// advertisements before it rotates.
@@ -87,6 +95,9 @@ struct Inner {
     /// ObjectManager at `/` would list it among bluetoothd's objects.
     control: Connection,
     socket_dir: PathBuf,
+    /// The fake BlueZ's adapters, by name, in the order the world was made
+    /// with them: [`World::add_pods`] pairs with the first.
+    adapters: Vec<String>,
     /// Where the models' time starts.
     epoch: Instant,
     pairs: Mutex<BTreeMap<Address, Pair>>,
@@ -97,6 +108,8 @@ struct Inner {
 
 struct Pair {
     pods: Pods,
+    /// The adapter it is paired with, and the one that hears it.
+    adapter: String,
     link: Option<Link>,
 }
 
@@ -136,13 +149,27 @@ async fn connect(bus: &str) -> Result<Connection> {
 
 impl World {
     /// A world on the bus at `bus`, its AAP sockets in `socket_dir`, which is
-    /// created if missing. Nothing in it yet, and no name taken: add pairs,
-    /// then [`World::publish`].
+    /// created if missing, and its fake BlueZ with one adapter,
+    /// [`DEFAULT_ADAPTER`], powered. No pair in it yet, and no name taken: add
+    /// pairs, then [`World::publish`].
     ///
     /// Socket paths longer than 108 bytes cannot be bound, so `socket_dir`
     /// wants to be short.
     pub async fn new(bus: &str, socket_dir: &Path) -> Result<Self> {
+        Self::with_adapters(bus, socket_dir, &[(DEFAULT_ADAPTER, true)]).await
+    }
+
+    /// [`World::new`], with `adapters` in place of the one: each a name, as
+    /// `hci1`, and whether it is powered.
+    pub async fn with_adapters(
+        bus: &str,
+        socket_dir: &Path,
+        adapters: &[(&str, bool)],
+    ) -> Result<Self> {
         let bluez = FakeBluez::serve(connect(bus).await?).await?;
+        for &(name, powered) in adapters {
+            bluez.add_adapter(name, powered).await?;
+        }
         let control = connect(bus).await?;
         std::fs::create_dir_all(socket_dir)
             .with_context(|| format!("failed to create {}", socket_dir.display()))?;
@@ -150,6 +177,7 @@ impl World {
             bluez,
             control,
             socket_dir: socket_dir.to_path_buf(),
+            adapters: adapters.iter().map(|(name, _)| name.to_string()).collect(),
             epoch: Instant::now(),
             pairs: Mutex::default(),
             due: Notify::new(),
@@ -187,9 +215,25 @@ impl World {
         self.0.epoch.elapsed()
     }
 
-    /// Pairs new AirPods with the host: `product_id` as `parse_proximity_data`
-    /// reads it, fresh keys, in range and disconnected.
+    /// Pairs new AirPods with the host's first adapter: `product_id` as
+    /// `parse_proximity_data` reads it, fresh keys, in range and disconnected.
     pub async fn add_pods(&self, mac: Address, product_id: u16, alias: &str) -> Result<()> {
+        let adapter = self
+            .0
+            .adapters
+            .first()
+            .context("the world has no adapter")?;
+        self.add_pods_on(adapter, mac, product_id, alias).await
+    }
+
+    /// [`World::add_pods`], with the adapter called `adapter`.
+    pub async fn add_pods_on(
+        &self,
+        adapter: &str,
+        mac: Address,
+        product_id: u16,
+        alias: &str,
+    ) -> Result<()> {
         let mut pairs = self.0.pairs.lock().await;
         anyhow::ensure!(!pairs.contains_key(&mac), "{mac} is paired already");
         let path = unix_socket_path(&self.0.socket_dir, mac);
@@ -200,16 +244,17 @@ impl World {
         }
         let listener = UnixSeqpacketListener::bind(&path)
             .with_context(|| format!("failed to listen at {}", path.display()))?;
-        self.0.bluez.add_device(mac, alias).await?;
+        self.0.bluez.add_device(adapter, mac, alias).await?;
         pairs.insert(
             mac,
             Pair {
                 pods: Pods::new(product_id, mac),
+                adapter: adapter.to_string(),
                 link: None,
             },
         );
         tokio::spawn(self.clone().accept(mac, listener));
-        tracing::info!("fake world: {alias} paired at {mac}");
+        tracing::info!("fake world: {alias} paired at {mac} with {adapter}");
         Ok(())
     }
 
@@ -302,8 +347,8 @@ impl World {
     /// closed, advertising from an address of its own. Each advertises twice,
     /// so it is signalled both ways a device is - as it appears and as it
     /// changes: the scanner reads both, attachment's connection watch only
-    /// the change, and a flood has to reach both. Gone after the fake BlueZ's
-    /// timeout.
+    /// the change, and a flood has to reach both. Every adapter hears it.
+    /// Gone after the fake BlueZ's timeout.
     pub async fn flood(&self, count: u32) -> Result<()> {
         let now = self.now();
         for _ in 0..count {
@@ -311,15 +356,20 @@ impl World {
             let address = spammer.address_at(now);
             for at in [now, now + Duration::from_millis(1)] {
                 let advert = spammer.advertisement(at);
-                self.0.bluez.advertise(address, &advert.data).await?;
+                for adapter in &self.0.adapters {
+                    self.0
+                        .bluez
+                        .advertise(adapter, address, &advert.data)
+                        .await?;
+                }
             }
         }
         tracing::debug!("fake world: flooded with {count} advertisers");
         Ok(())
     }
 
-    /// Advertises every pair every [`ADVERTISING_INTERVAL`], and has the fake
-    /// BlueZ forget the addresses that went quiet.
+    /// Advertises every pair to its adapter every [`ADVERTISING_INTERVAL`],
+    /// and has the fake BlueZ forget the addresses that went quiet.
     async fn advertise(self) {
         let mut tick = tokio::time::interval(ADVERTISING_INTERVAL);
         loop {
@@ -329,11 +379,16 @@ impl World {
                 let now = self.now();
                 pairs
                     .iter()
-                    .map(|(mac, pair)| (*mac, pair.pods.advertisement(now)))
+                    .map(|(mac, pair)| (*mac, pair.adapter.clone(), pair.pods.advertisement(now)))
                     .collect()
             };
-            for (mac, advert) in adverts {
-                match self.0.bluez.advertise(advert.address, &advert.data).await {
+            for (mac, adapter, advert) in adverts {
+                let heard = self
+                    .0
+                    .bluez
+                    .advertise(&adapter, advert.address, &advert.data)
+                    .await;
+                match heard {
                     Ok(true) => {
                         tracing::trace!("fake world: {mac} advertised as {}", advert.address)
                     }
@@ -648,7 +703,7 @@ mod tests {
     /// Whether the fake BlueZ shows the pair connected, read afresh.
     async fn bluez_connected(bus: &PrivateBus, mac: Address) -> bool {
         let conn = bus.connect().await.unwrap();
-        let path = device_path(mac);
+        let path = device_path(DEFAULT_ADAPTER, mac);
         let device = zbus::proxy::Builder::<zbus::Proxy>::new(&conn)
             .destination(BLUEZ_SERVICE)
             .unwrap()
@@ -789,9 +844,9 @@ mod tests {
         let (bus, world, _dir) = world().await;
         world.add_pods(OTHER, PRO_2_USB_C, "Other").await.unwrap();
         let scanner = Scanner::with_connection(bus.connect().await.unwrap());
-        scanner.start_discovery().await.unwrap();
         let adverts = scanner.advertisements().await.unwrap();
         tokio::pin!(adverts);
+        scanner.start_discovery().await.unwrap();
 
         let keys = [
             (MAC, world.keys(MAC).await.unwrap()),
@@ -819,9 +874,9 @@ mod tests {
     async fn a_flood_decrypts_with_no_key() {
         let (bus, world, _dir) = world().await;
         let scanner = Scanner::with_connection(bus.connect().await.unwrap());
-        scanner.start_discovery().await.unwrap();
         let adverts = scanner.advertisements().await.unwrap();
         tokio::pin!(adverts);
+        scanner.start_discovery().await.unwrap();
         let key = world.keys(MAC).await.unwrap().enc_key;
 
         world.flood(3).await.unwrap();
