@@ -68,6 +68,12 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   advertisement no stored key decrypts cannot be attributed to anything. It is dropped on
   arrival - not stored, not broadcast; storing those is what a BLE spam flood fed on.
   The scanner's `BLE parsable:` log still records it.
+- A D-Bus subscription that advertisements reach is drained by a task that never awaits
+  its reader, and what an advertiser can trigger at will is coalesced per device - never
+  queued per signal, never dropped. Left in zbus's 64-message queue, advertisements
+  stopped zbus reading the connection, and a reply attachment awaited never came (#90).
+  Queued one per signal, an advertiser re-signalling its services kept a pair waiting
+  55 s to attach in a test (#96). `Connected` changes are kept, in order.
 
 ## Protocol
 
