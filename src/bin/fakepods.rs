@@ -10,9 +10,14 @@
 //! it complete. With `--keystore`, each of its pairs' keys is saved there as
 //! the app keeps keys - as though each had connected to the app before. The
 //! app reads nothing from a pair whose key it lacks.
+//!
+//! The save replaces the key file outright, so `--keystore` refuses the app's
+//! own data directory and any directory with a key file in it already. Saved
+//! over the user's keys, the fake ones would leave the app reading nothing
+//! from a real pair over BLE until that pair reconnected over AAP.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -20,7 +25,7 @@ use anyhow::{Context, Result};
 use bluer::Address;
 use linuxpods::harness::World;
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3};
-use linuxpods::keystore::Keystore;
+use linuxpods::keystore::{self, KEYS_FILE, Keystore};
 
 const USAGE: &str = "\
 usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--keystore DIR]
@@ -28,7 +33,8 @@ usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--keystore
   --address ADDRESS  the bus to serve on - a private one, never the system bus
   --socket-dir DIR   where each pair's AAP socket goes: LINUXPODS_AAP_SOCKET_DIR
   --scenario NAME    in-range (default), connected, two-pairs, flood or empty
-  --keystore DIR     save the pairs' keys here, as the app's data directory has them
+  --keystore DIR     save the pairs' keys in DIR/keys.json for the fake world's app;
+                     never the app's own data directory, nor a DIR holding keys
 
 Scenarios:
   in-range   one pair in range, disconnected
@@ -101,8 +107,12 @@ struct Args {
     keystore: Option<PathBuf>,
 }
 
-/// `None` for `--help`.
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, String> {
+/// `None` for `--help`. `app_dir` is where the app keeps its keys, which
+/// `--keystore` must not be.
+fn parse_args(
+    mut args: impl Iterator<Item = String>,
+    app_dir: Option<&Path>,
+) -> Result<Option<Args>, String> {
     let (mut address, mut socket_dir, mut keystore) = (None, None, None);
     let mut scenario = Scenario::InRange;
     while let Some(arg) = args.next() {
@@ -126,12 +136,54 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, St
     if address.contains("/run/dbus/system_bus_socket") {
         return Err("that is the system bus; give a private one".into());
     }
+    if let Some(dir) = &keystore {
+        check_keystore(dir, app_dir)?;
+    }
     Ok(Some(Args {
         address,
         socket_dir: socket_dir.ok_or("--socket-dir is required")?,
         scenario,
         keystore,
     }))
+}
+
+/// Refuses a `--keystore` whose save would replace keys this run did not
+/// make: `app_dir` however `dir` spells it, or a directory holding a key file
+/// already - the run has saved nothing yet, so that one is someone else's.
+fn check_keystore(dir: &Path, app_dir: Option<&Path>) -> Result<(), String> {
+    let resolved = resolve(dir).map_err(|e| format!("--keystore {}: {e}", dir.display()))?;
+    if app_dir.is_some_and(|app| resolve(app).is_ok_and(|app| app == resolved)) {
+        return Err("that is the app's own data directory; give a new one".into());
+    }
+    if std::fs::symlink_metadata(resolved.join(KEYS_FILE)).is_ok() {
+        return Err(format!(
+            "{} holds a {KEYS_FILE} already; give a new directory",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// `path` made absolute, with every link in it followed - where the save
+/// lands once `Keystore::with_dir` has made what is missing. Each part is
+/// resolved as soon as it exists, so a link reached through a `..` after a
+/// part that does not exist yet is followed too.
+fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+    let mut resolved = PathBuf::new();
+    for part in std::path::absolute(path)?.components() {
+        match part {
+            // Nothing resolved so far is a link, so this is the real parent.
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            part => resolved.push(part),
+        }
+        if let Ok(real) = resolved.canonicalize() {
+            resolved = real;
+        }
+    }
+    Ok(resolved)
 }
 
 async fn run(args: Args) -> Result<()> {
@@ -174,7 +226,8 @@ async fn main() -> ExitCode {
         )
         .init();
 
-    let args = match parse_args(std::env::args().skip(1)) {
+    let app_dir = keystore::default_dir().ok();
+    let args = match parse_args(std::env::args().skip(1), app_dir.as_deref()) {
         Ok(Some(args)) => args,
         Ok(None) => {
             println!("{USAGE}");
@@ -199,7 +252,7 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Option<Args>, String> {
-        parse_args(args.iter().map(|a| a.to_string()))
+        parse_args(args.iter().map(|a| a.to_string()), None)
     }
 
     #[test]
@@ -254,6 +307,66 @@ mod tests {
         ] {
             let err = parse(&["--address", address, "--socket-dir", "/tmp/aap"]).unwrap_err();
             assert!(err.contains("system bus"), "{err}");
+        }
+    }
+
+    /// The user's keys are there: the save would replace them with the fake
+    /// pairs'. Refused however the path spells it, and before the app has
+    /// made the directory.
+    #[test]
+    fn refuses_the_apps_own_keystore() {
+        let home = tempfile::tempdir().unwrap();
+        let data = home.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let link = home.path().join("link");
+        std::os::unix::fs::symlink(&data, &link).unwrap();
+        // Not made yet, and named through the link.
+        let app_dir = link.join("linuxpods");
+        let with_keystore = |dir: &Path| {
+            let args = [
+                "--address",
+                "unix:path=/tmp/b",
+                "--socket-dir",
+                "/tmp/a",
+                "--keystore",
+                dir.to_str().unwrap(),
+            ];
+            parse_args(args.into_iter().map(String::from), Some(&app_dir))
+        };
+
+        // From the working directory, which the tests do not change.
+        let up: PathBuf = std::env::current_dir()
+            .unwrap()
+            .components()
+            .skip(1)
+            .map(|_| "..")
+            .collect();
+        for dir in [
+            app_dir.clone(),
+            data.join("linuxpods"),
+            data.join("./linuxpods/"),
+            data.join("new/../linuxpods"),
+            up.join(data.join("linuxpods").strip_prefix("/").unwrap()),
+            // Back out of a part that does not exist, and through the link.
+            home.path().join("new/../link/linuxpods"),
+        ] {
+            let err = with_keystore(&dir).unwrap_err();
+            assert!(
+                err.contains("own data directory"),
+                "{}: {err}",
+                dir.display()
+            );
+        }
+
+        // Anywhere else, so long as no key file is there.
+        let other = home.path().join("other");
+        assert!(with_keystore(&other).is_ok(), "a new directory");
+        std::fs::create_dir(&other).unwrap();
+        assert!(with_keystore(&other).is_ok(), "an empty one");
+        std::fs::write(other.join(KEYS_FILE), "{}").unwrap();
+        for dir in [other.clone(), home.path().join("new/../other")] {
+            let err = with_keystore(&dir).unwrap_err();
+            assert!(err.contains("keys.json"), "{}: {err}", dir.display());
         }
     }
 }
