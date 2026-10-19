@@ -116,6 +116,11 @@ packet arrives; this deadlocked the Request Keys button.
   ones the coordinator later drops; `BLE decryptable:` reports identification. Noisy
   non-proximity Apple data goes to `trace`.
 - Log text describing control flow goes stale like comments, and is more visible.
+- A harness build must behave like a plain one unless the fake world's environment asks
+  otherwise (`LINUXPODS_AAP_SOCKET_DIR`, `LINUXPODS_HARNESS_AUTOMATION=1`, set only by
+  `scripts/fake-world.sh`): `make test` and `make fake-world` leave it at
+  `target/debug/linuxpods`, where it meets real AirPods and the user's session. Nothing in
+  the harness writes to the app's real data directory.
 
 **UI.** Widget updates arrive only from the snapshot stream. Read a selection *before*
 mutating the widget - splicing a `StringList` makes `GtkDropDown` emit `selected-notify`,
