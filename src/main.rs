@@ -186,7 +186,9 @@ fn main() -> glib::ExitCode {
     // UI automation for the test harness, on the connection GApplication
     // registered the app with: it does so before `startup`, which a second
     // launch never reaches, so only the primary instance serves it. Connected
-    // first, so it runs first and is up before the window is built.
+    // first, so it runs first and is up before the window is built. It serves
+    // only when the fake world's script asks for it - see
+    // `ui::register_automation`.
     #[cfg(feature = "harness")]
     app.connect_startup(ui::register_automation);
 

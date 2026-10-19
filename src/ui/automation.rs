@@ -4,14 +4,19 @@
 //! coordinates to click at. So the app answers for itself.
 //!
 //! `io.github.mstroecker.LinuxPods.Automation1` at
-//! `/io/github/mstroecker/LinuxPods/Automation`, in harness builds only. It is
-//! registered in `startup` on the application's own session bus connection,
-//! so only the primary instance has it - and under the harness, that bus is a
-//! private one, never the user's. GApplication takes the bus name before
-//! `startup` runs, and GTK starts up before the interface is registered, so
-//! for a moment the name is there and the object is not: a caller retries its
-//! first call - `Settle` is the natural one - while it fails with
-//! `org.freedesktop.DBus.Error.UnknownMethod`.
+//! `/io/github/mstroecker/LinuxPods/Automation`, in harness builds only, and
+//! only with `LINUXPODS_HARNESS_AUTOMATION=1`. `scripts/fake-world.sh` sets it
+//! for an app it has put on a private session bus. Nothing else does: a
+//! harness build is also what `make test` and `make fake-world` leave at
+//! `target/debug/linuxpods`, and served on the user's own session, the
+//! interface would let any process there press and screenshot the window.
+//!
+//! It is registered in `startup` on the application's own session bus
+//! connection, so only the primary instance has it. GApplication takes the
+//! bus name before `startup` runs, and GTK starts up before the interface is
+//! registered, so for a moment the name is there and the object is not: a
+//! caller retries its first call - `Settle` is the natural one - while it
+//! fails with `org.freedesktop.DBus.Error.UnknownMethod`.
 //!
 //! | Method | Does |
 //! |---|---|
@@ -134,6 +139,7 @@
 //! past a dropdown's last item, is `org.freedesktop.DBus.Error.InvalidArgs`.
 
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::os::unix::fs::DirBuilderExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -144,6 +150,11 @@ use serde::Serialize;
 
 const INTERFACE_NAME: &str = "io.github.mstroecker.LinuxPods.Automation1";
 const OBJECT_PATH: &str = "/io/github/mstroecker/LinuxPods/Automation";
+
+/// Set to `1`, it has [`register`] serve the interface. A variable of its
+/// own, rather than the AAP socket directory the fake world also sets: that
+/// one says where AAP goes, and neither should switch on the other.
+const ENABLE_ENV: &str = "LINUXPODS_HARNESS_AUTOMATION";
 
 const INTERFACE_XML: &str = r#"<node>
   <interface name="io.github.mstroecker.LinuxPods.Automation1">
@@ -193,10 +204,15 @@ thread_local! {
     static SNAPSHOT_WAITING: RefCell<Option<Box<dyn Fn() -> bool>>> = const { RefCell::new(None) };
 }
 
-/// Registers the interface on the application's own D-Bus connection. Call it
-/// from `startup`: only the primary instance gets there, and by then
-/// GApplication has registered on the bus and holds the connection.
+/// Registers the interface on the application's own D-Bus connection, when
+/// [`ENABLE_ENV`] asks for it. Call it from `startup`: only the primary
+/// instance gets there, and by then GApplication has registered on the bus
+/// and holds the connection.
 pub fn register(app: &impl IsA<gio::Application>) {
+    if !enabled(std::env::var_os(ENABLE_ENV).as_deref()) {
+        tracing::info!("UI automation off: {ENABLE_ENV} is not 1");
+        return;
+    }
     let Some(connection) = app.dbus_connection() else {
         tracing::warn!("UI automation unavailable: the application is not on a session bus");
         return;
@@ -225,6 +241,12 @@ pub fn register(app: &impl IsA<gio::Application>) {
     if let Some(settings) = gtk::Settings::default() {
         settings.set_gtk_enable_animations(false);
     }
+}
+
+/// Whether the interface is served, given [`ENABLE_ENV`]'s value. Only `1`
+/// counts, so that a harness build run any other way serves nothing.
+fn enabled(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
 }
 
 /// Lets `Settle` ask the window's render loop whether a snapshot is waiting
@@ -992,6 +1014,17 @@ mod tests {
         }
         assert!(gio::dbus_is_interface_name(INTERFACE_NAME));
         assert!(glib::Variant::is_object_path(OBJECT_PATH));
+    }
+
+    /// A harness build on the user's own session - the one `make test` leaves
+    /// behind, run against real AirPods - must not open its window to every
+    /// process there. Only the fake world asks.
+    #[test]
+    fn serves_only_when_asked_to() {
+        assert!(enabled(Some(OsStr::new("1"))));
+        for value in [None, Some(""), Some("0"), Some("true"), Some("1 ")] {
+            assert!(!enabled(value.map(OsStr::new)), "{value:?}");
+        }
     }
 
     #[test]

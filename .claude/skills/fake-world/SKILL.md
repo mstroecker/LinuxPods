@@ -98,9 +98,14 @@ Change, settle, then read: `SetBattery`, `Settle`, `tree`.
 - **Settle's timing.** Headless Broadway draws about one frame a second, and Settle
   waits for a frame that changes nothing, so allow several seconds (`Settle 10000`).
   Opening the Preferences dialog took 2 s.
+- **Automation1 is served only when asked for.** `start` runs the app with
+  `LINUXPODS_HARNESS_AUTOMATION=1`; without it a harness build serves none, and logs
+  `UI automation off`. Set it only for an app on a private session bus, never the
+  user's.
 - **The first call races the app's start.** GApplication takes its name before
   `Automation1` exists, so an early call fails with `UnknownMethod`. `start` already
-  retries `Settle` until it answers; retry likewise if you start the app another way.
+  retries `Settle` until it answers. An app started another way needs
+  `LINUXPODS_HARNESS_AUTOMATION=1`, or it never answers; with it, retry likewise.
 - **Window actions are not on D-Bus under Broadway.** GTK exports them only on Wayland
   and X11, so `win.preferences` cannot be activated. Open the menu and click the item
   by its tree path instead - the path of the button holding its label:
