@@ -242,8 +242,9 @@ impl Fixture {
         // As main.rs's attachment task, on a connection of its own. Back from
         // `new`, the startup sweep is over: a pair the test connects from here
         // on is one attachment is told about, not one the sweep may find.
-        let attachment = Attachment::new(bluez, coordinator.clone())
+        let attachment = timeout(TIMEOUT, Attachment::new(bluez, coordinator.clone()))
             .await
+            .expect("timed out starting attachment")
             .expect("attachment starts");
         let attaching = tokio::spawn(attachment.run());
 
