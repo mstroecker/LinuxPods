@@ -35,14 +35,20 @@ fake-world:
 fake-world-stop:
 	scripts/fake-world.sh stop
 
+# Both feature sets, as CI checks them: the harness, its branches in the app
+# and the pipeline tests build only with --features harness. That run leaves a
+# harness build at target/debug/linuxpods.
 test:
-	cargo test
+	cargo test --all-targets
+	cargo test --all-targets --features harness
 
 fmt:
 	cargo fmt
 
+# Both feature sets too, and a warning fails it, as in CI.
 lint:
-	cargo clippy --all-targets
+	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --features harness -- -D warnings
 
 # Scan the full git history for secrets (rules: .gitleaks.toml)
 secrets:

@@ -222,13 +222,17 @@ when a key is stored. Both protocols are documented in full:
 ## Development
 
 ```bash
-make test                         # cargo test
-make lint                         # cargo clippy --all-targets
+make test    # cargo test --all-targets, then again with --features harness
+make lint    # cargo clippy --all-targets -- -D warnings, likewise
 cargo fmt
 
 RUST_LOG=linuxpods=debug cargo run   # protocol tracing (make run-trace)
 GTK_DEBUG=interactive cargo run      # GTK inspector (make run-debug)
 ```
+
+Both feature sets are checked, as CI checks them. The `harness` feature adds the test
+harness: a fake BlueZ and fake AirPods, the pipeline tests that run against them, and
+`make fake-world`, which runs the app among them.
 
 Debug logging reports each protocol stage separately:
 
@@ -267,7 +271,7 @@ GTK owns the main thread; tokio carries BLE, AAP and D-Bus work. The two meet ov
 
 Contributions are welcome. Please:
 
-- Run `cargo fmt` and `cargo clippy --all-targets` before submitting
+- Run `cargo fmt`, `make lint` and `make test` before submitting
 - Cover protocol parsing and decryption with tests; they need no hardware
 - Keep UI changes consistent with the GNOME HIG, and test on multiple window sizes
 - Document any protocol discoveries in `docs/`
