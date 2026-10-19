@@ -42,8 +42,15 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   snapshots instead of queueing them (per-consumer unbounded queues grew without limit
   under an advertisement flood). It is marked changed so the current state arrives at
   once - otherwise the window comes up blank until the first advertisement. Never hold
-  `borrow()` across an await; every broadcast waits for it. The UI loop pauses
-  `RENDER_INTERVAL` per pass, since tokio's coop budget does not reach glib's executor.
+  `borrow()` across an await: every broadcast waits for it while holding the `inner`
+  write lock, so a held borrow stalls the whole coordinator, and one held while awaiting
+  the coordinator deadlocks. The UI loop pauses `RENDER_INTERVAL` per pass, since tokio's
+  coop budget does not reach glib's executor.
+- Snapshots go out under the lock they were changed under: `broadcast(&inner)` takes the
+  state while the write guard is live, never a snapshot built earlier. Sent after the
+  guard was dropped, an update in between could send a newer snapshot first, and the
+  older one landed last and stayed on show (#88). `send_replace` never awaits, so holding
+  `inner` across it is safe.
 - Every connected pair has its own AAP link (`Inner::links`): client, reading, and a
   read loop `connect_aap` starts with that client. The loop never looks its client up
   by MAC - a loop outliving its link would read the replacement's socket under the old
