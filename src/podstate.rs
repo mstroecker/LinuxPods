@@ -442,6 +442,10 @@ pub struct Coordinator {
     /// same way.
     #[cfg(feature = "harness")]
     aap_socket_dir: Option<PathBuf>,
+    /// Runs once, in the next broadcast just before it sends, for a test to
+    /// hold an update up there.
+    #[cfg(test)]
+    before_send: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Coordinator {
@@ -536,6 +540,8 @@ impl Coordinator {
             updates,
             #[cfg(feature = "harness")]
             aap_socket_dir: None,
+            #[cfg(test)]
+            before_send: std::sync::Mutex::default(),
         }
     }
 
@@ -545,7 +551,9 @@ impl Coordinator {
     /// and battery provider never compete for a snapshot, and one that falls
     /// behind skips stale snapshots rather than queueing them - an unbounded queue
     /// per consumer grew without limit under a flood of advertisements. Sending
-    /// never waits, so no consumer can stall a protocol read loop either.
+    /// never waits for a consumer to take the snapshot, so a slow one cannot
+    /// stall a protocol read loop either - only an open `borrow()` holds a send
+    /// up; see below.
     ///
     /// Marked changed, so the current state arrives at once. Without that a
     /// subscriber which starts before the first advertisement sees nothing at all -
@@ -553,16 +561,34 @@ impl Coordinator {
     /// though the keys were already loaded from disk.
     ///
     /// Never hold the receiver's `borrow()` across an await: it is a read lock,
-    /// and every broadcast waits for it.
+    /// and every broadcast waits for it - holding the coordinator's lock, so
+    /// every other update waits too.
     pub fn subscribe(&self) -> watch::Receiver<Snapshot> {
         let mut rx = self.updates.subscribe();
         rx.mark_changed();
         rx
     }
 
-    /// Replaces the snapshot every subscriber sees.
-    fn broadcast(&self, snapshot: Snapshot) {
-        self.updates.send_replace(snapshot);
+    /// Replaces the snapshot every subscriber sees with one of `inner`.
+    ///
+    /// Takes the state, not a snapshot, so that it is sent while the lock it
+    /// was changed under is still held, and snapshots go out in the order the
+    /// state changed. Sent after the lock was released, an update in between
+    /// could send a newer snapshot first, and the older one landed last - on
+    /// show until the next broadcast (#88).
+    ///
+    /// Sending never awaits, so the lock is not held for long: it waits only
+    /// for an open `borrow()`, which no consumer holds across an await.
+    fn broadcast(&self, inner: &Inner) {
+        #[cfg(test)]
+        {
+            // Taken out first: a hook that waits must not hold up other broadcasts.
+            let hook = self.before_send.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        self.updates.send_replace(inner.snapshot());
     }
 
     /// Replaces the BlueZ alias map and broadcasts if anything changed.
@@ -572,15 +598,12 @@ impl Coordinator {
     /// and rebroadcasting an identical map would wake the UI, tray and battery
     /// provider for nothing.
     pub async fn set_device_names(&self, names: HashMap<Address, String>) {
-        let snapshot = {
-            let mut inner = self.inner.write().await;
-            if inner.device_names == names {
-                return;
-            }
-            inner.device_names = names;
-            inner.snapshot()
-        };
-        self.broadcast(snapshot);
+        let mut inner = self.inner.write().await;
+        if inner.device_names == names {
+            return;
+        }
+        inner.device_names = names;
+        self.broadcast(&inner);
     }
 
     /// Number of devices a snapshot would show.
@@ -594,14 +617,10 @@ impl Coordinator {
     /// expire even when nothing is advertising at all - that is exactly when it is
     /// on show.
     pub async fn expire(&self) {
-        let snapshot = {
-            let mut inner = self.inner.write().await;
-            if !inner.prune(Instant::now()) {
-                return;
-            }
-            inner.snapshot()
-        };
-        self.broadcast(snapshot);
+        let mut inner = self.inner.write().await;
+        if inner.prune(Instant::now()) {
+            self.broadcast(&inner);
+        }
     }
 
     /// Tries every stored key against the advertisement's encrypted portion.
@@ -698,37 +717,34 @@ impl Coordinator {
         );
 
         let live = Live::of(&state);
-        let snapshot = {
-            let mut inner = self.inner.write().await;
-            let now = Instant::now();
-            // Recorded even while AAP supersedes it, so that the reading is
-            // current the moment the link drops - and a linked device's
-            // snapshot takes its live fields from it meanwhile.
-            let previous = inner.ble.insert(
-                real_mac,
-                Entry {
-                    state,
-                    last_seen: now,
-                },
-            );
-            let pruned = inner.prune(now);
-            let identified = inner
-                .links
-                .get_mut(&real_mac)
-                .is_some_and(|link| link.identity.replace(identity) != Some(identity));
-            let live_changed = previous.is_none_or(|e| Live::of(&e.state) != live);
-            // AAP data for this device is exact and current; its own
-            // advertisements are coarser and lag behind. Nothing a snapshot
-            // shows has changed - unless they told the link something new
-            // about the device, typically its model on the first advertisement
-            // after connecting; or changed what the snapshot takes from them,
-            // such as a pod taken out of an ear; or the prune dropped something.
-            if inner.supersedes_ble(real_mac) && !identified && !live_changed && !pruned {
-                return;
-            }
-            inner.snapshot()
-        };
-        self.broadcast(snapshot);
+        let mut inner = self.inner.write().await;
+        let now = Instant::now();
+        // Recorded even while AAP supersedes it, so that the reading is
+        // current the moment the link drops - and a linked device's
+        // snapshot takes its live fields from it meanwhile.
+        let previous = inner.ble.insert(
+            real_mac,
+            Entry {
+                state,
+                last_seen: now,
+            },
+        );
+        let pruned = inner.prune(now);
+        let identified = inner
+            .links
+            .get_mut(&real_mac)
+            .is_some_and(|link| link.identity.replace(identity) != Some(identity));
+        let live_changed = previous.is_none_or(|e| Live::of(&e.state) != live);
+        // AAP data for this device is exact and current; its own
+        // advertisements are coarser and lag behind. Nothing a snapshot
+        // shows has changed - unless they told the link something new
+        // about the device, typically its model on the first advertisement
+        // after connecting; or changed what the snapshot takes from them,
+        // such as a pod taken out of an ear; or the prune dropped something.
+        if inner.supersedes_ble(real_mac) && !identified && !live_changed && !pruned {
+            return;
+        }
+        self.broadcast(&inner);
     }
 
     /// Opens an AAP connection to one device, performs the handshake sequence and
@@ -769,7 +785,7 @@ impl Coordinator {
         }
 
         let client = Arc::new(client);
-        let snapshot = {
+        {
             let mut inner = self.inner.write().await;
             // Connecting takes a while, and another attempt may have got there
             // first. Its link stands; this one goes.
@@ -791,9 +807,8 @@ impl Coordinator {
                     since: Instant::now(),
                 },
             );
-            inner.snapshot()
-        };
-        self.broadcast(snapshot);
+            self.broadcast(&inner);
+        }
 
         tokio::spawn(self.clone().aap_read_loop(mac_addr, client));
 
@@ -836,7 +851,7 @@ impl Coordinator {
     /// `only`, the link goes only while it is still that client's: a read loop
     /// reporting its socket dead must not take down a newer link to the device.
     async fn drop_link(&self, mac_addr: Address, only: Option<&Arc<aap::Client>>) -> bool {
-        let snapshot = {
+        {
             let mut inner = self.inner.write().await;
             match inner.links.get(&mac_addr) {
                 Some(link) if only.is_none_or(|c| Arc::ptr_eq(&link.client, c)) => {}
@@ -849,13 +864,11 @@ impl Coordinator {
                 // Wakes the read loop parked in recv so it can exit and drop its Arc.
                 link.client.shutdown();
             }
-            inner.snapshot()
-        };
+            // Without this the UI, tray and battery provider never hear that the
+            // connection ended and keep showing the last AAP reading.
+            self.broadcast(&inner);
+        }
         tracing::info!("AAP disconnected from {mac_addr} - showing its last BLE advertisement");
-
-        // Without this the UI, tray and battery provider never hear that the
-        // connection ended and keep showing the last AAP reading.
-        self.broadcast(snapshot);
         true
     }
 
@@ -955,17 +968,14 @@ impl Coordinator {
             state.case_battery
         );
 
-        let snapshot = {
-            let mut inner = self.inner.write().await;
-            // A packet read just before a disconnect must not bring back AAP
-            // state for a link that is gone, nor land on a newer one.
-            let Some(link) = inner.live_link(mac_addr, client) else {
-                return;
-            };
-            link.reading = Some(state);
-            inner.snapshot()
+        let mut inner = self.inner.write().await;
+        // A packet read just before a disconnect must not bring back AAP
+        // state for a link that is gone, nor land on a newer one.
+        let Some(link) = inner.live_link(mac_addr, client) else {
+            return;
         };
-        self.broadcast(snapshot);
+        link.reading = Some(state);
+        self.broadcast(&inner);
     }
 
     /// Records a mode the device reported on `client`'s link, and broadcasts if
@@ -979,15 +989,14 @@ impl Coordinator {
         mac_addr: Address,
         client: &Arc<aap::Client>,
     ) {
-        let snapshot = {
+        {
             let mut inner = self.inner.write().await;
             if !inner.record_noise_mode(mac_addr, client, mode) {
                 return;
             }
-            inner.snapshot()
-        };
+            self.broadcast(&inner);
+        }
         tracing::info!("Noise control mode reported by {mac_addr}: {mode}");
-        self.broadcast(snapshot);
     }
 
     /// Switches one connected device's noise control mode.
@@ -1016,17 +1025,13 @@ impl Coordinator {
         client.set_noise_mode(mode).await?;
         tracing::info!("Noise control of {mac_addr} set to {mode}");
 
-        let snapshot = {
-            let mut inner = self.inner.write().await;
-            // On the link the command went out on, and only while it lasts. One
-            // that dropped and came back meanwhile is a new session, and the
-            // device reports its mode there itself.
-            if !inner.record_noise_mode(mac_addr, &client, mode) {
-                return Ok(());
-            }
-            inner.snapshot()
-        };
-        self.broadcast(snapshot);
+        let mut inner = self.inner.write().await;
+        // On the link the command went out on, and only while it lasts. One
+        // that dropped and came back meanwhile is a new session, and the
+        // device reports its mode there itself.
+        if inner.record_noise_mode(mac_addr, &client, mode) {
+            self.broadcast(&inner);
+        }
         Ok(())
     }
 
@@ -1039,14 +1044,13 @@ impl Coordinator {
     /// the disk busy. "Already saved" goes by the last save that succeeded, so a
     /// key whose save failed is written again when it next arrives.
     async fn store_encryption_key(&self, mac_addr: Address, key: &[u8]) {
-        let snapshot = {
+        {
             let mut inner = self.inner.write().await;
             let previous = inner.encryption_keys.insert(mac_addr, key.to_vec());
-            (previous.as_deref() != Some(key)).then(|| inner.snapshot())
-        };
-        // Decrypting from here on, whether or not the key reaches the disk.
-        if let Some(snapshot) = snapshot {
-            self.broadcast(snapshot);
+            // Decrypting from here on, whether or not the key reaches the disk.
+            if previous.as_deref() != Some(key) {
+                self.broadcast(&inner);
+            }
         }
 
         let mut persistence = self.keystore.lock().await;
@@ -1141,6 +1145,7 @@ mod tests {
             updates,
             #[cfg(feature = "harness")]
             aap_socket_dir: None,
+            before_send: std::sync::Mutex::default(),
         });
         (coordinator, dir)
     }
@@ -1298,15 +1303,57 @@ mod tests {
             Address::new([0, 0, 0, 0, hi, lo])
         };
 
+        let mut inner = inner_with(vec![]);
         for i in 0..1000 {
-            coordinator.broadcast(Snapshot {
-                known_keys: vec![nth(i)],
-                ..Default::default()
-            });
+            inner.encryption_keys = HashMap::from([(nth(i), KEY.to_vec())]);
+            coordinator.broadcast(&inner);
         }
 
         assert_eq!(rx.borrow_and_update().known_keys, [nth(999)]);
         assert!(!rx.has_changed().unwrap());
+    }
+
+    /// Regression (#88): a snapshot went out after the lock it was built under
+    /// had been released, so an update in between could send a newer one
+    /// first, and the older one landed last - on show until the next
+    /// broadcast. Here the first of two battery packets stops right before its
+    /// send, and the second gets as far as it can meanwhile.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snapshots_go_out_in_the_order_the_state_changed() {
+        let (coordinator, client, _dir) = linked();
+        let (paused, on_its_way) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = std::sync::mpsc::channel::<()>();
+        *coordinator.before_send.lock().unwrap() = Some(Box::new(move || {
+            let _ = paused.send(());
+            // Blocking its worker thread, as the send it holds up never awaits.
+            let _ = resumed.recv();
+        }));
+
+        let first = tokio::spawn({
+            let (coordinator, client) = (coordinator.clone(), client.clone());
+            async move {
+                coordinator
+                    .handle_battery_info(battery_packet(83), MAC, &client)
+                    .await;
+            }
+        });
+        on_its_way.await.unwrap();
+
+        let second = coordinator.handle_battery_info(battery_packet(82), MAC, &client);
+        tokio::pin!(second);
+        // All the way, unless the first still holds the lock.
+        let done = futures_util::poll!(&mut second).is_ready();
+        resume.send(()).unwrap();
+        if !done {
+            second.await;
+        }
+        first.await.unwrap();
+
+        assert_eq!(
+            coordinator.subscribe().borrow().states[&MAC].left_battery,
+            Some(82),
+            "the first packet's snapshot landed last"
+        );
     }
 
     /// Regression: the window came up blank with no device connected and none in

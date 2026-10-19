@@ -693,9 +693,10 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
 ///
 /// The pair is on AAP, settled: nothing in a snapshot changes from here on,
 /// so neither its link nor its own advertisements broadcast, and a broadcast
-/// can only come from the flood. Nothing has to be watched for a while: the
-/// check comes after the coordinator has handled every advertiser, and it
-/// broadcasts within the handling or not at all.
+/// can only come from the flood - none from before is still on its way, as
+/// the coordinator sends each before the next change. Nothing has to be
+/// watched for a while: the check comes after the coordinator has handled
+/// every advertiser, and it broadcasts within the handling or not at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
@@ -716,16 +717,9 @@ async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast
             })
     })
     .await;
-    // Advertisements are handled one at a time, so the second of these began
-    // after the first was done: whatever was on its way when the pair
-    // settled has arrived.
-    app.skip_handled();
-    app.handled("two more of the pair's advertisements", 2, |a| {
-        sent_by(a, PAIR, &key)
-    })
-    .await;
     app.updates.mark_unchanged();
 
+    app.skip_handled();
     fixture.world.flood(FLOOD as u32).await.unwrap();
     app.handled("the flood", FLOOD, |a| !sent_by(a, PAIR, &key))
         .await;
