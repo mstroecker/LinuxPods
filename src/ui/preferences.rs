@@ -44,6 +44,7 @@ pub(super) fn create_preferences_dialog(
     let devices = DeviceRows {
         group: dev_group,
         rows: RefCell::default(),
+        shown: RefCell::default(),
         coordinator,
         runtime,
     };
@@ -77,22 +78,22 @@ pub(super) fn unavailable_row(id: &str, title: &str) -> adw::ActionRow {
 pub(super) struct DeviceRows {
     group: adw::PreferencesGroup,
     rows: RefCell<HashMap<Address, DeviceRow>>,
+    /// The devices whose rows the group holds, top to bottom.
+    shown: RefCell<Vec<Address>>,
     coordinator: Arc<Coordinator>,
     runtime: tokio::runtime::Handle,
 }
 
 impl DeviceRows {
-    /// Adds a row for every device the snapshot lists, redraws them all, and
-    /// drops the rows of devices that are gone.
+    /// Puts a row in the group for every device the snapshot lists, in its
+    /// order, redraws them all, and drops the rows of devices that are gone.
     pub(super) fn update(&self, snapshot: &Snapshot) {
         let listed = row_order(snapshot);
         let mut rows = self.rows.borrow_mut();
         for &(mac, known) in &listed {
-            let row = rows.entry(mac).or_insert_with(|| {
-                let row = DeviceRow::new(mac, &self.coordinator, &self.runtime);
-                self.group.add(&row.row);
-                row
-            });
+            let row = rows
+                .entry(mac)
+                .or_insert_with(|| DeviceRow::new(mac, &self.coordinator, &self.runtime));
             row.show(
                 mac,
                 snapshot.states.get(&mac),
@@ -101,14 +102,51 @@ impl DeviceRows {
             );
         }
 
+        // The group can only append, so a device listed above others takes
+        // their rows off and puts them back after its own. They are the same
+        // widgets, so a Request Keys button keeps its state. Every device in
+        // either list has a row: the listed ones got theirs above, and a shown
+        // one's is dropped only below.
+        let wanted: Vec<Address> = listed.iter().map(|&(mac, _)| mac).collect();
+        let mut shown = self.shown.borrow_mut();
+        let moves = moves(&shown, &wanted);
+        for mac in &moves.remove {
+            self.group.remove(&rows[mac].row);
+        }
+        for mac in &moves.append {
+            self.group.add(&rows[mac].row);
+        }
+        *shown = wanted;
+
         // Drop a row once the device is no longer listed: no key, and no link.
-        rows.retain(|mac, row| {
-            let keep = listed.iter().any(|(m, _)| m == mac);
-            if !keep {
-                self.group.remove(&row.row);
-            }
-            keep
-        });
+        rows.retain(|mac, _| shown.contains(mac));
+    }
+}
+
+/// The rows to take off the group, and the rows to add back at its end.
+#[derive(Debug, Default, PartialEq)]
+struct Moves {
+    /// The rows to take off: those of devices gone, and those that move.
+    remove: Vec<Address>,
+    /// The rows to add at the end, in order: those that move, and new ones.
+    append: Vec<Address>,
+}
+
+/// What brings the group from showing `shown` to showing `wanted`, top to
+/// bottom. Every row below the first one out of place comes off and goes back
+/// on at the end; the rows above it stay, and an unchanged list moves nothing.
+fn moves(shown: &[Address], wanted: &[Address]) -> Moves {
+    // Taking a row off leaves the others in order, so the rows of devices gone
+    // do not count.
+    let staying = shown.iter().filter(|mac| wanted.contains(mac));
+    let in_place = staying.zip(wanted).take_while(|(s, w)| s == w).count();
+    Moves {
+        remove: shown
+            .iter()
+            .filter(|mac| !wanted[..in_place].contains(mac))
+            .copied()
+            .collect(),
+        append: wanted[in_place..].to_vec(),
     }
 }
 
@@ -295,6 +333,70 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(row_order(&snapshot), [(B, true), (C, false), (D, true)]);
+    }
+
+    /// Updates arrive on every advertisement, and almost all of them list the
+    /// same devices.
+    #[test]
+    fn an_unchanged_list_moves_no_row() {
+        assert_eq!(moves(&[A, B, C], &[A, B, C]), Moves::default());
+        assert_eq!(moves(&[], &[]), Moves::default());
+    }
+
+    /// A device listed later lands in MAC order: the rows below its place move
+    /// down, and the rows above it stay put.
+    #[test]
+    fn a_new_device_moves_the_rows_below_it() {
+        assert_eq!(
+            moves(&[A, C, D], &[A, B, C, D]),
+            Moves {
+                remove: vec![C, D],
+                append: vec![B, C, D],
+            }
+        );
+        assert_eq!(
+            moves(&[A, B], &[A, B, C]),
+            Moves {
+                remove: vec![],
+                append: vec![C],
+            }
+        );
+    }
+
+    #[test]
+    fn a_device_gone_takes_off_only_its_own_row() {
+        assert_eq!(
+            moves(&[A, B, C], &[A, C]),
+            Moves {
+                remove: vec![B],
+                append: vec![],
+            }
+        );
+    }
+
+    /// From any list of devices to any other, taking the rows off and appending
+    /// them leaves the group in the wanted order.
+    #[test]
+    fn moves_end_in_the_wanted_order() {
+        let lists: Vec<Vec<Address>> = (0..16)
+            .map(|bits| {
+                [A, B, C, D]
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| bits & (1 << i) != 0)
+                    .map(|(_, mac)| mac)
+                    .collect()
+            })
+            .collect();
+        for shown in &lists {
+            for wanted in &lists {
+                let moves = moves(shown, wanted);
+                let mut group = shown.clone();
+                group.retain(|mac| !moves.remove.contains(mac));
+                group.extend(&moves.append);
+                assert_eq!(&group, wanted, "from {shown:?}");
+            }
+        }
     }
 
     #[test]
