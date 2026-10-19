@@ -24,10 +24,8 @@
 //!
 //! Time runs at real speed: each pair advertises once a second, from an
 //! address that rotates every ten. Tests wait for what they expect to see,
-//! under [`TIMEOUT`], and never on how many advertisements reach the app: the
-//! scanner misses the first one from every address (#86), and the tests must
-//! pass the same once it does not. The 30-minute BLE cache expiry stays with
-//! the coordinator's unit tests.
+//! under [`TIMEOUT`]. The 30-minute BLE cache expiry stays with the
+//! coordinator's unit tests.
 //!
 //! Every key is generated at runtime, by the fake pairs; none is in the source.
 
@@ -57,9 +55,8 @@ use linuxpods::podstate::{Coordinator, DataSource, Snapshot};
 
 /// The longest any one wait may take, so that a regression fails the test
 /// instead of hanging CI. The slowest wait is for a pair's first BLE reading:
-/// up to three advertising intervals, as the first advertisement from an
-/// address is missed (#86) and the address may rotate in between. The rest is
-/// headroom for a loaded runner.
+/// up to an advertising interval, or two should one go out while the scanner
+/// is still subscribing. The rest is headroom for a loaded runner.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How often a wait on what nothing signals - the key file, the fake pair's
@@ -696,7 +693,8 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
 /// can only come from the flood - none from before is still on its way, as
 /// the coordinator sends each before the next change. Nothing has to be
 /// watched for a while: the check comes after the coordinator has handled
-/// every advertiser, and it broadcasts within the handling or not at all.
+/// every advertiser, each known by its address, and it broadcasts within the
+/// handling or not at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
@@ -721,8 +719,12 @@ async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast
 
     app.skip_handled();
     fixture.world.flood(FLOOD as u32).await.unwrap();
-    app.handled("the flood", FLOOD, |a| !sent_by(a, PAIR, &key))
-        .await;
+    // By address: the scanner hears each advertiser twice.
+    let mut advertisers = std::collections::HashSet::new();
+    app.handled("every advertiser in the flood", FLOOD, |a| {
+        !sent_by(a, PAIR, &key) && advertisers.insert(a.ble_mac)
+    })
+    .await;
 
     assert!(
         !app.updates.has_changed().unwrap(),
@@ -737,6 +739,38 @@ async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast
         fixture.keystore().load().unwrap(),
         HashMap::from([(PAIR, key)])
     );
+}
+
+/// An address that advertises once reaches the coordinator. bluetoothd
+/// announces a new address with InterfacesAdded, its first advertisement
+/// among the properties, and only the ones after as PropertiesChanged.
+/// Regression (#86): the scanner read only the second, and lost the first
+/// advertisement from every address - here, the only one.
+///
+/// The pair is none of the world's, so nothing advertises for it but the
+/// test, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_address_that_advertises_once_reaches_the_coordinator() {
+    let fixture = Fixture::new(&[]).await;
+    let mut pods = linuxpods::harness::pods::Pods::new(PRO_3, PAIR);
+    let [left, right, case] = PAIR_LEVELS;
+    pods.set_battery(Part::Left, Some(left));
+    pods.set_battery(Part::Right, Some(right));
+    pods.set_battery(Part::Case, Some(case));
+    fixture
+        .keystore()
+        .save(&HashMap::from([(PAIR, pods.keys().enc_key.to_vec())]))
+        .unwrap();
+    let mut app = fixture.start_app().await;
+
+    let advert = pods.advertisement(Duration::ZERO);
+    let bluez = fixture.world.bluez();
+    let heard = bluez.advertise(advert.address, &advert.data).await.unwrap();
+    assert!(heard, "advertised while the app discovers");
+    app.until("the reading it brings", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
 }
 
 /// A pair connected when the app starts is attached by the startup sweep, as

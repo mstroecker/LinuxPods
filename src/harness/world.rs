@@ -301,7 +301,8 @@ impl World {
     /// pair with keys nobody holds, so its advertisement parses but stays
     /// closed, advertising from an address of its own. Each advertises twice,
     /// so it is signalled both ways a device is - as it appears and as it
-    /// changes - whichever of them the app reads. Gone after the fake BlueZ's
+    /// changes: the scanner reads both, attachment's connection watch only
+    /// the change, and a flood has to reach both. Gone after the fake BlueZ's
     /// timeout.
     pub async fn flood(&self, count: u32) -> Result<()> {
         let now = self.now();
@@ -614,8 +615,8 @@ mod tests {
     use crate::harness::pods::PRO_2_USB_C;
 
     /// Plenty for any of these, and a hang fails the test instead of CI.
-    /// Advertisements take longest: up to two intervals before the app hears
-    /// one, as the first from an address only creates its device.
+    /// Advertisements take longest: up to an interval before the app hears
+    /// one.
     const TIMEOUT: Duration = Duration::from_secs(5);
 
     const MAC: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x01]);
@@ -825,20 +826,18 @@ mod tests {
 
         world.flood(3).await.unwrap();
         let mut addresses = HashSet::new();
-        let mut floods = 0;
+        // By address: the scanner hears each advertiser twice.
         timeout(TIMEOUT, async {
-            while floods < 3 {
+            while addresses.len() < 3 {
                 let advert = adverts.next().await.unwrap();
                 let encrypted = advert.data.encrypted_portion().unwrap();
                 if decrypt_for_device(encrypted, &key, MAC).is_err() {
-                    floods += 1;
                     addresses.insert(advert.ble_mac);
                 }
             }
         })
         .await
-        .expect("heard the flood");
-        assert_eq!(addresses.len(), 3);
+        .expect("heard the flood, from three addresses");
     }
 
     /// `FakeWorld1` reaches the world, and turns away what it cannot take.
