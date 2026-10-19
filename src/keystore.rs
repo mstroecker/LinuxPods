@@ -26,7 +26,9 @@ use bluer::Address;
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "linuxpods";
-const KEYS_FILE: &str = "keys.json";
+/// The key file's name, inside [`default_dir`] or the directory given to
+/// [`Keystore::with_dir`].
+pub const KEYS_FILE: &str = "keys.json";
 const FORMAT_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
@@ -45,7 +47,7 @@ pub struct Keystore {
 impl Keystore {
     /// Creates the data directory (0700) if absent.
     pub fn new() -> Result<Self> {
-        let data_dir = data_dir()?;
+        let data_dir = default_dir()?;
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data directory {}", data_dir.display()))?;
         restrict_permissions(&data_dir, 0o700)?;
@@ -189,8 +191,9 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// $XDG_DATA_HOME/linuxpods, falling back to ~/.local/share/linuxpods.
-fn data_dir() -> Result<PathBuf> {
+/// Where [`Keystore::new`] keeps the keys: $XDG_DATA_HOME/linuxpods, falling
+/// back to ~/.local/share/linuxpods.
+pub fn default_dir() -> Result<PathBuf> {
     let base = dirs::data_dir().context("failed to determine XDG data directory")?;
     Ok(base.join(APP_NAME))
 }
