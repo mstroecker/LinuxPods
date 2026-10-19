@@ -845,8 +845,8 @@ async fn a_device_that_isnt_airpods_is_never_attached() {
 
     fixture.world.disconnect(HEADPHONES).await.unwrap();
     fixture.world.connect(HEADPHONES).await.unwrap();
-    // Connection events are handled one at a time, in order: once the pair is
-    // attached, the headphones' connection has been handled.
+    // Connected changes are handled one at a time, in the order they came:
+    // once the pair is attached, the headphones' connection has been handled.
     app.attach(PAIR).await;
     assert_eq!(
         app.updates.borrow().connected_macs,
@@ -873,8 +873,9 @@ async fn a_pair_is_attached_once_its_services_mark_it_as_airpods() {
     let mut app = fixture.start_app().await;
 
     fixture.world.connect(PAIR).await.unwrap();
-    // Connection events are handled one at a time, in order: once the other
-    // pair is attached, the first one's connection has been handled.
+    // Connected changes are handled one at a time, in the order they came:
+    // once the other pair is attached, the first one's connection has been
+    // handled.
     app.attach(OTHER).await;
     assert!(
         !app.updates.borrow().is_connected(PAIR),
@@ -979,4 +980,32 @@ async fn a_flood_while_a_pair_attaches_does_not_stall_attachment() {
         s.is_connected(PAIR) && s.is_connected(OTHER)
     })
     .await;
+}
+
+/// A device signalling its services over and over never holds up a pair's
+/// attachment. An advertiser can list the AirPods service and a new one in
+/// every advertisement, and bluetoothd signals the device's whole list each
+/// time, AirPods service and all. Regression: each signal was queued for
+/// attachment, which asks BlueZ about the device three times for each. Ten
+/// thousand, signalled in a couple of seconds, took it nearly a minute, and a
+/// pair connecting after them waited behind them all.
+///
+/// The fake BlueZ lists services only on paired devices, so the advertiser is
+/// one paired with it that never connects. To attachment that is the same:
+/// whether the device is connected is all it asks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_resignalling_its_services_does_not_delay_attachment() {
+    const ADVERTISER: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x04]);
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let bluez = fixture.world.bluez();
+    bluez.add_device(ADVERTISER, "Advertiser").await.unwrap();
+    let mut app = fixture.start_app().await;
+
+    // Taken out and listed again: only a list with the AirPods service passes
+    // the watch's filter.
+    for _ in 0..10_000 {
+        bluez.set_airpods_service(ADVERTISER, false).await.unwrap();
+        bluez.set_airpods_service(ADVERTISER, true).await.unwrap();
+    }
+    app.attach(PAIR).await;
 }

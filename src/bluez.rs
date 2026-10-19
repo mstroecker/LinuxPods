@@ -8,11 +8,13 @@
 //! XML, no manual InterfacesAdded / InterfacesRemoved / PropertiesChanged:
 //! registering the interface at a child path emits InterfacesAdded on its own.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Poll, ready};
 
 use anyhow::{Context, Result};
 use bluer::Address;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 use zbus::{Connection, MatchRule, MessageStream, interface, proxy};
@@ -347,7 +349,7 @@ impl Devices {
 }
 
 /// A device connecting or disconnecting, or its services marking it as AirPods.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionEvent {
     pub device_path: String,
     /// `None` when the services changed, not the connection: a first pairing
@@ -358,7 +360,9 @@ pub struct ConnectionEvent {
 
 impl Devices {
     /// Stream of Connected changes on org.bluez.Device1, and of UUIDs changes
-    /// that mark a device as AirPods.
+    /// that mark a device as AirPods. `Connected` changes come in the order
+    /// they came; services changes after them, one per device - see
+    /// [`Pending`].
     ///
     /// Port of the Go WatchForAirPods signal loop. Without this the app only ever
     /// saw devices that were already connected at startup, so plugging the
@@ -370,10 +374,10 @@ impl Devices {
     /// queued in zbus for the caller, 64 of them - a second's worth in a crowd -
     /// stopped zbus reading the connection until there was room, so a reply the
     /// caller was waiting for never arrived, and attachment hung for good. The
-    /// task ends with the connection, or when the stream is dropped.
-    pub async fn watch_connections(
-        &self,
-    ) -> Result<impl futures_util::Stream<Item = ConnectionEvent> + use<>> {
+    /// task ends with the connection, or when the stream is dropped. The
+    /// services changes it keeps for the caller do not pile up either - see
+    /// [`Pending`].
+    pub async fn watch_connections(&self) -> Result<impl Stream<Item = ConnectionEvent> + use<>> {
         let rule = MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .interface("org.freedesktop.DBus.Properties")?
@@ -412,28 +416,111 @@ impl Devices {
             })
         });
 
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            tokio::pin!(events);
-            loop {
-                tokio::select! {
-                    () = sender.closed() => return,
-                    event = events.next() => match event {
-                        // Only connections and the AirPods service get this far,
-                        // a handful next to an advertisement every few
-                        // milliseconds, so the channel needs no bound.
-                        Some(event) => {
-                            let _ = sender.send(event);
-                        }
-                        None => return,
-                    },
+        Ok(drain(events))
+    }
+}
+
+/// Reads `events` as they come, in a task of its own, into [`Pending`], from
+/// where the returned stream takes them at its reader's pace. The task ends
+/// with `events`, or once the stream is dropped; the stream ends once the task
+/// has and nothing is pending.
+fn drain<S>(events: S) -> impl Stream<Item = ConnectionEvent>
+where
+    S: Stream<Item = ConnectionEvent> + Send + 'static,
+{
+    let pending = Arc::new(Mutex::new(Pending::default()));
+    // Rung after every push. It holds one ring at most, so the task never
+    // waits on the reader: a ring waiting already means the reader will look.
+    let (bell, mut rung) = mpsc::channel(1);
+    let queue = pending.clone();
+    tokio::spawn(async move {
+        tokio::pin!(events);
+        loop {
+            tokio::select! {
+                () = bell.closed() => return,
+                event = events.next() => match event {
+                    Some(event) => {
+                        lock(&queue).push(event);
+                        let _ = bell.try_send(());
+                    }
+                    None => return,
+                },
+            }
+        }
+    });
+    futures_util::stream::poll_fn(move |cx| {
+        loop {
+            if let Some(event) = lock(&pending).pop() {
+                return Poll::Ready(Some(event));
+            }
+            // Every push rings after it, so with the task gone and no ring
+            // left, nothing more is coming.
+            if ready!(rung.poll_recv(cx)).is_none() {
+                return Poll::Ready(None);
+            }
+        }
+    })
+}
+
+/// The connection events waiting for the watch's reader: every `Connected`
+/// change, in order, and one services change per device at most.
+///
+/// A services change passes the watch's filter for any device that lists the
+/// AirPods service, paired or not. An advertiser can list it and a new service
+/// in every advertisement, and bluetoothd signals the device's whole list each
+/// time. Queued one per signal, they came faster than attachment could ask
+/// BlueZ about them, and a connection waited behind them all.
+///
+/// A services change carries nothing attachment keeps: it reads `Connected`
+/// and `UUIDs` back from BlueZ. So one pending per device loses nothing.
+/// Dropping changes once there were many instead could drop the one that
+/// attaches a pair after its first pairing.
+///
+/// `Connected` changes come out first, then services changes, each in the
+/// order it came. For one device the order makes no difference, as a services
+/// change is answered from BlueZ as it is when the change is taken. Across
+/// devices it does: a `Connected` change behind services changes, one per
+/// device in a crowd, would wait for all of them.
+#[derive(Debug, Default)]
+struct Pending {
+    /// `Connected` changes, oldest first.
+    connections: VecDeque<ConnectionEvent>,
+    /// Devices whose services changed, by path, in the order each first did
+    /// since it was last taken.
+    services: VecDeque<String>,
+    /// The paths in `services`.
+    queued: HashSet<String>,
+}
+
+impl Pending {
+    fn push(&mut self, event: ConnectionEvent) {
+        match event.connected {
+            Some(_) => self.connections.push_back(event),
+            None => {
+                if self.queued.insert(event.device_path.clone()) {
+                    self.services.push_back(event.device_path);
                 }
             }
-        });
-        Ok(futures_util::stream::poll_fn(move |cx| {
-            receiver.poll_recv(cx)
-        }))
+        }
     }
+
+    fn pop(&mut self) -> Option<ConnectionEvent> {
+        if let Some(event) = self.connections.pop_front() {
+            return Some(event);
+        }
+        let device_path = self.services.pop_front()?;
+        self.queued.remove(&device_path);
+        Some(ConnectionEvent {
+            device_path,
+            connected: None,
+        })
+    }
+}
+
+/// Neither `push` nor `pop` can panic halfway, so a poisoned lock holds a
+/// whole queue.
+fn lock(pending: &Mutex<Pending>) -> MutexGuard<'_, Pending> {
+    pending.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Whether a Device1 property map lists the AirPods service, [`AIRPODS_UUID`].
@@ -629,5 +716,113 @@ mod tests {
             ("Alias", Value::from("Kitchen buds")),
             uuids(&[AUDIO_SINK, AIRPODS_UUID]),
         ])));
+    }
+
+    const PATH_A: &str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
+    const PATH_B: &str = "/org/bluez/hci0/dev_11_22_33_44_55_66";
+
+    fn connection(path: &str, connected: bool) -> ConnectionEvent {
+        ConnectionEvent {
+            device_path: path.to_string(),
+            connected: Some(connected),
+        }
+    }
+
+    fn services(path: &str) -> ConnectionEvent {
+        ConnectionEvent {
+            device_path: path.to_string(),
+            connected: None,
+        }
+    }
+
+    fn pending(events: impl IntoIterator<Item = ConnectionEvent>) -> Pending {
+        let mut pending = Pending::default();
+        for event in events {
+            pending.push(event);
+        }
+        pending
+    }
+
+    fn take_all(pending: &mut Pending) -> Vec<ConnectionEvent> {
+        std::iter::from_fn(|| pending.pop()).collect()
+    }
+
+    /// A device signalling its services over and over is one change while it
+    /// waits, and one more once that is taken: the one taken may have been
+    /// answered before the device changed again.
+    #[test]
+    fn a_device_resignalling_its_services_is_one_change() {
+        let mut pending = pending(std::iter::repeat_n(services(PATH_A), 1000));
+        assert_eq!(take_all(&mut pending), [services(PATH_A)]);
+
+        pending.push(services(PATH_A));
+        assert_eq!(take_all(&mut pending), [services(PATH_A)]);
+    }
+
+    /// Each device has its services change kept, in the order they first came.
+    #[test]
+    fn devices_have_their_services_changes_kept_apart() {
+        let mut pending = pending([services(PATH_B), services(PATH_A), services(PATH_B)]);
+        assert_eq!(take_all(&mut pending), [services(PATH_B), services(PATH_A)]);
+    }
+
+    /// No connection among services changes is lost or reordered, and all
+    /// come out ahead of them.
+    #[test]
+    fn connections_among_services_changes_keep_their_order() {
+        let mut pending = pending([
+            services(PATH_A),
+            connection(PATH_A, true),
+            services(PATH_B),
+            services(PATH_A),
+            connection(PATH_B, true),
+            services(PATH_B),
+            connection(PATH_A, false),
+            services(PATH_A),
+        ]);
+        assert_eq!(
+            take_all(&mut pending),
+            [
+                connection(PATH_A, true),
+                connection(PATH_B, true),
+                connection(PATH_A, false),
+                services(PATH_A),
+                services(PATH_B),
+            ]
+        );
+    }
+
+    /// A reader far behind the task gets what is pending, and then the end.
+    /// The task takes everything in one go here: the events are all there and
+    /// nothing in its loop yields, so on this single-threaded runtime the
+    /// reader runs again only once the task has ended.
+    #[tokio::test]
+    async fn the_stream_gives_out_what_is_pending_and_then_ends() {
+        let mut events = vec![connection(PATH_A, true)];
+        events.extend(std::iter::repeat_n(services(PATH_B), 1000));
+        events.push(connection(PATH_A, false));
+
+        let taken: Vec<_> = drain(futures_util::stream::iter(events)).collect().await;
+        assert_eq!(
+            taken,
+            [
+                connection(PATH_A, true),
+                connection(PATH_A, false),
+                services(PATH_B),
+            ]
+        );
+    }
+
+    /// Dropping the stream ends the task, which drops the subscription.
+    #[tokio::test]
+    async fn dropping_the_stream_ends_the_task() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let events = drain(futures_util::stream::poll_fn(move |cx| {
+            receiver.poll_recv(cx)
+        }));
+        drop(events);
+        tokio::time::timeout(std::time::Duration::from_secs(5), sender.closed())
+            .await
+            .expect("the task ended");
     }
 }
