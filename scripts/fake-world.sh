@@ -163,11 +163,13 @@ start() {
         } >> "$run/env"
     fi
 
+    # Automation1 is asked for here and nowhere else: on this private session
+    # bus, nothing of the user's can press the window.
     # shellcheck disable=SC2086 # $display and $common are lists of arguments
     spawn linuxpods "$run/log/linuxpods.log" env $display $common \
         XDG_DATA_HOME="$run/home/data" XDG_CONFIG_HOME="$run/home/config" \
         GSETTINGS_BACKEND=memory GTK_A11Y=none NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 \
-        LINUXPODS_AAP_SOCKET_DIR="$run/aap" \
+        LINUXPODS_AAP_SOCKET_DIR="$run/aap" LINUXPODS_HARNESS_AUTOMATION=1 \
         RUST_LOG="${RUST_LOG:-linuxpods=debug}" \
         "$bin/linuxpods"
     app=$(tail -n 1 "$pids" | cut -d' ' -f1)
