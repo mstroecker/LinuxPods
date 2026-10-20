@@ -120,6 +120,12 @@ Record the mode optimistically and let a later report confirm it. Validate repor
 byte 4 **and** byte 6: the `0x09` family carries a dozen other sub-commands, all of them
 in the startup dump.
 
+**Nothing goes out before the handshake is answered.** The AirPods drop what they are
+sent until they have answered it (`01 00 04 00 …`), and a pair that had only just
+connected took 1.2 s: requests sent after a fixed 500 ms were never answered, so a pair
+connecting while the app ran showed "Connected • waiting for data" with no battery.
+`Client::handshake` returns once the answer is in.
+
 **A zero `cid` immediately after `SeqPacket::connect` means the socket is unusable** -
 connect returns `Ok` without waiting for the BR/EDR ACL link, every send then fails
 `ENOTCONN`, and the socket stays dead even once `cid` becomes nonzero. Discard and retry.

@@ -55,9 +55,13 @@ Send a 16-byte handshake packet to initialize the connection:
 Hex: 00 00 04 00 01 00 02 00 00 00 00 00 00 00 00 00
 ```
 
-**Expected response:**
-- May receive acknowledgment packets
-- Read and discard these packets
+**Expected response:** a packet starting `01 00 04 00` (18 bytes on Pro 3).
+
+⚠️ **Wait for it before sending anything else.** The AirPods drop what they are sent
+before they have answered. A pair that had only just connected answered 1.2 s after
+the handshake, and requests sent after a fixed 500 ms pause were never answered - no
+battery, no keys. `Client::handshake` returns once the answer is in, and fails if
+none comes within 5 s.
 
 ### Step 3: Send Key Request
 
@@ -214,7 +218,7 @@ See [BLE Proximity Pairing documentation](ble-proximity-pairing.md) for details 
 ### Multiple Packets
 
 The AirPods may send several packets after the key request:
-- Some packets are acknowledgments or status updates
+- Some packets are status updates, or the features acknowledgment (`04 00 04 00 2B 00`)
 - Only packets with `data[4] == 0x31` contain keys
 - **Loop and check each packet** until keys are found
 
@@ -311,7 +315,8 @@ Likely works with:
 ### "No key packet received"
 - Increase timeout (try 20-30 packets)
 - Check PSM is correct (0x1001)
-- Verify handshake packet is sent first
+- Verify nothing is sent before the handshake is answered (`01 00 04 00 …`): a key
+  request sent sooner is dropped, with no error
 
 ### "Decryption produces garbage"
 - Wrong key type (use ENC_KEY, not IRK)
@@ -334,5 +339,5 @@ Likely works with:
 
 ---
 
-- **Last Updated:** 2026-09-10
+- **Last Updated:** 2026-10-20
 - **Tested With:** AirPods Pro (2nd Gen) 0x2420, AirPods Pro 3 0x2720

@@ -733,11 +733,8 @@ mod tests {
         let (bus, world, dir) = world().await;
         let client = aap(&dir, MAC).await;
 
+        // Back once the pair has answered it.
         client.handshake().await.unwrap();
-        assert_eq!(
-            next_packet(&client).await.unwrap()[..4],
-            [0x01, 0x00, 0x04, 0x00]
-        );
         client.request_battery_status().await.unwrap();
         let info = parse_battery_packet(&next_packet(&client).await.unwrap()).unwrap();
         assert_eq!(info.left.unwrap().level, Some(80));
@@ -776,7 +773,6 @@ mod tests {
         world.connect(MAC).await.unwrap();
         let client = aap(&dir, MAC).await;
         client.handshake().await.unwrap();
-        next_packet(&client).await.unwrap();
 
         world.disconnect(MAC).await.unwrap();
         assert!(next_packet(&client).await.is_err());
@@ -789,7 +785,6 @@ mod tests {
         let (_bus, _world, dir) = world().await;
         let first = aap(&dir, MAC).await;
         first.handshake().await.unwrap();
-        next_packet(&first).await.unwrap();
 
         let second = aap(&dir, MAC).await;
         assert!(next_packet(&second).await.is_err());
@@ -811,7 +806,6 @@ mod tests {
             .unwrap();
         let client = aap(&dir, MAC).await;
         client.handshake().await.unwrap();
-        next_packet(&client).await.unwrap();
 
         client.set_noise_mode(NoiseMode::Adaptive).await.unwrap();
         assert_eq!(

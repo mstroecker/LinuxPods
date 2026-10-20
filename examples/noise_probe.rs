@@ -102,7 +102,6 @@ async fn main() -> anyhow::Result<()> {
     println!("connecting AAP to {mac}...");
     client.connect().await?;
     client.handshake().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
     client.request_battery_status().await?;
     // Without this, Adaptive is unavailable.
     client.enable_special_features().await?;
