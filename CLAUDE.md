@@ -102,10 +102,10 @@ decrypted, not from reading the suffix, and the union costs one bit (2^-23 per w
 4 `0x2D`) holds on neither AirPods Pro 3 (0x2720) nor Pro Gen 2 (0x2420) - both report
 byte 4 = `0x1D` - and rejects correct decryptions, silently disabling 1% accuracy.
 
-**AAP packets carry battery only.** Model, colour and orientation carry forward from BLE
-state for the same device. The noise control mode is *not* carried forward - it lives in
-its own map on the coordinator, because it arrives on its own schedule and the device
-entry may not exist yet when the startup dump reports it.
+**AAP packets carry battery only.** `Inner::snapshot` merges in the rest: model and colour
+from the identity the link holds; ears, lid, activity and primary pod from the cached
+advertisement. The noise control mode is kept on the link (`Link::noise_mode`), apart
+from the reading every battery packet replaces, and goes with the link.
 
 **Off needs sub-command 0x34 first.** Recent firmware refuses a bare `0x0D 01` with an
 error chime - confirmed on Pro 3 and Pro Gen 2, while the other three modes work
