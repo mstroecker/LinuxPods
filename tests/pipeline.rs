@@ -800,10 +800,7 @@ async fn an_address_that_advertises_once_reaches_the_coordinator() {
 
     let advert = pods.advertisement(Duration::ZERO);
     let bluez = fixture.world.bluez();
-    let heard = bluez
-        .advertise(HCI0, advert.address, &advert.data)
-        .await
-        .unwrap();
+    let heard = bluez.advertise(advert.address, &advert.data).await.unwrap();
     assert!(heard, "advertised while the app discovers");
     app.until("the reading it brings", |s| {
         levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
@@ -1031,12 +1028,14 @@ async fn a_pair_on_an_adapter_other_than_hci0_is_heard_attached_and_given_its_ba
         .await;
 }
 
-/// Two adapters with a pair on each: both pairs are heard, each through its
-/// own adapter, and each pair's battery goes to its own adapter's manager.
-/// Not the other's: neither manager is offered a battery for a device on the
-/// other adapter, which bluetoothd would ignore with a warning. Regression:
-/// only `hci0` was scanned and had a provider, so a pair on another adapter
-/// was not heard over BLE and got no battery.
+/// Two adapters with a pair on each. Both adapters hear both pairs, so each
+/// advertisement is signalled twice, from a device of its address under each:
+/// the two make one reading per pair, to the percent. Each pair attaches
+/// through its own paired device, and its battery goes to its own adapter's
+/// manager - never through the device the other adapter made of its address,
+/// and no manager is offered a battery for a device not its own, which
+/// bluetoothd would ignore with a warning. Regression: only `hci0` was
+/// scanned and had a provider, so a pair on another adapter got no battery.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pairs_on_two_adapters_are_heard_and_each_battery_goes_to_its_own_adapter() {
     let fixture = Fixture::with_adapters(
@@ -1054,27 +1053,50 @@ async fn pairs_on_two_adapters_are_heard_and_each_battery_goes_to_its_own_adapte
             && levels(s, OTHER, DataSource::Ble) == Some(OTHER_LEVELS)
     })
     .await;
+    let bluez = fixture.world.bluez();
+    let (first, second) = (bluez.advertisers_on(HCI0), bluez.advertisers_on(HCI1));
+    assert!(
+        !first.is_disjoint(&second),
+        "no address heard by both: {first:?}, {second:?}"
+    );
+    let mut shown: Vec<_> = app.updates.borrow().states.keys().copied().collect();
+    shown.sort_unstable();
+    assert_eq!(shown, [PAIR, OTHER], "one reading each");
 
     app.attach(PAIR).await;
     app.attach(OTHER).await;
-    app.until("both pairs' AAP readings", |s| {
-        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
-            && levels(s, OTHER, DataSource::Aap) == Some(OTHER_LEVELS)
-    })
-    .await;
+    let snapshot = app
+        .until("both pairs' AAP readings", |s| {
+            levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+                && levels(s, OTHER, DataSource::Aap) == Some(OTHER_LEVELS)
+        })
+        .await;
+    let mut linked = snapshot.connected_macs.clone();
+    linked.sort_unstable();
+    assert_eq!(
+        linked,
+        [PAIR, OTHER],
+        "a link to an address the pairs advertise from"
+    );
     fixture
         .until_batteries_on(HCI0, &HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
         .await;
     fixture
         .until_batteries_on(HCI1, &HashMap::from([(OTHER, lowest(OTHER_LEVELS))]))
         .await;
-    let ignored = fixture.world.bluez().ignored_batteries();
+    assert_eq!(
+        fixture.world.batteries().len(),
+        2,
+        "a battery on another device"
+    );
+    let ignored = bluez.ignored_batteries();
     assert!(ignored.is_empty(), "offered the wrong manager: {ignored:?}");
 }
 
 /// An adapter that is off is not scanned, as bluetoothd would refuse, and
-/// the one that is on scans all the same: its pair is heard. Regression:
-/// `hci0` was the one adapter scanned, and discovery failed there for good.
+/// the one that is on scans all the same. It hears both pairs, the one paired
+/// with the adapter that is off as well. Regression: `hci0` was the one
+/// adapter scanned, and discovery failed there for good.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_adapter_powered_off_is_not_scanned_and_the_other_is() {
     let fixture = Fixture::with_adapters(
@@ -1094,11 +1116,15 @@ async fn an_adapter_powered_off_is_not_scanned_and_the_other_is() {
     );
     assert!(bluez.is_discovering(HCI1));
 
-    app.until("the pair on the adapter that is on", |s| {
+    app.until("both pairs, through the adapter that is on", |s| {
         levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+            && levels(s, OTHER, DataSource::Ble) == Some(OTHER_LEVELS)
     })
     .await;
-    assert!(!app.updates.borrow().states.contains_key(&OTHER));
+    assert!(
+        bluez.advertisers_on(HCI0).is_empty(),
+        "heard by the adapter that is off"
+    );
 }
 
 /// Advertisements piling up while attachment is busy - a flood, or a crowd,
