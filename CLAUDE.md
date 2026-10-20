@@ -20,7 +20,8 @@ src/
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
 ├── aap/           # Apple Accessory Protocol over L2CAP (PSM 4097)
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
-├── bluez.rs       # org.bluez.BatteryProvider1 + device connection watch
+├── bluez.rs       # Adapters, devices, connection watch; a battery provider per adapter
+├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # Encryption keys at ~/.local/share/linuxpods/keys.json (0600)
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
 └── ui/            # GTK4/libadwaita: window, Control page, Preferences
@@ -74,6 +75,14 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   stopped zbus reading the connection, and a reply attachment awaited never came (#90).
   Queued one per signal, an advertiser re-signalling its services kept a pair waiting
   55 s to attach in a test (#96). `Connected` changes are kept, in order.
+- Adapters are found, never assumed: `bluez::adapters` lists them from
+  `GetManagedObjects`. Discovery runs on every powered one, subscribed first, since an
+  address's first advertisement comes in the `InterfacesAdded` that announces it. Each
+  adapter has a provider root of its own, registered with its own
+  `BatteryProviderManager1`, and a pair's battery goes to the provider its
+  `Device1.Adapter` names: bluetoothd ignores a battery whose device is on another
+  adapter. With `/org/bluez/hci0` hardcoded, a machine whose adapter was another heard
+  nothing over BLE (#51).
 
 ## Protocol
 
