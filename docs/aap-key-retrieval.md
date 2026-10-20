@@ -126,11 +126,10 @@ for _ in 0..key_count {
     offset += key_length;
 
     // Process key...
-    switch keyType {
-    case 0x01:
-        fmt.Printf("IRK: %x\n", keyBytes)
-    case 0x04:
-        fmt.Printf("ENC_KEY: %x\n", keyBytes)
+    match key_type {
+        0x01 => println!("IRK: {key_bytes:02x?}"),
+        0x04 => println!("ENC_KEY: {key_bytes:02x?}"),
+        _ => {}
     }
 }
 ```
@@ -225,15 +224,17 @@ The AirPods may send several packets after the key request:
 ### Timeout Handling
 
 ```rust
-// Read until a key packet arrives, bounded so a silent device cannot hang the loop
-for _ in 0..100 {
-    let packet = client.read_packet().await?;
-
-    if packet.len() >= 7 && packet[4] == 0x31 {
-        let keys = parse_proximity_keys(&packet)?;
-        break;
+// Bounded by time: a count of packets runs out only while packets keep coming,
+// and a silent device sends none
+let keys = tokio::time::timeout(Duration::from_secs(5), async {
+    loop {
+        let packet = client.read_packet().await?;
+        if packet.len() >= 7 && packet[4] == 0x31 {
+            return Ok::<_, anyhow::Error>(parse_proximity_keys(&packet)?);
+        }
     }
-}
+})
+.await??;
 ```
 
 ### Key Persistence
@@ -241,7 +242,8 @@ for _ in 0..100 {
 Keys are device-specific and persistent:
 - **Same keys** for the lifetime of the AirPods pairing
 - Can be cached and reused
-- No need to retrieve keys every time
+- Request them on every connection anyway: re-pairing, from any of the user's devices,
+  regenerates them, and a stale key fails suffix validation without a word
 - Store securely (keyring, encrypted config file)
 
 ### Error Handling
@@ -259,22 +261,16 @@ See the `key_request` example in this repository:
 cargo run --example key_request <MAC_ADDRESS>
 ```
 
-Example output:
+It connects through the coordinator, so the read loop stores the key as the app
+would. Example output, with the debug log left out:
 ```
-Connecting to 90:62:3F:59:00:2F (L2CAP)...
-Connected, sending handshake and key request...
-Received packet 3 (51 bytes)
-✅ Key data marker found!
-
-Key 1:
-  Type: 0x01 (IRK - Identity Resolving Key)
-  Key data: 64dd9ce7bcb5b50a9a334542cbaf1902
-
-Key 2:
-  Type: 0x04 (ENC_KEY - Encryption Key)
-  Key data: 1bdd73d2be019b9855cc5b367bf99d5d
-
-✅ Keys successfully retrieved!
+connecting AAP to 90:62:3F:59:00:2F...
+connected
+requesting encryption keys (read loop is parked in recv)...
+  request returned OK
+waiting for key response...
+  keys present after 500ms
+device_count=1
 ```
 
 ## Testing
@@ -313,7 +309,7 @@ Likely works with:
 - Check AirPods are powered on and in range
 
 ### "No key packet received"
-- Increase timeout (try 20-30 packets)
+- Wait longer: the key packet may come seconds after the request
 - Check PSM is correct (0x1001)
 - Verify nothing is sent before the handshake is answered (`01 00 04 00 …`): a key
   request sent sooner is dropped, with no error
