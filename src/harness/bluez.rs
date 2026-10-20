@@ -38,8 +38,11 @@
 //!   `InterfacesRemoved`.
 //!
 //! An adapter hears advertisements only while some client has discovery on
-//! there, as it hears them only while it scans. Which adapter hears one is the
-//! caller's to say.
+//! there, as it hears them only while it scans. Every adapter that does hears
+//! every advertisement, as two radios in one room both would, and each makes
+//! a device of its own of the address. A pair's paired device stays on the
+//! adapter it is paired with: its advertisements come from a random address
+//! no adapter resolves to it.
 //!
 //! # Batteries
 //!
@@ -434,31 +437,55 @@ impl FakeBluez {
         self.state().is_discovering(adapter)
     }
 
-    /// An advertisement from `address`, heard by the adapter called `adapter`,
-    /// `apple_data` the value of its Apple entry in `ManufacturerData`.
-    /// Signalled as the module docs describe, and only while that adapter
-    /// discovers: returns whether it did.
-    pub async fn advertise(
-        &self,
-        adapter: &str,
-        address: Address,
-        apple_data: &[u8],
-    ) -> Result<bool> {
-        let heard_before = {
+    /// An advertisement from `address`, `apple_data` the value of its Apple
+    /// entry in `ManufacturerData`, heard by every adapter that discovers.
+    /// Signalled as the module docs describe: returns whether any adapter
+    /// heard it.
+    pub async fn advertise(&self, address: Address, apple_data: &[u8]) -> Result<bool> {
+        let hearing: Vec<(String, bool)> = {
             let mut state = self.state();
-            if !state.is_discovering(adapter) {
+            let discovering: Vec<String> = state
+                .adapters
+                .iter()
+                .filter(|adapter| state.is_discovering(adapter))
+                .cloned()
+                .collect();
+            if discovering.is_empty() {
                 return Ok(false);
             }
             anyhow::ensure!(
                 !state.paired.contains_key(&address),
                 "{address} is a paired device's address"
             );
-            state
-                .advertisers
-                .insert((adapter.to_string(), address), Instant::now())
-                .is_some()
+            let now = Instant::now();
+            discovering
+                .into_iter()
+                .map(|adapter| {
+                    let heard_before = state
+                        .advertisers
+                        .insert((adapter.clone(), address), now)
+                        .is_some();
+                    (adapter, heard_before)
+                })
+                .collect()
         };
+        for (adapter, heard_before) in hearing {
+            self.heard(&adapter, address, apple_data, heard_before)
+                .await?;
+        }
+        Ok(true)
+    }
 
+    /// Signals what the adapter called `adapter` heard from `address`: the
+    /// device it makes of a new address, or the change to one it heard
+    /// before.
+    async fn heard(
+        &self,
+        adapter: &str,
+        address: Address,
+        apple_data: &[u8],
+        heard_before: bool,
+    ) -> Result<()> {
         let path = device_path(adapter, address);
         let server = self.conn.object_server();
         let advertiser = || Advertiser {
@@ -468,7 +495,7 @@ impl FakeBluez {
         };
         // `at` announces the object with its properties.
         if !heard_before && server.at(&path, advertiser()).await? {
-            return Ok(true);
+            return Ok(());
         }
         match server.interface::<_, Advertiser>(&path).await {
             Ok(iface) => {
@@ -483,7 +510,18 @@ impl FakeBluez {
                 server.at(&path, advertiser()).await?;
             }
         }
-        Ok(true)
+        Ok(())
+    }
+
+    /// The random addresses the adapter called `adapter` has a device for,
+    /// from hearing them advertise.
+    pub fn advertisers_on(&self, adapter: &str) -> HashSet<Address> {
+        self.state()
+            .advertisers
+            .keys()
+            .filter(|(heard_by, _)| heard_by == adapter)
+            .map(|(_, address)| *address)
+            .collect()
     }
 
     /// Removes the devices only heard advertising that have not been heard for
@@ -1288,7 +1326,7 @@ mod tests {
             .start_discovery()
             .await
             .unwrap();
-        assert!(bluez.advertise(ADAPTER, RANDOM, &[0x07]).await.unwrap());
+        assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
         assert_eq!(
             devices.device_aliases().await,
             HashMap::from([(PAIR, ALIAS.to_string())])
@@ -1385,10 +1423,11 @@ mod tests {
 
         let pods = Pods::new(PRO_3, PAIR);
         let ad = pods.advertisement(Duration::ZERO);
-        assert!(!bluez.advertise("hci2", ad.address, &ad.data).await.unwrap());
-        assert!(bluez.advertise(SECOND, ad.address, &ad.data).await.unwrap());
+        assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
         let advert = timeout(TIMEOUT, adverts.next()).await.unwrap().unwrap();
         assert_eq!(advert.ble_mac, ad.address);
+        assert!(bluez.advertisers_on(SECOND).contains(&ad.address));
+        assert!(bluez.advertisers_on("hci2").is_empty(), "heard while off");
     }
 
     /// With no adapter, or none powered, nothing scans, and the scanner says
@@ -1469,25 +1508,15 @@ mod tests {
             .unwrap();
 
         assert!(
-            !bluez.advertise(ADAPTER, RANDOM, &[0x01]).await.unwrap(),
+            !bluez.advertise(RANDOM, &[0x01]).await.unwrap(),
             "no discovery"
         );
         Scanner::with_connection(client.clone())
             .start_discovery()
             .await
             .unwrap();
-        assert!(
-            bluez
-                .advertise(ADAPTER, RANDOM, &[0x02, 0x03])
-                .await
-                .unwrap()
-        );
-        assert!(
-            bluez
-                .advertise(ADAPTER, RANDOM, &[0x04, 0x05])
-                .await
-                .unwrap()
-        );
+        assert!(bluez.advertise(RANDOM, &[0x02, 0x03]).await.unwrap());
+        assert!(bluez.advertise(RANDOM, &[0x04, 0x05]).await.unwrap());
         bluez.prune(Instant::now()).await;
         bluez.prune(Instant::now() + TEMPORARY_TIMEOUT).await;
 
@@ -1558,22 +1587,24 @@ mod tests {
         assert_eq!(interfaces, ["org.bluez.Device1"]);
     }
 
-    /// An adapter hears only what it is told it hears, and each makes a
-    /// device of its own of an address both hear.
+    /// Every adapter that discovers hears an advertisement, and makes a device
+    /// of its own of the address; one that does not hears nothing. A paired
+    /// device stays on its own adapter.
     #[tokio::test]
-    async fn each_adapter_hears_for_itself() {
+    async fn every_adapter_that_discovers_hears_every_advertisement() {
         let (bus, bluez) = served().await;
         bluez.add_adapter(SECOND, true).await.unwrap();
+        bluez.add_adapter("hci2", false).await.unwrap();
         let conn = bus.connect().await.unwrap();
-        Scanner::with_connection(conn.clone())
-            .start_discovery()
+        let scanner = Scanner::with_connection(conn.clone());
+        scanner
+            .start_discovery_on(&adapter_path(SECOND))
             .await
             .unwrap();
 
-        assert!(bluez.advertise(SECOND, RANDOM, &[0x07]).await.unwrap());
         let devices = Devices::new(conn);
-        let heard = |adapter| {
-            let path = device_path(adapter, RANDOM);
+        let heard = |adapter, address| {
+            let path = device_path(adapter, address);
             let devices = &devices;
             async move {
                 let (address, on) = devices
@@ -1583,11 +1614,25 @@ mod tests {
                 Some((address, on.ok()?))
             }
         };
-        assert_eq!(heard(SECOND).await, Some((RANDOM, adapter_path(SECOND))));
-        assert_eq!(heard(ADAPTER).await, None, "not heard by the first");
+        assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
+        assert_eq!(
+            heard(SECOND, RANDOM).await,
+            Some((RANDOM, adapter_path(SECOND)))
+        );
+        assert_eq!(heard(ADAPTER, RANDOM).await, None, "the first not scanning");
 
-        assert!(bluez.advertise(ADAPTER, RANDOM, &[0x07]).await.unwrap());
-        assert_eq!(heard(ADAPTER).await, Some((RANDOM, adapter_path(ADAPTER))));
+        scanner
+            .start_discovery_on(&adapter_path(ADAPTER))
+            .await
+            .unwrap();
+        assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
+        assert_eq!(
+            heard(ADAPTER, RANDOM).await,
+            Some((RANDOM, adapter_path(ADAPTER)))
+        );
+        assert_eq!(bluez.advertisers_on(SECOND), HashSet::from([RANDOM]));
+        assert!(bluez.advertisers_on("hci2").is_empty(), "heard while off");
+        assert_eq!(heard(SECOND, PAIR).await, None, "paired with the first");
     }
 
     /// The scanner takes what the fake signals: the plumbing the pipeline
@@ -1601,12 +1646,13 @@ mod tests {
         scanner.start_discovery().await.unwrap();
 
         // Twice from the one address, once as the object appears and once as a
-        // change: the scanner reads both, and either may come out first.
+        // change: the scanner reads both, in order, or the second alone when
+        // its reader is behind.
         let pods = Pods::new(PRO_3, PAIR);
         let address = pods.address_at(Duration::ZERO);
         for ms in [0, 1] {
             let ad = pods.advertisement(Duration::from_millis(ms));
-            bluez.advertise(ADAPTER, address, &ad.data).await.unwrap();
+            bluez.advertise(address, &ad.data).await.unwrap();
         }
         let advert = timeout(TIMEOUT, adverts.next()).await.unwrap().unwrap();
         assert_eq!(advert.ble_mac, address);
@@ -1639,7 +1685,7 @@ mod tests {
         drop(a);
         eventually(|| !bluez.is_discovering(ADAPTER)).await;
         assert!(!adapter_b.get_property::<bool>("Discovering").await.unwrap());
-        assert!(!bluez.advertise(ADAPTER, RANDOM, &[0x07]).await.unwrap());
+        assert!(!bluez.advertise(RANDOM, &[0x07]).await.unwrap());
     }
 
     /// The provider's batteries reach `Battery1` on the device, where GNOME
@@ -1711,7 +1757,7 @@ mod tests {
             .start_discovery()
             .await
             .unwrap();
-        assert!(bluez.advertise(ADAPTER, RANDOM, &[0x07]).await.unwrap());
+        assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
 
         let conn = bus.connect().await.unwrap();
         let mut first = BatteryProvider::register(conn.clone(), &adapter_path(ADAPTER))

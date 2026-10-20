@@ -8,11 +8,11 @@
 //! model asks for and nothing else:
 //!
 //! - **BLE.** Every [`ADVERTISING_INTERVAL`] each pair's advertisement goes to
-//!   the fake BlueZ, which signals it while the app discovers on the pair's
-//!   adapter - from the random address the model rotates, so a new device
-//!   object every ten seconds. Only the pair's own adapter hears it, as though
-//!   the others were out of range, so which adapter the app heard a pair on
-//!   is never in doubt.
+//!   the fake BlueZ, which signals it while the app discovers - from the
+//!   random address the model rotates, so a new device object every ten
+//!   seconds. Every adapter that discovers hears it, whichever the pair is
+//!   paired with, as radios in one room do, so with two adapters each
+//!   advertisement is signalled twice, from a device under each.
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
@@ -36,7 +36,7 @@
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
 //! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, `echo_delay_ms` in milliseconds |
-//! | `Flood(u count)` | That many advertisers no key decrypts, each from an address of its own, heard by every adapter |
+//! | `Flood(u count)` | That many advertisers no key decrypts, each from an address of its own |
 //! | `Received(s mac) → aay` | Every AAP packet the app sent the pair, in order |
 //! | `Batteries() → a{sy}` | What GNOME Settings shows: the level a battery provider gave each device, by MAC |
 //!
@@ -108,8 +108,6 @@ struct Inner {
 
 struct Pair {
     pods: Pods,
-    /// The adapter it is paired with, and the one that hears it.
-    adapter: String,
     link: Option<Link>,
 }
 
@@ -249,7 +247,6 @@ impl World {
             mac,
             Pair {
                 pods: Pods::new(product_id, mac),
-                adapter: adapter.to_string(),
                 link: None,
             },
         );
@@ -347,8 +344,8 @@ impl World {
     /// closed, advertising from an address of its own. Each advertises twice,
     /// so it is signalled both ways a device is - as it appears and as it
     /// changes: the scanner reads both, attachment's connection watch only
-    /// the change, and a flood has to reach both. Every adapter hears it.
-    /// Gone after the fake BlueZ's timeout.
+    /// the change, and a flood has to reach both. Gone after the fake BlueZ's
+    /// timeout.
     pub async fn flood(&self, count: u32) -> Result<()> {
         let now = self.now();
         for _ in 0..count {
@@ -356,20 +353,15 @@ impl World {
             let address = spammer.address_at(now);
             for at in [now, now + Duration::from_millis(1)] {
                 let advert = spammer.advertisement(at);
-                for adapter in &self.0.adapters {
-                    self.0
-                        .bluez
-                        .advertise(adapter, address, &advert.data)
-                        .await?;
-                }
+                self.0.bluez.advertise(address, &advert.data).await?;
             }
         }
         tracing::debug!("fake world: flooded with {count} advertisers");
         Ok(())
     }
 
-    /// Advertises every pair to its adapter every [`ADVERTISING_INTERVAL`],
-    /// and has the fake BlueZ forget the addresses that went quiet.
+    /// Advertises every pair every [`ADVERTISING_INTERVAL`], and has the fake
+    /// BlueZ forget the addresses that went quiet.
     async fn advertise(self) {
         let mut tick = tokio::time::interval(ADVERTISING_INTERVAL);
         loop {
@@ -379,16 +371,11 @@ impl World {
                 let now = self.now();
                 pairs
                     .iter()
-                    .map(|(mac, pair)| (*mac, pair.adapter.clone(), pair.pods.advertisement(now)))
+                    .map(|(mac, pair)| (*mac, pair.pods.advertisement(now)))
                     .collect()
             };
-            for (mac, adapter, advert) in adverts {
-                let heard = self
-                    .0
-                    .bluez
-                    .advertise(&adapter, advert.address, &advert.data)
-                    .await;
-                match heard {
+            for (mac, advert) in adverts {
+                match self.0.bluez.advertise(advert.address, &advert.data).await {
                     Ok(true) => {
                         tracing::trace!("fake world: {mac} advertised as {}", advert.address)
                     }
