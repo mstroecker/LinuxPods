@@ -55,8 +55,9 @@ const OP_NOTIFICATIONS: u8 = 0x0F;
 const OP_FEATURES: u8 = 0x4D;
 const OP_KEY_REQUEST: u8 = 0x30;
 
-/// The answer to the handshake. LibrePods recognises it by these four bytes
-/// and records no more of it, so the fake sends just them.
+/// The answer to the handshake. Pro 3 sends 18 bytes, starting
+/// `01 00 04 00 00 00 01 00`; the app, like LibrePods, matches only these
+/// four, so the fake sends just them.
 const HANDSHAKE_ACK: [u8; 4] = [0x01, 0x00, 0x04, 0x00];
 
 /// The answer to the features packet, as LibrePods recognises it - by these
@@ -138,7 +139,9 @@ pub struct Quirks {
     pub zero_suffix_when_connected: bool,
     /// Accept an AAP connection, never answer, and hang up after
     /// [`SILENT_HANG_UP`] - seen once, with the Flatpak build. Off by default,
-    /// and read when a connection opens.
+    /// and read when a connection opens. The app gives up on the handshake
+    /// after 5 s and closes the connection first, so through the app the
+    /// hang-up is never reached.
     pub silent_handshake: bool,
 }
 

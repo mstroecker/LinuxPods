@@ -758,13 +758,8 @@ impl Coordinator {
 
         let mut client = self.aap_client(mac_addr);
         client.connect().await?;
-        client
-            .handshake()
-            .await
-            .context("failed to send handshake")?;
-
-        // The Go version slept 500ms for the handshake to be processed.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Back once the device has answered: anything sent sooner is dropped.
+        client.handshake().await?;
 
         client
             .request_battery_status()
@@ -1949,6 +1944,9 @@ mod tests {
             &[0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00],
         ];
 
+        /// How Pro 3 starts its answer to the handshake.
+        const HANDSHAKE_REPLY: [u8; 8] = [0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00];
+
         /// A battery packet: left at 83%, discharging.
         const BATTERY: [u8; 12] = [
             0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01, 0x04, 0x01, 0x53, 0x02, 0x01,
@@ -1976,17 +1974,33 @@ mod tests {
         }
 
         /// A link to a fake runs as one to the device: the handshake sequence
-        /// goes out, the read loop takes what comes back, and the fake hanging
-        /// up takes the link down.
+        /// goes out, the rest of it only once the handshake is answered, the
+        /// read loop takes what comes back, and the fake hanging up takes the
+        /// link down.
         #[tokio::test]
         async fn connect_aap_handshakes_and_starts_the_read_loop() {
             let (coordinator, mut listener, _dir) = harnessed();
-            let (connected, fake) = tokio::join!(coordinator.connect_aap(MAC), listener.accept());
-            connected.unwrap();
-            let fake = fake.unwrap();
-            for (i, packet) in SEQUENCE.into_iter().enumerate() {
+            let connecting = tokio::spawn({
+                let coordinator = coordinator.clone();
+                async move { coordinator.connect_aap(MAC).await }
+            });
+            let fake = timeout(TIMEOUT, listener.accept()).await.unwrap().unwrap();
+            assert_eq!(recv(&fake).await, SEQUENCE[0], "the handshake");
+
+            // Longer than the fixed 500 ms that came before the requests until
+            // they went unanswered on a pair that had only just connected.
+            let early = timeout(Duration::from_secs(1), recv(&fake)).await;
+            assert!(early.is_err(), "sent ahead of the answer: {early:?}");
+
+            fake.send(&HANDSHAKE_REPLY).await.unwrap();
+            for (i, packet) in SEQUENCE.into_iter().enumerate().skip(1) {
                 assert_eq!(recv(&fake).await, packet, "packet {i} of the sequence");
             }
+            timeout(TIMEOUT, connecting)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
 
             let mut rx = coordinator.subscribe();
             assert!(rx.borrow_and_update().is_connected(MAC));
@@ -2006,6 +2020,19 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(coordinator.inner.read().await.links.is_empty());
+        }
+
+        /// A device that hangs up without answering the handshake leaves no
+        /// link behind, so its BLE reading stays on show.
+        #[tokio::test]
+        async fn connect_aap_fails_when_the_handshake_goes_unanswered() {
+            let (coordinator, mut listener, _dir) = harnessed();
+            let (connected, ()) = tokio::join!(coordinator.connect_aap(MAC), async {
+                let fake = listener.accept().await.unwrap();
+                assert_eq!(recv(&fake).await, SEQUENCE[0]);
+            });
+            assert!(connected.is_err());
+            assert!(coordinator.subscribe().borrow().connected_macs.is_empty());
         }
 
         /// Each pair has a socket of its own. BB has none, though MAC does, and

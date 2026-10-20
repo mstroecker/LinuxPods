@@ -10,7 +10,7 @@
 //!
 //! Protocol flow:
 //!   1. Open L2CAP connection to AirPods (PSM 4097)
-//!   2. Send handshake
+//!   2. Send handshake, and wait for the device to answer it
 //!   3. Request battery notifications
 //!   4. Parse incoming packets
 //!
@@ -46,6 +46,15 @@ const CONNECT_BACKOFF: Duration = Duration::from_millis(200);
 const PACKET_HANDSHAKE: [u8; 16] = [
     0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
+
+/// How the device's answer to the handshake starts. Pro 3 sends 18 bytes,
+/// starting `01 00 04 00 00 00 01 00`; only the first four are matched, as
+/// LibrePods matches them.
+const HANDSHAKE_REPLY: [u8; 4] = [0x01, 0x00, 0x04, 0x00];
+
+/// How long the device has to answer the handshake. A pair that had only just
+/// connected took 1.2 s.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Subscribes to battery status notifications.
 const PACKET_BATTERY_REQUEST: [u8; 10] =
@@ -217,8 +226,37 @@ impl Client {
         }
     }
 
+    /// Sends the handshake and waits for the device to answer it.
+    ///
+    /// The device drops what it is sent before it has answered. A pair that
+    /// had only just connected answered 1.2 s after the handshake, and the
+    /// requests that went out after a fixed 500 ms were never answered: no
+    /// battery, no keys, for as long as the connection lasted.
+    ///
+    /// Fails when the device hangs up first, or has not answered within
+    /// [`HANDSHAKE_TIMEOUT`].
     pub async fn handshake(&self) -> Result<()> {
-        self.send_packet(&PACKET_HANDSHAKE, "handshake").await
+        self.handshake_within(HANDSHAKE_TIMEOUT).await
+    }
+
+    async fn handshake_within(&self, limit: Duration) -> Result<()> {
+        self.send_packet(&PACKET_HANDSHAKE, "handshake").await?;
+        let answered = async {
+            loop {
+                let packet = self.read_packet().await?;
+                if packet.starts_with(&HANDSHAKE_REPLY) {
+                    return anyhow::Ok(());
+                }
+                tracing::debug!(
+                    "AAP packet ({} bytes) ahead of the handshake reply, dropped",
+                    packet.len()
+                );
+            }
+        };
+        tokio::time::timeout(limit, answered)
+            .await
+            .with_context(|| format!("handshake unanswered for {limit:?}"))?
+            .context("handshake unanswered")
     }
 
     pub async fn request_battery_status(&self) -> Result<()> {
@@ -384,10 +422,10 @@ mod tests {
         async fn packets_keep_their_boundaries_in_both_directions() {
             let (client, peer, _dir) = connected().await;
 
-            client.handshake().await.unwrap();
             client.request_battery_status().await.unwrap();
-            assert_eq!(recv(&peer).await, PACKET_HANDSHAKE);
+            client.enable_special_features().await.unwrap();
             assert_eq!(recv(&peer).await, PACKET_BATTERY_REQUEST);
+            assert_eq!(recv(&peer).await, PACKET_ENABLE_FEATURES);
 
             // Left at 83%, discharging.
             let battery = [
@@ -397,6 +435,56 @@ mod tests {
             peer.send(&[0x04, 0x00]).await.unwrap();
             assert_eq!(next_packet(&client).await.unwrap(), battery);
             assert_eq!(next_packet(&client).await.unwrap(), [0x04, 0x00]);
+        }
+
+        /// The handshake is done once the device answers it, and not before:
+        /// whatever comes ahead of the answer is not it.
+        #[tokio::test]
+        async fn the_handshake_waits_for_the_answer() {
+            let (client, peer, _dir) = connected().await;
+            let client = Arc::new(client);
+            let handshake = tokio::spawn({
+                let client = client.clone();
+                async move { client.handshake().await }
+            });
+            assert_eq!(recv(&peer).await, PACKET_HANDSHAKE);
+
+            peer.send(&[0x04, 0x00, 0x04, 0x00, 0x2B, 0x00])
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!handshake.is_finished(), "not answered yet");
+
+            // As Pro 3 starts its answer.
+            peer.send(&[0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00])
+                .await
+                .unwrap();
+            timeout(TIMEOUT, handshake).await.unwrap().unwrap().unwrap();
+        }
+
+        /// A device that never answers fails the handshake rather than hold up
+        /// the connection.
+        #[tokio::test]
+        async fn an_unanswered_handshake_fails() {
+            let (client, _peer, _dir) = connected().await;
+            let unanswered = client.handshake_within(Duration::from_millis(50)).await;
+            assert_eq!(
+                unanswered.unwrap_err().to_string(),
+                "handshake unanswered for 50ms"
+            );
+        }
+
+        #[tokio::test]
+        async fn hanging_up_before_answering_fails_the_handshake() {
+            let (client, peer, _dir) = connected().await;
+            let handshake = tokio::spawn(async move { client.handshake().await });
+            assert_eq!(recv(&peer).await, PACKET_HANDSHAKE);
+            drop(peer);
+            let failed = timeout(TIMEOUT, handshake).await.unwrap().unwrap();
+            assert_eq!(
+                format!("{:#}", failed.unwrap_err()),
+                "handshake unanswered: connection closed"
+            );
         }
 
         /// What closing a link relies on: its read loop is parked in recv, and
