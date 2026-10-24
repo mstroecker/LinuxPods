@@ -754,7 +754,8 @@ async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast
 
     app.skip_handled();
     fixture.world.flood(FLOOD as u32).await.unwrap();
-    // By address: the scanner hears each advertiser twice.
+    // By address, so that the count is of advertisers each heard from an
+    // address of its own.
     let mut advertisers = std::collections::HashSet::new();
     app.handled("every advertiser in the flood", FLOOD, |a| {
         !sent_by(a, PAIR, &key) && advertisers.insert(a.ble_mac)
@@ -1133,8 +1134,9 @@ async fn an_adapter_powered_off_is_not_scanned_and_the_other_is() {
 /// there was room, and the reply to attachment's next call to BlueZ never
 /// came. No pair was attached or detached again.
 ///
-/// All of it while the first pair's link comes up, which takes half a second,
-/// so the second pair's connection is handled after it, with one flood
+/// All of it while attachment takes up the first pair - its calls to BlueZ
+/// and its AAP link coming up - and attachment handles one connection at a
+/// time, so the second pair's connection is handled after it, with one flood
 /// queued ahead of it and another behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_flood_while_a_pair_attaches_does_not_stall_attachment() {
@@ -1145,10 +1147,16 @@ async fn a_flood_while_a_pair_attaches_does_not_stall_attachment() {
     .await;
     let mut app = fixture.start_app().await;
 
+    // Repeated from one address, every advertisement after an advertiser's
+    // first is a `PropertiesChanged`, the one signal the connection watch
+    // subscribes to: ten advertisers bring it 100 before the second pair's
+    // connection and 200 after, each more than zbus's 64-message queue holds.
+    // Few addresses, so that few signals are `InterfacesAdded`, which only the
+    // scanner reads.
     fixture.world.connect(PAIR).await.unwrap();
-    fixture.world.flood(FLOOD as u32).await.unwrap();
+    fixture.world.flood_repeating(10, 11).await.unwrap();
     fixture.world.connect(OTHER).await.unwrap();
-    fixture.world.flood(2 * FLOOD as u32).await.unwrap();
+    fixture.world.flood_repeating(10, 21).await.unwrap();
     app.until("both pairs on AAP", |s| {
         s.is_connected(PAIR) && s.is_connected(OTHER)
     })
