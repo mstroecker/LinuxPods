@@ -341,22 +341,34 @@ impl World {
 
     /// `count` advertisers no key decrypts, as a BLE spam flood brings: each a
     /// pair with keys nobody holds, so its advertisement parses but stays
-    /// closed, advertising from an address of its own. Each advertises twice,
-    /// so it is signalled both ways a device is - as it appears and as it
-    /// changes: the scanner reads both, attachment's connection watch only
-    /// the change, and a flood has to reach both. Gone after the fake BlueZ's
-    /// timeout.
+    /// closed, advertising once, from an address of its own. A new address is
+    /// signalled only as it appears, with `InterfacesAdded`: the scanner reads
+    /// it, attachment's connection watch does not. Gone after the fake
+    /// BlueZ's timeout.
     pub async fn flood(&self, count: u32) -> Result<()> {
+        self.spam(count, 1).await
+    }
+
+    /// `count` advertisers no key decrypts, as [`World::flood`] brings, each
+    /// advertising `times` times from one address. Every advertisement after
+    /// an advertiser's first is signalled as a change, with
+    /// `PropertiesChanged`, which attachment's connection watch subscribes to
+    /// as well as the scanner.
+    pub async fn flood_repeating(&self, count: u32, times: u32) -> Result<()> {
+        self.spam(count, times).await
+    }
+
+    async fn spam(&self, count: u32, times: u32) -> Result<()> {
         let now = self.now();
         for _ in 0..count {
             let spammer = Pods::new(PRO_3, random_address());
             let address = spammer.address_at(now);
-            for at in [now, now + Duration::from_millis(1)] {
-                let advert = spammer.advertisement(at);
+            for i in 0..times {
+                let advert = spammer.advertisement(now + Duration::from_millis(i.into()));
                 self.0.bluez.advertise(address, &advert.data).await?;
             }
         }
-        tracing::debug!("fake world: flooded with {count} advertisers");
+        tracing::debug!("fake world: flooded with {count} advertisers, {times} time(s) each");
         Ok(())
     }
 
@@ -645,6 +657,7 @@ mod tests {
     use futures_util::StreamExt;
     use tokio::time::timeout;
     use zbus::proxy::CacheProperties;
+    use zbus::{MatchRule, MessageStream};
 
     use super::*;
     use crate::aap::noise::{self, NoiseMode};
@@ -862,7 +875,7 @@ mod tests {
 
         world.flood(3).await.unwrap();
         let mut addresses = HashSet::new();
-        // By address: the scanner hears each advertiser twice.
+        // By address, so that three are three addresses of their own.
         timeout(TIMEOUT, async {
             while addresses.len() < 3 {
                 let advert = adverts.next().await.unwrap();
@@ -874,6 +887,64 @@ mod tests {
         })
         .await
         .expect("heard the flood, from three addresses");
+    }
+
+    /// A flood is signalled only as its addresses appear, and a repeating
+    /// flood as changes after that: what attachment's connection watch
+    /// subscribes to, and the #90 test relies on. A world with no pair in it,
+    /// so that every device signalled is an advertiser's.
+    #[tokio::test]
+    async fn only_a_repeating_flood_is_signalled_as_changes() {
+        let bus = PrivateBus::start().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let world = World::new(bus.address(), dir.path()).await.unwrap();
+        world.publish().await.unwrap();
+        let conn = bus.connect().await.unwrap();
+        // The connection watch's rule.
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface("org.freedesktop.DBus.Properties")
+            .unwrap()
+            .member("PropertiesChanged")
+            .unwrap()
+            .path_namespace("/org/bluez")
+            .unwrap()
+            .build();
+        let changes = MessageStream::for_match_rule(rule, &conn, None)
+            .await
+            .unwrap()
+            .filter_map(|msg| async move {
+                let msg = msg.ok()?;
+                let (iface, _, _) = msg
+                    .body()
+                    .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                    .ok()?;
+                let path = msg.header().path()?.to_string();
+                (iface == "org.bluez.Device1").then_some(path)
+            });
+        tokio::pin!(changes);
+        Scanner::with_connection(conn)
+            .start_discovery()
+            .await
+            .unwrap();
+
+        // Signalled in order, so a change from the plain flood would come
+        // among the first four.
+        world.flood(3).await.unwrap();
+        world.flood_repeating(2, 3).await.unwrap();
+        let mut changed: HashMap<String, usize> = HashMap::new();
+        timeout(TIMEOUT, async {
+            for _ in 0..4 {
+                *changed.entry(changes.next().await.unwrap()).or_default() += 1;
+            }
+        })
+        .await
+        .expect("heard four changes");
+        assert_eq!(
+            changed.values().copied().collect::<Vec<_>>(),
+            [2, 2],
+            "by device: {changed:?}"
+        );
     }
 
     /// `FakeWorld1` reaches the world, and turns away what it cannot take.
