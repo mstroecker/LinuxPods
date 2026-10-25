@@ -43,17 +43,17 @@ type    Message Type                    0x07        ✅ Working   0x07 = proximi
 len     Length                          0x19        ✅ Working   Payload length (25 bytes)
 0       Prefix                          0x01        ✅ Working   Always 0x01
 1-2     Device Model (Big-Endian)       0x2420      ✅ Working   0x2420 = AirPods Pro
-3       Status Byte                     0x0b        ✅ Working   Ear detection, orientation
+3       Status Byte                     0x0b        ✅ Working   Ear detection, orientation, in case
 4       Battery Levels                  0x88        ✅ Working   Left/Right AirPods (~10% accuracy)
 5       Charging + Case Battery         0x07        ✅ Working   Charging bits, case battery (~10% accuracy)
-6       Lid State                       0x51        ✅ Working   Bit 3 = lid (0=open)
+6       Lid State                       0x31        ✅ Working   Bit 3 = lid (0=open), read while in case
 7       Device Color                    0x00        ✅ Working   Color byte
 8       Connection State                0x04        ✅ Working   0x00 disconnected, 0x04 idle, 0x05 music, ...
 9-24    Encrypted Battery Data          ...         ✅ Working   AES-128 ECB, 1% accuracy (if key available)
 ```
 
 **Working Features** (unencrypted): All batteries (~10%), In Ear detection, Orientation (IsFlipped), Model, Color, Lid state<br>
-**Not Working** (format unknown): Byte 6 bits 0-2
+**Not Working** (format unknown): Byte 6 bits 0-2 and 4-7
 
 ## Byte-by-Byte Parsing
 
@@ -88,20 +88,38 @@ let device_model = u16::from(payload[1]) << 8 | u16::from(payload[2]);
 
 ### Byte 3: Status Byte
 
-Encodes device status flags including ear detection and orientation:
+Encodes device status flags including ear detection, orientation and which pods
+are in the case:
 
 ```
 Bit     Flag                    Example
 ---     ----                    -------
 0       Unknown
 1       In Ear (Primary)        1 = In Ear, 0 = Not In Ear
-2       Unknown
+2       Both Pods In Case       1 = both in the case
 3       In Ear (Secondary)      1 = In Ear, 0 = Not In Ear
-4       Unknown
+4       One Pod In Case         1 = a pod is in the case (see below)
 5       Primary Pod             0 = Right Primary, 1 = Left Primary
-6       In Case                 1 = In Case, 0 = Not In Case
+6       This Pod In Case        1 = the sending pod is in the case
 7       Unknown
 ```
+
+Bits 2, 4 and 6 are named after LibrePods' Linux parser, and agree with the
+#71 captures (AirPods Pro 3): with both pods in the case every advertisement
+from either pod has bit 2, and with one pod in the case and the other worn the
+one in the case has bit 6. Out of the case or in ears neither is set. Bit 6 is
+not set by every pod in the case: with both inside, only one pod at a time set
+it - the right pod's `0x15` beside the left's `0x75`, and later the left pod's
+`0x35` beside the right's `0x55`. Bits 2 and 6 together gate the lid; see
+[Byte 6](#byte-6-lid-state).
+
+Bit 4 is set by the worn pod whose partner is in the case (`0x13`, beside the
+partner's `0x73`), and is clear whenever no pod is in the case: `0x0b` both
+worn, `0x01` both on the desk. It is not set with every pod in the case - the
+right pod's first advertisement after the lid opened was `0x04` - and one
+capture contradicts it: being put back, the left pod sent `0x29`, `0x22` and
+`0x20` from the hand while the right pod already sent `0x51` from the case.
+Only the first matters to the lid, below.
 
 **Primary Pod Determination:**
 
@@ -134,19 +152,18 @@ Left and Right AirPods may be swapped based on the primary pod.
 
 ### Byte 5: Charging Status
 
-Encodes charging state for all three components. **Bits 2 and 3 are swapped based on orientation:**
+Encodes charging state for all three components and the case battery.
+**Bits 4 and 5 are swapped when the right pod is primary:**
 
 ```
 Bit     Component (Normal)
 ---     ------------------
-0       Unknown
-1       Case Charging
-2       Right AirPod Charging
-3       Left AirPod Charging
-4-7     Battery Case (May be > 100) => Unknown Battery
+0-3     Case Battery (nibble, as byte 4; 0xF = unknown)
+4       Left AirPod Charging
+5       Right AirPod Charging
+6       Case Charging
+7       Unknown
 ```
-
-Left and Right AirPods may be swapped based on the primary pod.
 
 ### Byte 6: Lid State
 
@@ -155,14 +172,44 @@ Bit     Meaning
 ---     -------
 0-2     Unknown
 3       Lid state (0 = open, 1 = closed)
-4-7     0x5 with the pods in the case, 0x1 with them out
+4-7     Unknown
 ```
 
-✅ **Working** - `lid_open` reads bit 3. Both earbuds report the same value.
+✅ **Working** - `lid_open` reads bit 3, while the status byte puts a pod in the
+case:
 
-> **Note:** bit 3 only means anything while the pods are in the case. With them
-> out, it reads 0 whatever the lid is doing, so `lid_open` is `None` unless bits
-> 4-7 say the pods are inside.
+```rust
+let in_case = status & 0x44 != 0; // bit 6: this pod, bit 2: both pods
+let lid_open = in_case.then(|| payload[6] & 0x08 == 0);
+```
+
+> **Note:** bit 3 only means anything while a pod is in the case. With them out,
+> it reads 0 whatever the lid is doing, so `lid_open` is `None` unless status bit
+> 6 or 2 is set.
+
+With one pod worn and the other in the open case, both advertise: the one in
+the case reads the lid (`0x73`), the worn one doesn't (`0x13`). Taken one by
+one, the lid would blink between open and unknown several times a second. So an
+advertisement whose sender is out of the case but whose status bit 4 says a pod
+is in it keeps the lid the coordinator last had for that device; one with bit 4
+clear too means no pod is in the case, and no lid. The parser reports bit 4 as
+`one_in_case` and stays stateless; `Coordinator::handle_advertisement` does the
+keeping.
+
+Closing the lid flips bit 3 and nothing else in bytes 0-8: in the #71 capture
+both pods went from `0x31` (the right pod from `0x11`) to `0x39` within 22 ms.
+About 4 s later the pods stop advertising, so a closed lid is only seen in the
+last advertisements before they go silent. The coordinator's cached reading
+keeps it on show until they advertise again, for up to `BLE_CACHE_TTL` (30 min).
+
+The high nibble does not say whether the pods are in the case. AirPods Pro 3
+sends `0x11` from the right pod in the open case, the same value it sends out
+of it, `0x31` from the left pod, and `0x32` from both after being put back. The
+`0x5` once read as "in the case" appears only in the September captures, all
+with the case charging (byte 5 bit 6) and status bit 2, so it may follow the
+case's charging. The parser does not read it. The low bits are not a lid-open
+counter: they stayed `1` across two lid opens and went to `2` when the pods went
+back in.
 
 ### Byte 7: Device Color
 
@@ -302,7 +349,9 @@ payload of a different length.
 
 ### Lid Status
 
-✅ **Working** - byte 6, bit 3 (0 = open). See [Byte 6](#byte-6-lid-state).
+✅ **Working** - byte 6, bit 3 (0 = open), while status bit 6 or 2 puts a pod in
+the case. A worn pod's advertisement with status bit 4 keeps the last lid. See
+[Byte 6](#byte-6-lid-state).
 
 ### Connection State
 
@@ -480,7 +529,7 @@ first AAP connection.
 
 ---
 
-**Last Updated:** 2026-09-09<br>
+**Last Updated:** 2026-10-25<br>
 **Tested With:**
  - AirPods Pro (Gen 2) (0x2420), Firmware 7A305
  - AirPods Pro 3 (0x2720), Firmware 8A353

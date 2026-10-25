@@ -366,8 +366,10 @@ impl Pods {
         pod.in_ear &= !in_case;
     }
 
-    /// Opens or closes the case. The advertisement carries the lid only while a
-    /// pod is in the case.
+    /// Opens or closes the case. The advertisement carries the lid only while
+    /// the pod that sends it is in the case, or both are. With the sending pod
+    /// worn and the other in the case, it says only that a pod is in the case,
+    /// and the app keeps the lid it last heard.
     pub fn set_lid(&mut self, open: bool) {
         self.lid_open = open;
     }
@@ -417,11 +419,16 @@ impl Pods {
             PodSide::Left => (&self.left, &self.right),
             PodSide::Right => (&self.right, &self.left),
         };
+        // The primary pod is the one that does the talking.
+        let this_in_case = primary.in_case;
+        let both_in_case = self.left.in_case && self.right.in_case;
+        let one_in_case = self.left.in_case || self.right.in_case;
         let cleartext = Cleartext {
             product_id: self.product_id,
             primary: self.primary,
-            // The primary pod is the one that does the talking.
-            this_in_case: primary.in_case,
+            this_in_case,
+            both_in_case,
+            one_in_case,
             left_battery: self.left.battery,
             right_battery: self.right.battery,
             case_battery: self.case_battery,
@@ -430,9 +437,11 @@ impl Pods {
             case_charging: self.case_charging,
             left_in_ear: self.left.in_ear,
             right_in_ear: self.right.in_ear,
-            // With one pod in the case and one out - no capture covers that -
-            // the fake still reports the lid.
-            lid_open: (self.left.in_case || self.right.in_case).then_some(self.lid_open),
+            // With one pod in the case and one worn, the #71 captures have the
+            // pod in the case report the lid and the worn one only status bit 4.
+            // Only the primary pod talks here, so a worn primary leaves the
+            // app the lid it last heard.
+            lid_open: (this_in_case || both_in_case).then_some(self.lid_open),
             color: self.color,
             connection_state: if self.connected {
                 CONNECTION_IDLE
@@ -826,18 +835,24 @@ mod tests {
         assert!(pd.right_charging);
         assert_eq!(pd.left_battery, Some(80));
         assert!(pd.right_in_ear && !pd.left_in_ear);
-        assert_eq!(pd.lid_open, Some(true), "the left pod is still in the case");
+        assert_eq!(pd.lid_open, None, "the right pod, worn, does the talking");
+        assert!(pd.one_in_case, "and says the left pod is in the case");
     }
 
     #[test]
-    fn advertises_the_lid_while_a_pod_is_in_the_case() {
+    fn advertises_the_lid_while_the_sending_pod_is_in_the_case() {
         let mut pods = Pods::new(PRO_3, MAC);
         pods.set_lid(false);
         assert_eq!(read(&pods, ms(0)).lid_open, Some(false));
         pods.set_lid(true);
         assert_eq!(read(&pods, ms(0)).lid_open, Some(true));
-        pods.set_in_ear(PodSide::Left, true);
         pods.set_in_ear(PodSide::Right, true);
+        assert_eq!(
+            read(&pods, ms(0)).lid_open,
+            Some(true),
+            "the left pod, in the case, does the talking"
+        );
+        pods.set_in_ear(PodSide::Left, true);
         assert_eq!(read(&pods, ms(0)).lid_open, None);
     }
 
