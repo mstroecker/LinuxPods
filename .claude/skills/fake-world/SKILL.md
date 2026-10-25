@@ -56,8 +56,9 @@ at `/org/bluez/hci1` instead, as on a machine whose only adapter is not the firs
 CARGO_PROFILE_DEV_DEBUG=line-tables-only make fake-world SCENARIO=connected ADAPTER=hci1 HEADLESS=1
 ```
 
-Several adapters, and one that is off, are for the pipeline tests
-(`World::with_adapters`); `fakepods` makes one.
+`fakepods` starts with one adapter; plug in more, power them off and on, unplug them and
+restart the fake BlueZ at runtime with the adapter methods below (#50). The pipeline
+tests can also start with several, or one that is off (`World::with_adapters`).
 
 ## Change the world
 
@@ -73,7 +74,7 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 
 | Method | Does |
 |---|---|
-| `AddPods(s mac, q model, s alias)` | pairs new AirPods with the adapter, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C) |
+| `AddPods(s mac, q model, s alias)` | pairs new AirPods with the first adapter there is now, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C) |
 | `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP |
 | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case` |
 | `SetLid(s mac, b open)` | the case lid |
@@ -83,6 +84,37 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 | `Flood(u count)` | that many advertisers no key decrypts |
 | `Received(s mac) → aay` | every AAP packet the app sent the pair: check `0x34 01` precedes Off |
 | `Batteries() → a{sy}` | what GNOME Settings shows, by MAC |
+
+The adapters, and the fake BlueZ behind them, as the desktop's Bluetooth switch, rfkill,
+a suspend, a USB dongle or a bluetoothd restart change them:
+
+```sh
+scripts/fake-world.sh world SetPowered hci0 false     # the Bluetooth switch off
+scripts/fake-world.sh world SetPowered hci0 true
+scripts/fake-world.sh world AddAdapter hci1 true      # a dongle plugged in
+scripts/fake-world.sh world AddPodsOn hci1 00:00:5E:00:53:02 0x2024 'Dongle pair'
+scripts/fake-world.sh world RemoveAdapter hci1
+scripts/fake-world.sh world RestartBluez
+```
+
+| Method | Does |
+|---|---|
+| `SetPowered(s adapter, b powered)` | off: discovery there ends, the devices it only heard advertising go, its pairs disconnect (AAP with them) and cannot connect until it is on; providers stay. On again, the pairs stay disconnected until `Connect` |
+| `AddAdapter(s adapter, b powered)` | plugs one in at `/org/bluez/<adapter>`; one plugged in before is the same controller, its pairs back, disconnected |
+| `RemoveAdapter(s adapter)` | unplugs it: stopped as when off, then its devices, its battery providers and their batteries go |
+| `AddPodsOn(s adapter, s mac, q model, s alias)` | `AddPods`, with that adapter |
+| `RestartBluez()` | bluetoothd restarting without powering off, as after a crash: it comes back under a new unique name, `org.bluez` changes hands twice, and every client's discovery and battery providers are forgotten; adapters and connections stay. For a `systemctl restart`, which powers off first: `SetPowered` false, `RestartBluez`, `SetPowered` true |
+
+`RestartBluez` is a crash, and a narrow one: only `NameOwnerChanged` tells, and nothing is
+announced again. A real bluetoothd also announces every object again with
+`InterfacesAdded`, and under systemd answers calls made while it was away, by bus
+activation; the fake world's bus activates nothing. A run that passes on `RestartBluez`
+proves the `NameOwnerChanged` path only.
+
+The app should log, by adapter, `BLE discovery started` (or `restarted`) once the adapter
+is powered again, and `battery provider registered with` after `AddAdapter` or
+`RestartBluez` - not after `SetPowered`, which keeps providers. `Batteries` shows the
+connected pair again after a `RestartBluez` without reconnecting.
 
 ## Drive the UI
 

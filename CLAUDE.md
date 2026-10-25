@@ -75,19 +75,41 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   arrival - not stored, not broadcast; storing those is what a BLE spam flood fed on.
   The scanner's `BLE parsable:` log still records it.
 - A D-Bus subscription that advertisements reach is drained by a task that never awaits
-  its reader, and what an advertiser can trigger at will is coalesced per device - never
-  queued per signal, never dropped. Left in zbus's 64-message queue, advertisements
-  stopped zbus reading the connection, and a reply attachment awaited never came (#90).
-  Queued one per signal, an advertiser re-signalling its services kept a pair waiting
-  55 s to attach in a test (#96). `Connected` changes are kept, in order.
-- Adapters are found, never assumed: `bluez::adapters` lists them from
-  `GetManagedObjects`. Discovery runs on every powered one, subscribed first, since an
-  address's first advertisement comes in the `InterfacesAdded` that announces it. Each
-  adapter has a provider root of its own, registered with its own
-  `BatteryProviderManager1`, and a pair's battery goes to the provider its
-  `Device1.Adapter` names: bluetoothd ignores a battery whose device is on another
-  adapter. With `/org/bluez/hci0` hardcoded, a machine whose adapter was another heard
-  nothing over BLE (#51).
+  its reader, and what an advertiser or a flapping adapter can trigger at will is
+  coalesced per device or adapter - never queued per signal, never dropped. Left in
+  zbus's 64-message queue, advertisements stopped zbus reading the connection, and a
+  reply attachment awaited never came (#90). Queued one per signal, an advertiser
+  re-signalling its services kept a pair waiting 55 s to attach in a test (#96).
+  `Connected` changes are kept, in order. A draining task only coalesces and never calls
+  BlueZ: awaiting a reply leaves its own subscription unread, the #90 stall again. An
+  answer that needs BlueZ is worked out in another task, as `bluez::watch_adapters`
+  re-reads the adapters.
+- A signal matched by `sender=org.bluez` can come from anyone the connection hears: zbus
+  cannot check a well-known sender, and the connection watch's rule names no sender at
+  all. A BlueZ signal counts only from the unique name the state was read from (the
+  `GetManagedObjects` reply's sender), and `NameOwnerChanged` only from
+  `org.freedesktop.DBus`. Applied as they came, an old bluetoothd's last `Powered`, or
+  any local process's, left a phantom adapter behind (#50).
+- Adapters are found, never assumed: `bluez::watch_adapters` reads them from
+  `GetManagedObjects` and follows them as they power off and on, come and go, and
+  bluetoothd restarts (#50). Discovery runs on every powered one, subscribed first, since
+  an address's first advertisement comes in the `InterfacesAdded` that announces it. Each
+  adapter has a provider root of its own per connection, named after the connection's
+  unique name and registered with that adapter's `BatteryProviderManager1`: bluetoothd
+  keys providers on the root alone, so two LinuxPods on one bus would otherwise share
+  one. A pair's battery goes to the provider its `Device1.Adapter` names: bluetoothd
+  ignores a battery whose device is on another adapter. With `/org/bluez/hci0`
+  hardcoded, a machine whose adapter was another heard nothing over BLE (#51).
+- What a client holds on BlueZ is BlueZ's to end: an adapter powering off ends its
+  discovery, one going drops its battery providers, and a bluetoothd restart drops both,
+  saying so only by `NameOwnerChanged`. `bluez::watch_adapters` turns that into
+  `AdapterSet` tokens, tied to the bluetoothd instance they were read from; consumers
+  start again when a token changes, never on a single signal, and take `InProgress` and
+  `AlreadyExists` as success, which is safe because both are keyed to this connection
+  (discovery per client, the provider root by its unique name). A restart's two owner
+  changes can each bring a re-read, and a second registration was refused and never
+  retried. Started once at startup, discovery went with the first power cycle and the
+  provider with the first restart, with nothing in the log (#50).
 
 ## Protocol
 
@@ -152,6 +174,10 @@ packet arrives; this deadlocked the Request Keys button.
   ones the coordinator later drops; `BLE decryptable:` reports identification. Noisy
   non-proximity Apple data goes to `trace`.
 - Log text describing control flow goes stale like comments, and is more visible.
+- Tasks on the system bus (`ble_task`, `attachment::run`) never return for good: they set
+  themselves up again with `bluez::Backoff`, which counts a run under a minute as a
+  failure, so a connection that dies at once is not retried in a loop. Each used to give
+  up at its first error, and the app stayed deaf until restarted (#50).
 - A harness build must behave like a plain one unless the fake world's environment asks
   otherwise (`LINUXPODS_AAP_SOCKET_DIR`, `LINUXPODS_HARNESS_AUTOMATION=1`, set only by
   `scripts/fake-world.sh`): `make test` and `make fake-world` leave it at
