@@ -19,8 +19,41 @@
 //!   battery GNOME Settings shows
 //!
 //! Nothing else of bluetoothd is here - no pairing, no `Device1.Connect`, no
-//! agent - since the app uses none of it. An adapter keeps the power it was
-//! added with, and stays.
+//! agent - since the app uses none of it.
+//!
+//! # Adapters coming and going
+//!
+//! What bluetoothd does to its clients when an adapter or bluetoothd itself
+//! goes, which the app has to recover from (#50):
+//!
+//! - [`FakeBluez::set_powered`] switches an adapter on or off, signalling
+//!   `Powered`. Off, it does what bluetoothd's `adapter_stop` does: every
+//!   client's discovery there ends, with `Discovering` signalled; the devices
+//!   it only heard advertising go; and its connected devices disconnect. Its
+//!   paired devices and the providers registered with it stay, as they do in
+//!   bluetoothd. Nothing connects to a device on an adapter that is off.
+//! - [`FakeBluez::add_adapter`] and [`FakeBluez::remove_adapter`] plug one in
+//!   and out at any time, with `InterfacesAdded` and `InterfacesRemoved`.
+//!   Removed, an adapter is first stopped as when it powers off, and takes
+//!   its devices, its providers and their batteries along. Its pairings are
+//!   kept, as bluetoothd keeps them on disk: plugged in again, it has its
+//!   paired devices back, disconnected.
+//! - [`FakeBluez::restart`] is bluetoothd restarting without powering its
+//!   adapters off, as after a crash: it forgets every client's discovery and
+//!   providers, and the devices it only heard advertising, lets go of
+//!   `org.bluez`, and takes it again on a connection of its own - a new
+//!   unique name, as a new bluetoothd has - so `NameOwnerChanged` says so
+//!   twice. The adapters and paired devices are back as they were,
+//!   connections and all. [`FakeBluez::stop`] and [`FakeBluez::start`] are
+//!   its two halves, for a test to do something in between; on a bus that
+//!   activates `org.bluez` ([`super::PrivateBus::activating`]), a call made
+//!   in between waits for the new one, as under systemd. A `systemctl
+//!   restart` powers the adapters off first, as `set_powered` does.
+//!
+//!   It is a crash, and a narrow one: only `NameOwnerChanged` tells, and
+//!   nothing is announced again. A real bluetoothd also announces every
+//!   object again with `InterfacesAdded`. A test passing on a restart proves
+//!   the `NameOwnerChanged` path only.
 //!
 //! # Advertisements
 //!
@@ -192,10 +225,12 @@ fn check_filter(filter: &HashMap<String, OwnedValue>) -> Result<(), String> {
     Ok(())
 }
 
-/// A fake `org.bluez` on one connection. Clones share it.
+/// A fake `org.bluez`. Clones share it.
 #[derive(Clone)]
 pub struct FakeBluez {
-    conn: Connection,
+    /// The connection it serves on: a new one, with a unique name of its
+    /// own, each time it restarts, as a new bluetoothd has.
+    conn: Arc<Mutex<Connection>>,
     state: Arc<Mutex<State>>,
     /// Held while a device's `Battery1` is brought in line with its battery,
     /// so two updates cannot interleave.
@@ -206,11 +241,23 @@ pub struct FakeBluez {
 struct State {
     /// The adapters' names, in the order they were added.
     adapters: Vec<String>,
-    /// Paired devices, with the adapter each is paired with.
-    paired: HashMap<Address, String>,
+    /// The adapters that are powered.
+    powered: HashSet<String>,
+    /// The address of every adapter ever added, by name: one plugged in
+    /// again is the same controller.
+    addresses: HashMap<String, Address>,
+    /// Paired devices, with the adapter each is paired with. Kept while the
+    /// adapter is out, as bluetoothd keeps pairings on disk.
+    paired: HashMap<Address, Pairing>,
     /// Random addresses heard advertising, with the adapter that heard each,
     /// and when it last did.
     advertisers: HashMap<(String, Address), Instant>,
+    /// The adapters whose BlueZ has no battery API: no
+    /// `BatteryProviderManager1` - see [`FakeBluez::drop_battery_api`].
+    no_battery_api: HashSet<String>,
+    /// The task that sees clients leave the bus, for the connection served
+    /// on now.
+    watcher: Option<AbortHandle>,
     /// The clients that have discovery on, by adapter.
     discovering: HashMap<String, HashSet<OwnedUniqueName>>,
     /// Registered providers, with the task reading each.
@@ -220,6 +267,12 @@ struct State {
     /// Every battery a manager ignored, once, in the order it did: its
     /// adapter, and the `Device` the battery named.
     ignored: Vec<(String, OwnedObjectPath)>,
+}
+
+/// A paired device's pairing: the adapter it is with, and its name.
+struct Pairing {
+    adapter: String,
+    alias: String,
 }
 
 /// A battery provider: the adapter whose manager took it, who registered it,
@@ -252,21 +305,75 @@ impl State {
             .is_some_and(|clients| !clients.is_empty())
     }
 
-    /// The path of a paired device.
+    /// The path of a paired device whose adapter is here.
     fn paired_path(&self, address: Address) -> Result<OwnedObjectPath> {
-        let adapter = self
+        let pairing = self
             .paired
             .get(&address)
             .with_context(|| format!("no paired device {address}"))?;
-        Ok(device_path(adapter, address))
+        anyhow::ensure!(
+            self.has_adapter(&pairing.adapter),
+            "{address} is paired with {}, which is gone",
+            pairing.adapter
+        );
+        Ok(device_path(&pairing.adapter, address))
     }
 
     /// The address of the device at `path`, if it is a paired device on
     /// `adapter`.
     fn paired_on(&self, adapter: &str, path: &str) -> Option<Address> {
         let (on, address) = device_of(path)?;
-        let paired_with = self.paired.get(&address)?;
-        (on == adapter && paired_with == adapter).then_some(address)
+        let pairing = self.paired.get(&address)?;
+        (on == adapter && pairing.adapter == adapter).then_some(address)
+    }
+
+    /// The devices paired with the adapter called `adapter`.
+    fn paired_with(&self, adapter: &str) -> Vec<Address> {
+        self.paired
+            .iter()
+            .filter(|(_, pairing)| pairing.adapter == adapter)
+            .map(|(address, _)| *address)
+            .collect()
+    }
+
+    /// Forgets every client's discovery on the adapters `adapter` picks,
+    /// returning the adapters that were discovering.
+    fn end_discovery(&mut self, adapter: impl Fn(&str) -> bool) -> Vec<String> {
+        let ended: Vec<String> = self
+            .discovering
+            .iter()
+            .filter(|(name, clients)| adapter(name) && !clients.is_empty())
+            .map(|(name, _)| name.clone())
+            .collect();
+        self.discovering.retain(|name, _| !adapter(name));
+        ended
+    }
+
+    /// Forgets the devices the adapters `adapter` picks only heard
+    /// advertising, returning their paths.
+    fn forget_advertisers(&mut self, adapter: impl Fn(&str) -> bool) -> Vec<OwnedObjectPath> {
+        let heard: Vec<OwnedObjectPath> = self
+            .advertisers
+            .keys()
+            .filter(|(heard_by, _)| adapter(heard_by))
+            .map(|(heard_by, address)| device_path(heard_by, *address))
+            .collect();
+        self.advertisers
+            .retain(|(heard_by, _), _| !adapter(heard_by));
+        heard
+    }
+
+    /// Forgets the providers `provider` picks, and their batteries, returning
+    /// the batteries' device paths.
+    fn forget_providers(&mut self, provider: impl Fn(&Provider) -> bool) -> Vec<OwnedObjectPath> {
+        self.providers.retain(|p, task| {
+            let gone = provider(p);
+            if gone {
+                task.abort();
+            }
+            !gone
+        });
+        self.take_batteries(provider)
     }
 
     /// Removes the batteries of the providers `provider` picks, returning
@@ -292,20 +399,27 @@ impl FakeBluez {
     /// place before the app can find any of it.
     pub async fn serve(conn: Connection) -> Result<Self> {
         let bluez = Self {
-            conn: conn.clone(),
+            conn: Arc::new(Mutex::new(conn.clone())),
             state: Arc::default(),
             exports: Arc::default(),
         };
+        bluez.serve_on(&conn).await?;
+        Ok(bluez)
+    }
+
+    /// What every connection it serves on has: the ObjectManager at `/`,
+    /// and a watch on clients leaving the bus.
+    async fn serve_on(&self, conn: &Connection) -> Result<()> {
         conn.object_server()
             .at("/", zbus::fdo::ObjectManager)
             .await?;
 
         // bluetoothd forgets a client's discovery and providers when it
         // leaves the bus.
-        let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
+        let dbus = zbus::fdo::DBusProxy::new(conn).await?;
         let mut owners = dbus.receive_name_owner_changed().await?;
-        let watcher = bluez.clone();
-        tokio::spawn(async move {
+        let watcher = self.clone();
+        let task = tokio::spawn(async move {
             while let Some(signal) = owners.next().await {
                 let Ok(args) = signal.args() else { continue };
                 if let BusName::Unique(name) = args.name()
@@ -315,56 +429,318 @@ impl FakeBluez {
                 }
             }
         });
-        Ok(bluez)
+        if let Some(old) = self.state().watcher.replace(task.abort_handle()) {
+            old.abort();
+        }
+        Ok(())
+    }
+
+    /// Serves an adapter's objects on `conn`: its manager, unless its BlueZ
+    /// has no battery API, then `Adapter1`.
+    async fn export_adapter(&self, conn: &Connection, name: &str, address: Address) -> Result<()> {
+        let server = conn.object_server();
+        let path = adapter_object(name);
+        // The manager ahead of the adapter, which is what a client waits for:
+        // one that registers a provider as soon as the adapter is announced
+        // finds the manager there. bluetoothd announces both at once.
+        if !self.state().no_battery_api.contains(name) {
+            let manager = BatteryProviderManager1 {
+                bluez: self.clone(),
+                adapter: name.to_string(),
+            };
+            server.at(&path, manager).await?;
+        }
+        let adapter = Adapter1 {
+            bluez: self.clone(),
+            name: name.to_string(),
+            address,
+        };
+        server.at(&path, adapter).await?;
+        Ok(())
+    }
+
+    /// Takes the battery API away from the adapter called `name`, as a BlueZ
+    /// built or run without it has none: no `BatteryProviderManager1`, so
+    /// registering a provider fails as the method is unknown. Before the
+    /// app starts, as such a BlueZ never had one.
+    pub async fn drop_battery_api(&self, name: &str) -> Result<()> {
+        anyhow::ensure!(self.state().has_adapter(name), "there is no adapter {name}");
+        self.state().no_battery_api.insert(name.to_string());
+        self.conn()
+            .object_server()
+            .remove::<BatteryProviderManager1, _>(adapter_object(name))
+            .await?;
+        Ok(())
     }
 
     /// Adds an adapter at `/org/bluez/<name>`, as bluetoothd adds one for each
     /// controller it finds: `Adapter1`, powered or not, and a
     /// `BatteryProviderManager1` of its own. bluetoothd names them `hci0`,
     /// `hci1` and on; any name that makes one path element will do.
+    ///
+    /// Signalled with `InterfacesAdded` once the name is taken, as a USB
+    /// dongle plugged in is. One that was here before is the same controller,
+    /// and has the devices paired with it back, disconnected.
     pub async fn add_adapter(&self, name: &str, powered: bool) -> Result<()> {
         anyhow::ensure!(is_adapter_name(name), "{name:?} cannot name an adapter");
-        let address = {
+        let (address, paired) = {
             let mut state = self.state();
             anyhow::ensure!(
                 !state.has_adapter(name),
                 "there is an adapter {name} already"
             );
-            let address = adapter_address(state.adapters.len()).context("too many adapters")?;
+            let address = match state.addresses.get(name) {
+                Some(&address) => address,
+                None => {
+                    let address =
+                        adapter_address(state.addresses.len()).context("too many adapters")?;
+                    state.addresses.insert(name.to_string(), address);
+                    address
+                }
+            };
             state.adapters.push(name.to_string());
-            address
+            if powered {
+                state.powered.insert(name.to_string());
+            }
+            let paired: Vec<(Address, String)> = state
+                .paired
+                .iter()
+                .filter(|(_, pairing)| pairing.adapter == name)
+                .map(|(address, pairing)| (*address, pairing.alias.clone()))
+                .collect();
+            (address, paired)
         };
-        let server = self.conn.object_server();
-        let path = adapter_object(name);
-        let adapter = Adapter1 {
-            bluez: self.clone(),
-            name: name.to_string(),
-            address,
-            powered,
-        };
-        server.at(&path, adapter).await?;
-        let manager = BatteryProviderManager1 {
-            bluez: self.clone(),
-            adapter: name.to_string(),
-        };
-        server.at(&path, manager).await?;
+        self.export_adapter(&self.conn(), name, address).await?;
+        // Loaded from its storage once it is there, as bluetoothd does.
+        for (address, alias) in paired {
+            self.export_paired(name, address, alias).await?;
+        }
         Ok(())
+    }
+
+    /// Unplugs the adapter called `name`: it stops as when it powers off, and
+    /// its devices, its providers and their batteries go with it, then the
+    /// adapter itself, each with `InterfacesRemoved`. Its pairings are kept
+    /// for when it is plugged in again.
+    pub async fn remove_adapter(&self, name: &str) -> Result<()> {
+        anyhow::ensure!(self.state().has_adapter(name), "there is no adapter {name}");
+        self.stop_adapter(name).await;
+        let (batteries, paired) = {
+            let mut state = self.state();
+            state.adapters.retain(|a| a != name);
+            state.powered.remove(name);
+            let batteries = state.forget_providers(|p| p.adapter == name);
+            (batteries, state.paired_with(name))
+        };
+        for device in batteries {
+            self.sync_battery(&device).await;
+        }
+        let conn = self.conn();
+        let server = conn.object_server();
+        for address in paired {
+            server
+                .remove::<PairedDevice, _>(device_path(name, address))
+                .await?;
+        }
+        let path = adapter_object(name);
+        server.remove::<Adapter1, _>(&path).await?;
+        // Not there when its BlueZ has no battery API.
+        let _ = server.remove::<BatteryProviderManager1, _>(&path).await;
+        Ok(())
+    }
+
+    /// Powers the adapter called `name` on or off, signalling `Powered`;
+    /// setting what is already set signals nothing. Off, it stops as
+    /// bluetoothd's `adapter_stop` does - see the module docs.
+    pub async fn set_powered(&self, name: &str, powered: bool) -> Result<()> {
+        let changed = {
+            let mut state = self.state();
+            anyhow::ensure!(state.has_adapter(name), "there is no adapter {name}");
+            if powered {
+                state.powered.insert(name.to_string())
+            } else {
+                state.powered.remove(name)
+            }
+        };
+        if !changed {
+            return Ok(());
+        }
+        let iface = self
+            .conn()
+            .object_server()
+            .interface::<_, Adapter1>(adapter_path(name))
+            .await?;
+        iface
+            .get()
+            .await
+            .powered_changed(iface.signal_emitter())
+            .await?;
+        // After `Powered`, as bluetoothd signals it before it stops.
+        if !powered {
+            self.stop_adapter(name).await;
+        }
+        Ok(())
+    }
+
+    /// What bluetoothd's `adapter_stop` does to an adapter's clients: their
+    /// discovery there ends, the devices it only heard advertising go, and its
+    /// connected devices disconnect, each signalled.
+    async fn stop_adapter(&self, name: &str) {
+        let (ended, heard, paired) = {
+            let mut state = self.state();
+            let ended = state.end_discovery(|adapter| adapter == name);
+            let heard = state.forget_advertisers(|adapter| adapter == name);
+            (ended, heard, state.paired_with(name))
+        };
+        let conn = self.conn();
+        let server = conn.object_server();
+        for path in heard {
+            let _ = server.remove::<Advertiser, _>(&path).await;
+        }
+        for address in paired {
+            if let Err(e) = self.signal_connected(name, address, false).await {
+                tracing::warn!("fake BlueZ: failed to disconnect {address}: {e:#}");
+            }
+        }
+        for adapter in ended {
+            let _ = self.signal_discovering(&adapter).await;
+        }
+    }
+
+    /// bluetoothd restarting without powering its adapters off, as after a
+    /// crash - see the module docs: [`FakeBluez::stop`], then
+    /// [`FakeBluez::start`] on `conn`, a connection of its own. Back from
+    /// here, `org.bluez` is taken again, under a new unique name.
+    pub async fn restart(&self, conn: Connection) -> Result<()> {
+        self.stop().await?;
+        self.start(conn).await
+    }
+
+    /// bluetoothd going, as it does when it crashes: every client's
+    /// discovery and providers, and the devices only heard advertising, are
+    /// forgotten, and `org.bluez` let go of. Until [`FakeBluez::start`], a
+    /// call to `org.bluez` finds no one - or, on a bus that activates it,
+    /// waits for the new one.
+    pub async fn stop(&self) -> Result<()> {
+        let (heard, batteries) = {
+            let mut state = self.state();
+            state.end_discovery(|_| true);
+            let heard = state.forget_advertisers(|_| true);
+            (heard, state.forget_providers(|_| true))
+        };
+        // The objects it made for its clients go with it, before the name.
+        for device in batteries {
+            self.sync_battery(&device).await;
+        }
+        let conn = self.conn();
+        let server = conn.object_server();
+        for path in heard {
+            let _ = server.remove::<Advertiser, _>(&path).await;
+        }
+        conn.release_name(BLUEZ_SERVICE)
+            .await
+            .context("failed to let go of org.bluez")?;
+        Ok(())
+    }
+
+    /// The new bluetoothd, on `conn`, which has a unique name of its own:
+    /// the adapters and paired devices as the old one left them, connections
+    /// and all, none discovering. All of it is in place before the name is
+    /// taken, so nothing is announced to whoever listens to `org.bluez`.
+    pub async fn start(&self, conn: Connection) -> Result<()> {
+        let old = self.conn();
+        let (adapters, paired) = {
+            let state = self.state();
+            let adapters: Vec<(String, Address)> = state
+                .adapters
+                .iter()
+                .filter_map(|name| Some((name.clone(), *state.addresses.get(name)?)))
+                .collect();
+            let paired: Vec<(String, Address)> = state
+                .paired
+                .iter()
+                .filter(|(_, pairing)| state.has_adapter(&pairing.adapter))
+                .map(|(address, pairing)| (pairing.adapter.clone(), *address))
+                .collect();
+            (adapters, paired)
+        };
+        // As the old one left them.
+        let mut devices = Vec::new();
+        for (adapter, address) in paired {
+            let path = device_path(&adapter, address);
+            let iface = old
+                .object_server()
+                .interface::<_, PairedDevice>(&path)
+                .await?;
+            let device = iface.get().await;
+            devices.push((
+                path,
+                PairedDevice {
+                    address,
+                    adapter: device.adapter.clone(),
+                    alias: device.alias.clone(),
+                    connected: device.connected,
+                    airpods_service: device.airpods_service,
+                },
+            ));
+        }
+        self.serve_on(&conn).await?;
+        for (name, address) in adapters {
+            self.export_adapter(&conn, &name, address).await?;
+        }
+        for (path, device) in devices {
+            conn.object_server().at(path, device).await?;
+        }
+        *self.conn.lock().unwrap_or_else(PoisonError::into_inner) = conn;
+        self.publish().await
     }
 
     /// Takes the name `org.bluez`, under which the app looks for BlueZ.
     pub async fn publish(&self) -> Result<()> {
-        self.conn
+        self.conn()
             .request_name(BLUEZ_SERVICE)
             .await
             .context("failed to take org.bluez")
     }
 
-    pub fn connection(&self) -> &Connection {
-        &self.conn
+    /// The connection it serves on now: a new one after each restart.
+    pub fn connection(&self) -> Connection {
+        self.conn()
+    }
+
+    fn conn(&self) -> Connection {
+        self.conn
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The adapters' names, in the order they were added.
+    pub fn adapters(&self) -> Vec<String> {
+        self.state().adapters.clone()
+    }
+
+    /// Whether the adapter called `adapter` is here and powered.
+    pub fn is_powered(&self, adapter: &str) -> bool {
+        self.state().powered.contains(adapter)
+    }
+
+    /// The devices paired with the adapter called `adapter`, here or not.
+    pub fn paired_with(&self, adapter: &str) -> Vec<Address> {
+        self.state().paired_with(adapter)
+    }
+
+    /// Whether a paired device can connect: its adapter is here and powered.
+    pub fn can_connect(&self, address: Address) -> bool {
+        let state = self.state();
+        state
+            .paired
+            .get(&address)
+            .is_some_and(|pairing| state.powered.contains(&pairing.adapter))
     }
 
     /// Adds a device paired with the adapter called `adapter`, disconnected.
@@ -376,16 +752,26 @@ impl FakeBluez {
                 !state.paired.contains_key(&address),
                 "{address} is paired already"
             );
-            state.paired.insert(address, adapter.to_string());
+            let pairing = Pairing {
+                adapter: adapter.to_string(),
+                alias: alias.to_string(),
+            };
+            state.paired.insert(address, pairing);
         }
+        self.export_paired(adapter, address, alias.to_string())
+            .await
+    }
+
+    /// Puts a paired device's object under its adapter, disconnected.
+    async fn export_paired(&self, adapter: &str, address: Address, alias: String) -> Result<()> {
         let device = PairedDevice {
             address,
             adapter: adapter_object(adapter),
-            alias: alias.to_string(),
+            alias,
             connected: false,
             airpods_service: true,
         };
-        self.conn
+        self.conn()
             .object_server()
             .at(device_path(adapter, address), device)
             .await?;
@@ -394,12 +780,37 @@ impl FakeBluez {
 
     /// Connects or disconnects a paired device. A change is signalled, as
     /// bluetoothd signals it; setting what is already set signals nothing.
+    /// Nothing connects on an adapter that is off.
     pub async fn set_connected(&self, address: Address, connected: bool) -> Result<()> {
-        let path = self.state().paired_path(address)?;
+        let path = {
+            let state = self.state();
+            let path = state.paired_path(address)?;
+            anyhow::ensure!(
+                !connected
+                    || state
+                        .paired
+                        .get(&address)
+                        .is_some_and(|pairing| state.powered.contains(&pairing.adapter)),
+                "{address} cannot connect: its adapter is off"
+            );
+            path
+        };
+        let (adapter, _) = device_of(path.as_str()).context("a paired device's path")?;
+        self.signal_connected(adapter, address, connected).await
+    }
+
+    /// Sets a paired device's `Connected` on the adapter called `adapter`,
+    /// signalling a change.
+    async fn signal_connected(
+        &self,
+        adapter: &str,
+        address: Address,
+        connected: bool,
+    ) -> Result<()> {
         let iface = self
-            .conn
+            .conn()
             .object_server()
-            .interface::<_, PairedDevice>(path)
+            .interface::<_, PairedDevice>(device_path(adapter, address))
             .await
             .with_context(|| format!("no paired device {address}"))?;
         let mut device = iface.get_mut().await;
@@ -418,7 +829,7 @@ impl FakeBluez {
     pub async fn set_airpods_service(&self, address: Address, listed: bool) -> Result<()> {
         let path = self.state().paired_path(address)?;
         let iface = self
-            .conn
+            .conn()
             .object_server()
             .interface::<_, PairedDevice>(path)
             .await
@@ -487,7 +898,8 @@ impl FakeBluez {
         heard_before: bool,
     ) -> Result<()> {
         let path = device_path(adapter, address);
-        let server = self.conn.object_server();
+        let conn = self.conn();
+        let server = conn.object_server();
         let advertiser = || Advertiser {
             address,
             adapter: adapter_object(adapter),
@@ -540,7 +952,8 @@ impl FakeBluez {
             }
             stale
         };
-        let server = self.conn.object_server();
+        let conn = self.conn();
+        let server = conn.object_server();
         for (adapter, address) in stale {
             let _ = server
                 .remove::<Advertiser, _>(device_path(&adapter, address))
@@ -573,6 +986,16 @@ impl FakeBluez {
     /// manager's adapter, and the `Device` the battery named.
     pub fn ignored_batteries(&self) -> Vec<(String, OwnedObjectPath)> {
         self.state().ignored.clone()
+    }
+
+    /// How many providers are registered with the manager of the adapter
+    /// called `adapter`.
+    pub fn providers_on(&self, adapter: &str) -> usize {
+        self.state()
+            .providers
+            .keys()
+            .filter(|provider| provider.adapter == adapter)
+            .count()
     }
 
     fn register_provider(&self, provider: Provider) -> Result<(), BluezError> {
@@ -616,14 +1039,7 @@ impl FakeBluez {
                     stopped.push(adapter.clone());
                 }
             }
-            state.providers.retain(|provider, task| {
-                let gone = provider.owner == name;
-                if gone {
-                    task.abort();
-                }
-                !gone
-            });
-            (stopped, state.take_batteries(|p| p.owner == name))
+            (stopped, state.forget_providers(|p| p.owner == name))
         };
         for adapter in stopped {
             let _ = self.signal_discovering(&adapter).await;
@@ -636,7 +1052,7 @@ impl FakeBluez {
     /// Signals an adapter's `Discovering` from outside an `Adapter1` method.
     async fn signal_discovering(&self, adapter: &str) -> zbus::Result<()> {
         let iface = self
-            .conn
+            .conn()
             .object_server()
             .interface::<_, Adapter1>(adapter_path(adapter))
             .await?;
@@ -661,7 +1077,7 @@ impl FakeBluez {
 
     async fn try_read_provider(&self, provider: &Provider) -> zbus::Result<()> {
         let Provider { owner, root, .. } = provider;
-        let manager = zbus::fdo::ObjectManagerProxy::builder(&self.conn)
+        let manager = zbus::fdo::ObjectManagerProxy::builder(&self.conn())
             .destination(owner.as_ref())?
             .path(root.as_ref())?
             .build()
@@ -676,7 +1092,7 @@ impl FakeBluez {
             .member("PropertiesChanged")?
             .path_namespace(root.as_ref())?
             .build();
-        let mut changed = MessageStream::for_match_rule(rule, &self.conn, None).await?;
+        let mut changed = MessageStream::for_match_rule(rule, &self.conn(), None).await?;
 
         for (object, interfaces) in manager.get_managed_objects().await? {
             let props = interfaces
@@ -823,7 +1239,8 @@ impl FakeBluez {
             .batteries
             .get(device)
             .and_then(|b| Some((b.percentage?, b.source.clone())));
-        let server = self.conn.object_server();
+        let conn = self.conn();
+        let server = conn.object_server();
         let current = server.interface::<_, Battery1>(device).await.ok();
         let result = match (wanted, current) {
             (Some((percentage, _)), Some(iface)) => {
@@ -880,13 +1297,12 @@ struct Adapter1 {
     bluez: FakeBluez,
     name: String,
     address: Address,
-    powered: bool,
 }
 
 impl Adapter1 {
     /// bluetoothd refuses discovery calls on an adapter that is off.
     fn ready(&self) -> Result<(), BluezError> {
-        if self.powered {
+        if self.powered() {
             Ok(())
         } else {
             Err(BluezError::NotReady("Resource Not Ready".into()))
@@ -968,7 +1384,7 @@ impl Adapter1 {
 
     #[zbus(property)]
     fn powered(&self) -> bool {
-        self.powered
+        self.bluez.is_powered(&self.name)
     }
 
     #[zbus(property)]
@@ -1813,6 +2229,305 @@ mod tests {
 
         drop(provider);
         eventually(|| bluez.batteries().is_empty()).await;
+    }
+
+    /// Powered off, an adapter stops as bluetoothd's does: discovery there
+    /// ends, what it only heard advertising goes, its connected devices
+    /// disconnect, and nothing connects until it is on again. Its pairings and
+    /// providers stay. Each change is signalled.
+    #[tokio::test]
+    async fn powering_off_stops_the_adapter() {
+        let (bus, bluez) = served().await;
+        let conn = bus.connect().await.unwrap();
+        let devices = Devices::new(conn.clone());
+        let events = devices.watch_connections().await.unwrap();
+        tokio::pin!(events);
+        let path = adapter_path(ADAPTER);
+        let adapter = proxy(&conn, &path, "org.bluez.Adapter1").await;
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface("org.freedesktop.DBus.Properties")
+            .unwrap()
+            .member("PropertiesChanged")
+            .unwrap()
+            .path(path.as_str())
+            .unwrap()
+            .build();
+        let powered = MessageStream::for_match_rule(rule, &conn, None)
+            .await
+            .unwrap()
+            .filter_map(|msg| async move {
+                let (_, changed, _) = msg
+                    .ok()?
+                    .body()
+                    .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                    .ok()?;
+                bool::try_from(changed.get("Powered")?.clone()).ok()
+            });
+        tokio::pin!(powered);
+        let _provider = BatteryProvider::register(conn.clone(), &path)
+            .await
+            .unwrap();
+        Scanner::with_connection(conn.clone())
+            .start_discovery()
+            .await
+            .unwrap();
+        assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
+        bluez.set_connected(PAIR, true).await.unwrap();
+
+        bluez.set_powered(ADAPTER, false).await.unwrap();
+        bluez.set_powered(ADAPTER, false).await.unwrap();
+        assert!(!adapter.get_property::<bool>("Powered").await.unwrap());
+        assert!(!bluez.is_discovering(ADAPTER));
+        assert!(!adapter.get_property::<bool>("Discovering").await.unwrap());
+        assert!(bluez.advertisers_on(ADAPTER).is_empty());
+        assert!(
+            !devices
+                .device_connected(device_path(ADAPTER, RANDOM).as_str())
+                .await
+        );
+        let pair = device_path(ADAPTER, PAIR).to_string();
+        assert!(!devices.device_connected(&pair).await);
+        assert!(bluez.set_connected(PAIR, true).await.is_err(), "while off");
+        assert!(!bluez.can_connect(PAIR));
+        for connected in [true, false] {
+            let event = timeout(TIMEOUT, events.next()).await.unwrap().unwrap();
+            assert_eq!(
+                (event.device_path.as_str(), event.connected),
+                (pair.as_str(), Some(connected))
+            );
+        }
+        assert_eq!(bluez.providers_on(ADAPTER), 1, "kept while off");
+
+        bluez.set_powered(ADAPTER, true).await.unwrap();
+        assert!(adapter.get_property::<bool>("Powered").await.unwrap());
+        assert!(!bluez.is_discovering(ADAPTER), "not by itself");
+        assert!(!devices.device_connected(&pair).await, "not by itself");
+        bluez.set_connected(PAIR, true).await.unwrap();
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            seen.push(timeout(TIMEOUT, powered.next()).await.unwrap().unwrap());
+        }
+        assert_eq!(seen, [false, true], "each change once");
+        assert!(bluez.set_powered("hci9", true).await.is_err(), "no adapter");
+    }
+
+    /// An adapter is plugged in and out at any time, each signalled. Out, it
+    /// takes its devices, providers and batteries along and leaves the other
+    /// adapter alone; in again, it is the same controller, with its pairs back,
+    /// disconnected.
+    #[tokio::test]
+    async fn adapters_are_plugged_in_and_out() {
+        let (bus, bluez) = served().await;
+        let conn = bus.connect().await.unwrap();
+        let om = zbus::fdo::ObjectManagerProxy::builder(&conn)
+            .destination(BLUEZ_SERVICE)
+            .unwrap()
+            .path("/")
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let mut added = om.receive_interfaces_added().await.unwrap();
+        let mut removed = om.receive_interfaces_removed().await.unwrap();
+
+        bluez.add_adapter(SECOND, true).await.unwrap();
+        let second = adapter_path(SECOND);
+        // The manager comes ahead of the adapter.
+        let mut announced = Vec::new();
+        while !announced.iter().any(|i| i == "org.bluez.Adapter1") {
+            let signal = timeout(TIMEOUT, added.next()).await.unwrap().unwrap();
+            let args = signal.args().unwrap();
+            assert_eq!(args.object_path().as_str(), second);
+            announced.extend(
+                args.interfaces_and_properties()
+                    .keys()
+                    .map(|i| i.to_string()),
+            );
+        }
+        assert_eq!(
+            announced,
+            ["org.bluez.BatteryProviderManager1", "org.bluez.Adapter1"]
+        );
+        let address = proxy(&conn, &second, "org.bluez.Adapter1")
+            .await
+            .get_property::<String>("Address")
+            .await
+            .unwrap();
+        bluez.add_device(SECOND, OTHER, ALIAS).await.unwrap();
+        bluez.set_connected(OTHER, true).await.unwrap();
+        let mut provider = BatteryProvider::register(conn.clone(), &second)
+            .await
+            .unwrap();
+        let first = BatteryProvider::register(conn.clone(), &adapter_path(ADAPTER))
+            .await
+            .unwrap();
+        let add = |mac, adapter| BatteryAction::Add {
+            mac,
+            device_path: device_path(adapter, mac).to_string(),
+            percentage: 40,
+        };
+        provider.apply(&add(OTHER, SECOND)).await.unwrap();
+        let mut first = first;
+        first.apply(&add(PAIR, ADAPTER)).await.unwrap();
+        eventually(|| bluez.batteries().len() == 2).await;
+
+        bluez.remove_adapter(SECOND).await.unwrap();
+        let found = bluez::adapters(&conn).await.unwrap();
+        assert_eq!(
+            found.iter().map(|a| a.path.as_str()).collect::<Vec<_>>(),
+            [adapter_path(ADAPTER)]
+        );
+        assert_eq!(bluez.providers_on(SECOND), 0);
+        assert_eq!(
+            bluez.batteries(),
+            HashMap::from([(PAIR, 40)]),
+            "the other's stays"
+        );
+        let devices = Devices::new(conn.clone());
+        assert!(
+            devices
+                .device_address_and_adapter(device_path(SECOND, OTHER).as_str())
+                .await
+                .is_err()
+        );
+        assert!(
+            bluez.set_connected(OTHER, true).await.is_err(),
+            "gone with it"
+        );
+        let mut gone = Vec::new();
+        while !gone.iter().any(|i| i == "org.bluez.Adapter1") {
+            let signal = timeout(TIMEOUT, removed.next()).await.unwrap().unwrap();
+            let args = signal.args().unwrap();
+            if args.object_path().as_str() == second {
+                gone.extend(args.interfaces().iter().map(|i| i.to_string()));
+            }
+        }
+        assert!(bluez.remove_adapter(SECOND).await.is_err(), "out already");
+
+        bluez.add_adapter(SECOND, false).await.unwrap();
+        let again = proxy(&conn, &second, "org.bluez.Adapter1").await;
+        assert_eq!(
+            again.get_property::<String>("Address").await.unwrap(),
+            address
+        );
+        let other = device_path(SECOND, OTHER).to_string();
+        assert_eq!(
+            devices.device_address_and_adapter(&other).await.unwrap().0,
+            OTHER
+        );
+        assert!(!devices.device_connected(&other).await);
+        assert_eq!(devices.device_alias(&other).await, ALIAS);
+    }
+
+    /// Restarted, the fake BlueZ lets go of its name and takes it again, and
+    /// forgets its clients' discovery and providers, and what it only heard
+    /// advertising. The adapters and connections are as they were.
+    #[tokio::test]
+    async fn a_restart_forgets_every_client() {
+        let (bus, bluez) = served().await;
+        let conn = bus.connect().await.unwrap();
+        let dbus = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
+        let mut owners = dbus
+            .receive_name_owner_changed_with_args(&[(0, BLUEZ_SERVICE)])
+            .await
+            .unwrap();
+        let mut provider = BatteryProvider::register(conn.clone(), &adapter_path(ADAPTER))
+            .await
+            .unwrap();
+        Scanner::with_connection(conn.clone())
+            .start_discovery()
+            .await
+            .unwrap();
+        assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
+        bluez.set_connected(PAIR, true).await.unwrap();
+        let add = BatteryAction::Add {
+            mac: PAIR,
+            device_path: device_path(ADAPTER, PAIR).to_string(),
+            percentage: 73,
+        };
+        provider.apply(&add).await.unwrap();
+        eventually(|| !bluez.batteries().is_empty()).await;
+
+        let old = bluez.connection().unique_name().unwrap().to_string();
+        bluez.restart(bus.connect().await.unwrap()).await.unwrap();
+        let new = bluez.connection().unique_name().unwrap().to_string();
+        assert_ne!(new, old, "the same bluetoothd");
+        for (from, to) in [(Some(&old), None), (None, Some(&new))] {
+            let signal = timeout(TIMEOUT, owners.next()).await.unwrap().unwrap();
+            let args = signal.args().unwrap();
+            let named =
+                |name: &Option<zbus::names::UniqueName<'_>>| name.as_ref().map(|n| n.to_string());
+            assert_eq!(named(args.old_owner()).as_ref(), from);
+            assert_eq!(named(args.new_owner()).as_ref(), to);
+        }
+        assert!(!bluez.is_discovering(ADAPTER));
+        assert!(bluez.advertisers_on(ADAPTER).is_empty());
+        assert_eq!(bluez.providers_on(ADAPTER), 0);
+        assert!(bluez.batteries().is_empty());
+        let devices = Devices::new(conn.clone());
+        assert!(
+            devices
+                .device_connected(device_path(ADAPTER, PAIR).as_str())
+                .await
+        );
+        assert!(bluez.is_powered(ADAPTER));
+        assert!(
+            !bluez.advertise(RANDOM, &[0x07]).await.unwrap(),
+            "nobody discovers"
+        );
+        assert_eq!(
+            devices
+                .device_alias(device_path(ADAPTER, PAIR).as_str())
+                .await,
+            ALIAS
+        );
+        // Back from `register` either way; only the new one holding it says
+        // it registered anew.
+        BatteryProvider::register(conn, &adapter_path(ADAPTER))
+            .await
+            .unwrap();
+        assert_eq!(
+            bluez.providers_on(ADAPTER),
+            1,
+            "registered with the new one"
+        );
+    }
+
+    /// On a bus that activates `org.bluez`, as systemd's does, a call made
+    /// while the fake BlueZ is away waits for the new one, and is answered by
+    /// it: the old one is never asked.
+    #[tokio::test]
+    async fn a_call_while_away_waits_for_the_new_one_where_bluez_is_activated() {
+        let bus = PrivateBus::activating(BLUEZ_SERVICE).unwrap();
+        let bluez = FakeBluez::serve(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        bluez.add_adapter(ADAPTER, true).await.unwrap();
+        bluez.publish().await.unwrap();
+        assert_eq!(bus.activations(), 0, "owned already");
+
+        bluez.stop().await.unwrap();
+        let client = bus.connect().await.unwrap();
+        let asked = tokio::spawn(async move { bluez::adapters(&client).await });
+        eventually(|| bus.activations() == 1).await;
+        assert!(!asked.is_finished(), "answered while away");
+        bluez.start(bus.connect().await.unwrap()).await.unwrap();
+        let adapters = timeout(TIMEOUT, asked).await.unwrap().unwrap().unwrap();
+        assert_eq!(adapters.len(), 1);
+    }
+
+    /// Without the battery API there is no manager: registering fails as the
+    /// method is unknown, and the adapter is there all the same.
+    #[tokio::test]
+    async fn an_adapter_can_lack_the_battery_api() {
+        let (bus, bluez) = served().await;
+        bluez.drop_battery_api(ADAPTER).await.unwrap();
+        let conn = bus.connect().await.unwrap();
+        let refused = BatteryProvider::register(conn.clone(), &adapter_path(ADAPTER)).await;
+        assert!(refused.is_err());
+        assert_eq!(bluez::adapters(&conn).await.unwrap().len(), 1);
+        bluez.remove_adapter(ADAPTER).await.unwrap();
     }
 
     /// A root registers once with a manager, whoever registers it, and only

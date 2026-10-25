@@ -28,13 +28,21 @@ pub use world::World;
 /// directory, so nothing is ever activated on it - no portal, dconf or
 /// accessibility bus. `scripts/fake-world.sh` writes the same.
 pub fn bus_config(dir: &std::path::Path) -> String {
+    bus_config_with(dir, None)
+}
+
+/// [`bus_config`], activating what `services` has service files for.
+fn bus_config_with(dir: &std::path::Path, services: Option<&std::path::Path>) -> String {
+    let servicedir = services
+        .map(|s| format!("  <servicedir>{}</servicedir>\n", s.display()))
+        .unwrap_or_default();
     format!(
         r#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
 <busconfig>
   <type>session</type>
   <listen>unix:dir={}</listen>
-  <policy context="default">
+{servicedir}  <policy context="default">
     <allow send_destination="*" eavesdrop="true"/>
     <allow eavesdrop="true"/>
     <allow own="*"/>
@@ -45,9 +53,17 @@ pub fn bus_config(dir: &std::path::Path) -> String {
     )
 }
 
+/// Where an activating bus records each time it was asked, in its directory:
+/// the pid of what it started, a line each - see [`PrivateBus::activating`].
+const ACTIVATIONS: &str = "activations";
+
+/// The variable that tells what an activating bus starts where to record it,
+/// so that the path stays out of the service file's `Exec` and its quoting.
+const ACTIVATIONS_VAR: &str = "LINUXPODS_BUS_ACTIVATIONS";
+
 /// A `dbus-daemon` of its own, for a test to run the fake world and the app's
 /// D-Bus code on, out of reach of the real system and session buses. Stopped
-/// when dropped.
+/// when dropped, with whatever it activated.
 ///
 /// Its socket goes in a new directory under the temporary directory: a Unix
 /// socket path longer than 108 bytes cannot be bound, so a long `TMPDIR` breaks
@@ -61,16 +77,56 @@ pub struct PrivateBus {
 impl PrivateBus {
     /// Starts the daemon and waits until it listens.
     pub fn start() -> Result<Self> {
+        Self::start_with(None)
+    }
+
+    /// [`PrivateBus::start`], on a bus that activates `name`, as systemd has
+    /// bluetoothd activated: a call to `name` while nobody owns it waits until
+    /// somebody takes it, as it would while systemd starts the service.
+    /// Nothing is started for it: what the bus runs only records that it was
+    /// asked - see [`PrivateBus::activations`] - and waits, while the test
+    /// takes the name itself.
+    pub fn activating(name: &str) -> Result<Self> {
+        Self::start_with(Some(name))
+    }
+
+    /// How many times the bus was asked to start the name it activates.
+    pub fn activations(&self) -> usize {
+        std::fs::read_to_string(self._dir.path().join(ACTIVATIONS))
+            .map(|asked| asked.lines().count())
+            .unwrap_or(0)
+    }
+
+    fn start_with(activated: Option<&str>) -> Result<Self> {
         let dir = tempfile::Builder::new()
             .prefix("linuxpods-bus")
             .tempdir()
             .context("failed to create a directory for the bus")?;
+        let services = match activated {
+            Some(name) => {
+                let services = dir.path().join("services");
+                std::fs::create_dir(&services)?;
+                // Kept running until the name is taken, as activation fails
+                // once what it started has exited, and killed with the bus.
+                // Its output goes nowhere: kept, it would hold the test's
+                // stderr open.
+                let service = format!(
+                    "[D-BUS Service]\nName={name}\nExec=/bin/sh -c '\
+                     echo $$ >> \"${ACTIVATIONS_VAR}\"; \
+                     exec sleep 20 </dev/null >/dev/null 2>&1'\n"
+                );
+                std::fs::write(services.join(format!("{name}.service")), service)?;
+                Some(services)
+            }
+            None => None,
+        };
         let config = dir.path().join("bus.conf");
-        std::fs::write(&config, bus_config(dir.path()))?;
+        std::fs::write(&config, bus_config_with(dir.path(), services.as_deref()))?;
 
         let mut daemon = Command::new("dbus-daemon")
             .arg(format!("--config-file={}", config.display()))
             .args(["--nofork", "--print-address=1"])
+            .env(ACTIVATIONS_VAR, dir.path().join(ACTIVATIONS))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
@@ -109,6 +165,15 @@ impl PrivateBus {
 
 impl Drop for PrivateBus {
     fn drop(&mut self) {
+        // What it activated would outlive it.
+        let started = std::fs::read_to_string(self._dir.path().join(ACTIVATIONS));
+        for pid in started.iter().flat_map(|pids| pids.split_whitespace()) {
+            let _ = Command::new("kill")
+                .arg(pid)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
