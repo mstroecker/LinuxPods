@@ -112,7 +112,8 @@ pub struct PodState {
 
     /// From an advertisement like the
     /// [connection state](PodState::connection_state), and `None` too when the
-    /// last one was sent while the earbuds were out of the case.
+    /// last one said no pod is in the case. One from a worn pod whose partner is
+    /// in the case can't see the lid, and keeps the one last reported.
     pub lid_open: Option<bool>,
 
     /// Decoded with `ble::decode_connection_state`.
@@ -671,7 +672,7 @@ impl Coordinator {
             product_id: data.product_id,
             color: data.color,
         };
-        let state = PodState {
+        let mut state = PodState {
             source: DataSource::Ble,
             left_battery: data.left_battery,
             right_battery: data.right_battery,
@@ -694,7 +695,7 @@ impl Coordinator {
         };
 
         tracing::debug!(
-            "BLE {ble_mac} [{}]: left={:?} right={:?} case={:?} lid_open={:?} in_ear={}/{}",
+            "BLE {ble_mac} [{}]: left={:?} right={:?} case={:?} lid_open={:?} one_in_case={} in_ear={}/{}",
             if data.has_decrypted {
                 "decrypted 1%"
             } else {
@@ -704,6 +705,7 @@ impl Coordinator {
             state.right_battery,
             state.case_battery,
             state.lid_open,
+            data.one_in_case,
             data.left_in_ear,
             data.right_in_ear
         );
@@ -716,9 +718,20 @@ impl Coordinator {
                 .join(" ")
         );
 
-        let live = Live::of(&state);
         let mut inner = self.inner.write().await;
         let now = Instant::now();
+        // A worn pod whose partner is in the case has no lid to report, and
+        // both advertise: replaced wholesale, the lid would blink between the
+        // partner's reading and none several times a second. So it keeps the
+        // lid the device last reported.
+        if data.lid_open.is_none() && data.one_in_case {
+            state.lid_open = inner
+                .ble
+                .get(&real_mac)
+                .filter(|e| now.duration_since(e.last_seen) < BLE_CACHE_TTL)
+                .and_then(|e| e.state.lid_open);
+        }
+        let live = Live::of(&state);
         // Recorded even while AAP supersedes it, so that the reading is
         // current the moment the link drops - and a linked device's
         // snapshot takes its live fields from it meanwhile.
@@ -1752,6 +1765,44 @@ mod tests {
         assert_eq!(state.connection_state, None);
         assert_eq!(state.primary_pod, None);
         assert_eq!(state.identity, Some(PRO_3), "the link's, unlike these");
+    }
+
+    /// [`advertisement`]'s encrypted portion behind `cleartext`, parsed: an
+    /// advertisement KEY decrypts, with the status and lid bytes given.
+    fn advertisement_with_cleartext(cleartext: [u8; 9]) -> ProximityData {
+        let encrypted = advertisement().encrypted_portion().unwrap().to_vec();
+        let data = crate::ble::parser::proximity_message(&cleartext, &encrypted);
+        crate::ble::parser::parse_proximity_data(&data).unwrap()
+    }
+
+    /// With one pod worn and the other in the open case, both advertise: the
+    /// one in the case reads the lid, the worn one none but status bit 4 (the
+    /// first #71 capture). The lid stays on show rather than blinking with
+    /// every advertisement, until one says no pod is in the case at all.
+    #[tokio::test]
+    async fn a_worn_pod_keeps_the_lid_its_partner_in_the_case_reported() {
+        let mut inner = inner_with(vec![]);
+        inner.encryption_keys.insert(MAC, KEY.to_vec());
+        let (coordinator, _dir) = coordinator_with(inner);
+        let rx = coordinator.subscribe();
+        let lid = || rx.borrow().states[&MAC].lid_open;
+
+        let in_case = [0x01, 0x27, 0x20, 0x73, 0xaa, 0x94, 0x32, 0x00, 0x04];
+        let worn = [0x01, 0x27, 0x20, 0x13, 0xaa, 0xa4, 0x11, 0x00, 0x04];
+        for _ in 0..3 {
+            for (pod, cleartext) in [("in the case", in_case), ("worn", worn)] {
+                coordinator
+                    .handle_advertisement(advertisement_with_cleartext(cleartext), BLE_MAC)
+                    .await;
+                assert_eq!(lid(), Some(true), "after the {pod} pod's advertisement");
+            }
+        }
+
+        let both_worn = [0x01, 0x27, 0x20, 0x0b, 0xaa, 0x8f, 0x11, 0x00, 0x04];
+        coordinator
+            .handle_advertisement(advertisement_with_cleartext(both_worn), BLE_MAC)
+            .await;
+        assert_eq!(lid(), None, "no pod is in the case");
     }
 
     /// A pod taken out of an ear is worth a broadcast for a device on AAP,

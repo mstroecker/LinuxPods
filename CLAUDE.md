@@ -65,6 +65,11 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   AAP lives in the device's link and goes with it. Identified readings expire after
   `BLE_CACHE_TTL` (30 min) and carry `last_seen` for the UI; `expiry_task` prunes on a
   clock, since with no device in range no advertisement ever triggers a prune.
+- Both pods advertise, so one reading never wholly replaces the lid. A worn pod whose
+  partner is in the case reports no lid but sets status bit 4 (`one_in_case`), and
+  `handle_advertisement` keeps the cached lid for it; with bit 4 clear the lid goes.
+  Replaced wholesale, the lid blinked several times a second with one pod worn. The
+  parser stays stateless: it reports the bit, the coordinator keeps.
 - Apple rotates the advertised BLE MAC every few seconds while disconnected, so an
   advertisement no stored key decrypts cannot be attributed to anything. It is dropped on
   arrival - not stored, not broadcast; storing those is what a BLE spam flood fed on.

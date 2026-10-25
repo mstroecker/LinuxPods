@@ -50,8 +50,14 @@ pub struct ProximityData {
     pub case_charging: bool,
     pub left_in_ear: bool,
     pub right_in_ear: bool,
-    /// `None` while the earbuds are out of the case - see [`parse_proximity_data`].
+    /// `None` unless the status byte puts a pod in the case - see
+    /// [`parse_proximity_data`].
     pub lid_open: Option<bool>,
+    /// Status bit 4, "one pod is in the case" in LibrePods' parser. A worn pod
+    /// whose partner is in the case sets it: its own advertisement has no lid
+    /// to report, while its partner's does. Clear whenever no pod is in the
+    /// case.
+    pub one_in_case: bool,
     pub color: u8,
     pub connection_state: u8,
     /// True when the right pod is primary.
@@ -191,13 +197,14 @@ pub fn parse_proximity_data(data: &[u8]) -> Result<ProximityData, ParseError> {
         std::mem::swap(&mut pd.left_in_ear, &mut pd.right_in_ear);
     }
 
-    // Lid: byte 6, bit 3 clear means open - but the byte describes the case, and
-    // only carries a lid state worth reading while the earbuds are inside it. With
-    // them out, bit 3 reads 0 whatever the case is doing, which showed up as a lid
-    // stuck on "Open" the whole time the pods were in someone's ears. Bits 4-7
-    // separate the two: 0x5 in the case, 0x1 out of it.
-    let pods_in_case = (payload[6] >> 4) == 0x05;
-    pd.lid_open = pods_in_case.then(|| ((payload[6] >> 3) & 0x01) == 0);
+    // Lid: byte 6, bit 3 clear means open - but only while a pod is in the case.
+    // With them out, bit 3 reads 0 whatever the case is doing, which showed up as
+    // a lid stuck on "Open" the whole time the pods were in someone's ears.
+    // Status bit 6 says this pod is in the case, bit 2 that both are. Byte 6's
+    // high nibble can't tell: AirPods Pro 3 sends 0x11 from the open case too.
+    let in_case = status & 0x44 != 0;
+    pd.lid_open = in_case.then(|| payload[6] & 0x08 == 0);
+    pd.one_in_case = status & 0x10 != 0;
     // Byte 8, not 9 - 9 is the first byte of the encrypted portion.
     pd.connection_state = payload[8];
 
@@ -236,6 +243,10 @@ pub struct Cleartext {
     /// Whether the pod sending the advertisement is in the case: status bit 6.
     /// With the primary pod, it decides which bit carries which ear.
     pub this_in_case: bool,
+    /// Whether both pods are in the case: status bit 2.
+    pub both_in_case: bool,
+    /// Status bit 4, as [`ProximityData::one_in_case`] has it.
+    pub one_in_case: bool,
     /// Percent, advertised in 10% steps.
     pub left_battery: Option<u8>,
     pub right_battery: Option<u8>,
@@ -245,7 +256,8 @@ pub struct Cleartext {
     pub case_charging: bool,
     pub left_in_ear: bool,
     pub right_in_ear: bool,
-    /// `None` while the earbuds are out of the case, as [`ProximityData`] has it.
+    /// `None` unless `this_in_case` or `both_in_case`, as [`ProximityData`]
+    /// has it: the parser reads the lid only then.
     pub lid_open: Option<bool>,
     pub color: u8,
     pub connection_state: u8,
@@ -257,6 +269,11 @@ impl Cleartext {
     /// way [`parse_proximity_data`] reads them - flip and ear swap included.
     /// Status bits nobody has explained are left clear.
     pub fn to_bytes(&self) -> [u8; 9] {
+        debug_assert_eq!(
+            self.lid_open.is_some(),
+            self.this_in_case || self.both_in_case,
+            "the lid is advertised exactly while a pod is in the case"
+        );
         let primary_left = self.primary == PodSide::Left;
         let is_flipped = !primary_left;
         let xor_factor = primary_left != self.this_in_case;
@@ -268,7 +285,9 @@ impl Cleartext {
         };
         let status = u8::from(self.this_in_case) << 6
             | u8::from(primary_left) << 5
+            | u8::from(self.one_in_case) << 4
             | u8::from(bit3_in_ear) << 3
+            | u8::from(self.both_in_case) << 2
             | u8::from(bit1_in_ear) << 1;
 
         // The primary pod takes the high battery nibble and charging bit 4.
@@ -287,12 +306,13 @@ impl Cleartext {
             | u8::from(bit4_charging) << 4
             | encode_battery(self.case_battery);
 
-        // 0x1 in the high nibble with the earbuds out, 0x5 with them in and bit
-        // 3 set for a closed lid. The low bits read 001 in most captures.
+        // Bit 3 set for a closed lid; the rest as AirPods Pro 3 sends it: 0x11
+        // out of the case, 0x31 from the open case and 0x39 from the closed one.
+        // Nobody has explained bits 4-7 or the low bits.
         let lid = match self.lid_open {
             None => 0x11,
-            Some(true) => 0x51,
-            Some(false) => 0x59,
+            Some(true) => 0x31,
+            Some(false) => 0x39,
         };
 
         let [product_low, product_high] = self.product_id.to_le_bytes();
@@ -393,9 +413,10 @@ mod tests {
     use crate::ble::decrypt::{CONNECTED_SUFFIX, Plaintext};
 
     /// Builds a minimal well-formed advertisement with a controllable status byte.
-    /// The lid byte defaults to a captured in-case, lid-open value.
+    /// The lid byte defaults to a captured lid-open value, which reads as open
+    /// only when `status` puts a pod in the case.
     fn advert(status: u8, battery: u8, charging: u8) -> Vec<u8> {
-        advert_with_lid(status, battery, charging, 0x51)
+        advert_with_lid(status, battery, charging, 0x31)
     }
 
     fn advert_with_lid(status: u8, battery: u8, charging: u8, lid: u8) -> Vec<u8> {
@@ -406,7 +427,7 @@ mod tests {
             status,   // 3: status
             battery,  // 4: battery nibbles
             charging, // 5: charging bits + case battery
-            lid,      // 6: in-case indicator + lid state
+            lid,      // 6: lid state
             0x00,     // 7: colour
             0x05,     // 8: connection state -> Music
         ];
@@ -421,6 +442,8 @@ mod tests {
             product_id: pd.product_id,
             primary: pd.primary_pod(),
             this_in_case: pd.status & 0x40 != 0,
+            both_in_case: pd.status & 0x04 != 0,
+            one_in_case: pd.one_in_case,
             left_battery: pd.left_battery,
             right_battery: pd.right_battery,
             case_battery: pd.case_battery,
@@ -458,19 +481,29 @@ mod tests {
         .to_bytes()
     }
 
-    /// Every combination of primary pod, the in-case bit, ears, charging and lid
-    /// comes back as it went in: the flip and the ear swap undo each other.
+    /// Every combination of primary pod, the in-case bits, ears, charging and
+    /// lid comes back as it went in: the flip and the ear swap undo each other.
+    /// The lid is there exactly while a pod is in the case.
     #[test]
     fn cleartext_round_trips_through_the_parser() {
         for primary in [PodSide::Left, PodSide::Right] {
-            for this_in_case in [false, true] {
-                for lid_open in [None, Some(true), Some(false)] {
-                    for bits in 0..32u8 {
+            for (this_in_case, both_in_case) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let lids: &[Option<bool>] = if this_in_case || both_in_case {
+                    &[Some(true), Some(false)]
+                } else {
+                    &[None]
+                };
+                for &lid_open in lids {
+                    for bits in 0..64u8 {
                         let bit = |n: u8| bits & (1 << n) != 0;
                         let cleartext = Cleartext {
                             product_id: 0x2024,
                             primary,
                             this_in_case,
+                            both_in_case,
+                            one_in_case: bit(5),
                             left_battery: Some(80),
                             right_battery: Some(30),
                             case_battery: None,
@@ -515,11 +548,11 @@ mod tests {
 
     /// The builder against hardware: the cleartext of captured advertisements -
     /// the ones in `examples/decrypt_probe.rs` - parsed and rebuilt comes back
-    /// byte for byte, but for the bits nobody has explained: status bits 0, 2,
-    /// 4 and 7, charging bit 7 and the lid byte's low three bits.
+    /// byte for byte, but for the bits nobody has explained: status bits 0 and
+    /// 7, charging bit 7 and every bit of the lid byte but bit 3.
     #[test]
     fn rebuilds_captured_advertisements() {
-        const KNOWN: [u8; 9] = [0xFF, 0xFF, 0xFF, 0x6A, 0xFF, 0x7F, 0xF8, 0xFF, 0xFF];
+        const KNOWN: [u8; 9] = [0xFF, 0xFF, 0xFF, 0x7E, 0xFF, 0x7F, 0x08, 0xFF, 0xFF];
         for captured in [
             [0x01, 0x27, 0x20, 0x05, 0x66, 0xf3, 0x51, 0x00, 0x00],
             [0x01, 0x27, 0x20, 0x14, 0x77, 0xf5, 0x59, 0x00, 0x00],
@@ -546,7 +579,8 @@ mod tests {
         assert_eq!(decode_connection_state(pd.connection_state), "Music");
     }
 
-    /// Captured lid bytes: open and closed, with and without an AAP link up.
+    /// Captured lid bytes: open and closed, with and without an AAP link up,
+    /// both pods in the case (status bit 2).
     #[test]
     fn lid_state_comes_from_byte_6() {
         for (lid, open) in [(0x52, true), (0x5A, false), (0x51, true), (0x59, false)] {
@@ -555,12 +589,160 @@ mod tests {
         }
     }
 
-    /// `0x11` is what the earbuds report from someone's ears, and its lid bit is
-    /// clear whether or not the case is shut - so there is nothing to report.
+    /// Status `0x0b` is a pod in someone's ear, with neither in-case bit set,
+    /// so the lid byte - `0x11` here, its lid bit clear whether or not the case
+    /// is shut - has nothing to report.
     #[test]
     fn lid_state_is_unknown_out_of_the_case() {
         let pd = parse_proximity_data(&advert_with_lid(0x0b, 0x76, 0x8f, 0x11)).unwrap();
         assert_eq!(pd.lid_open, None);
+        assert!(!pd.one_in_case);
+    }
+
+    /// From the first #71 capture: with the left pod in the open case and the
+    /// right worn, both advertise. The worn pod's `0x13` reads no lid, but its
+    /// status bit 4 says a pod is in the case - the left pod, whose `0x73` reads
+    /// the lid. With no pod in the case bit 4 is clear: both worn, both on the
+    /// desk, one in hand.
+    #[test]
+    fn a_worn_pod_says_when_its_partner_is_in_the_case() {
+        let parse = |cleartext: [u8; 9]| {
+            parse_proximity_data(&proximity_message(&cleartext, &[0; ENCRYPTED_LEN])).unwrap()
+        };
+        let in_case = parse([0x01, 0x27, 0x20, 0x73, 0xaa, 0x94, 0x32, 0x00, 0x04]);
+        assert_eq!((in_case.lid_open, in_case.one_in_case), (Some(true), true));
+        let worn = parse([0x01, 0x27, 0x20, 0x13, 0xaa, 0xa4, 0x11, 0x00, 0x04]);
+        assert_eq!((worn.lid_open, worn.one_in_case), (None, true));
+        for status in [0x0b, 0x01, 0x29] {
+            let pd = parse([0x01, 0x27, 0x20, status, 0xaa, 0x8f, 0x11, 0x00, 0x00]);
+            assert_eq!(
+                (pd.lid_open, pd.one_in_case),
+                (None, false),
+                "{status:#04x}"
+            );
+        }
+    }
+
+    /// The cleartext of AirPods Pro 3 advertisements from the second #71
+    /// capture, which closed and opened the lid with the pods in the case, and
+    /// the first, which had one pod in the case and one worn. Then the five
+    /// September captures of `rebuilds_captured_advertisements`, Pro 3 and Pro 2.
+    /// Only the status byte and byte 6 matter; the encrypted part is zeroed.
+    #[test]
+    fn decodes_the_lid_from_captured_advertisements() {
+        for (state, cleartext, lid_open) in [
+            (
+                "lid open, right pod, first after opening",
+                [0x01, 0x27, 0x20, 0x04, 0xaa, 0x93, 0x11, 0x00, 0x00],
+                Some(true),
+            ),
+            (
+                "lid open, right pod",
+                [0x01, 0x27, 0x20, 0x15, 0xaa, 0xb3, 0x11, 0x00, 0x00],
+                Some(true),
+            ),
+            (
+                "lid open, left pod",
+                [0x01, 0x27, 0x20, 0x75, 0xaa, 0xb3, 0x31, 0x00, 0x00],
+                Some(true),
+            ),
+            (
+                "lid closed, right pod",
+                [0x01, 0x27, 0x20, 0x15, 0xaa, 0xb3, 0x39, 0x00, 0x00],
+                Some(false),
+            ),
+            (
+                "lid closed, left pod",
+                [0x01, 0x27, 0x20, 0x75, 0xaa, 0xb3, 0x39, 0x00, 0x00],
+                Some(false),
+            ),
+            (
+                "pods out on the desk, right pod",
+                [0x01, 0x27, 0x20, 0x01, 0xaa, 0x8f, 0x11, 0x00, 0x00],
+                None,
+            ),
+            (
+                "back in the case, lid open, right pod",
+                [0x01, 0x27, 0x20, 0x55, 0xaa, 0xb3, 0x32, 0x00, 0x00],
+                Some(true),
+            ),
+            (
+                "back in the case, lid open, left pod",
+                [0x01, 0x27, 0x20, 0x35, 0xaa, 0xb3, 0x32, 0x00, 0x00],
+                Some(true),
+            ),
+            (
+                "in the case, connected",
+                [0x01, 0x27, 0x20, 0x55, 0xaa, 0xb3, 0x32, 0x00, 0x04],
+                Some(true),
+            ),
+            (
+                "being put back, right pod already in",
+                [0x01, 0x27, 0x20, 0x51, 0xaa, 0x93, 0x12, 0x00, 0x00],
+                Some(true),
+            ),
+            (
+                "being put back, left pod in hand",
+                [0x01, 0x27, 0x20, 0x29, 0xaa, 0x8f, 0x11, 0x00, 0x00],
+                None,
+            ),
+            (
+                "left pod in the case, right worn",
+                [0x01, 0x27, 0x20, 0x73, 0xaa, 0x94, 0x32, 0x00, 0x04],
+                Some(true),
+            ),
+            (
+                "right pod worn, left in the case",
+                [0x01, 0x27, 0x20, 0x13, 0xaa, 0xa4, 0x11, 0x00, 0x04],
+                None,
+            ),
+            (
+                "both worn",
+                [0x01, 0x27, 0x20, 0x0b, 0xaa, 0x8f, 0x11, 0x00, 0x04],
+                None,
+            ),
+            (
+                "September, Pro 3, open",
+                [0x01, 0x27, 0x20, 0x05, 0x66, 0xf3, 0x51, 0x00, 0x00],
+                Some(true),
+            ),
+            (
+                "September, Pro 3, closed",
+                [0x01, 0x27, 0x20, 0x14, 0x77, 0xf5, 0x59, 0x00, 0x00],
+                Some(false),
+            ),
+            (
+                "September, Pro 3, worn",
+                [0x01, 0x27, 0x20, 0x0b, 0x78, 0x8f, 0x11, 0x00, 0x04],
+                None,
+            ),
+            (
+                "September, Pro 2, open",
+                [0x01, 0x24, 0x20, 0x25, 0xaa, 0xf1, 0x51, 0x00, 0x00],
+                Some(true),
+            ),
+            (
+                "September, Pro 2, open",
+                [0x01, 0x24, 0x20, 0x34, 0xaa, 0xf1, 0x51, 0x00, 0x00],
+                Some(true),
+            ),
+        ] {
+            let data = proximity_message(&cleartext, &[0; ENCRYPTED_LEN]);
+            let pd = parse_proximity_data(&data).unwrap();
+            assert_eq!(pd.lid_open, lid_open, "{state}: {cleartext:02x?}");
+        }
+    }
+
+    /// Byte 6's high nibble is no gate: 0x5 appears only in the September
+    /// captures, all with the case charging, so it may follow the case's
+    /// charging rather than the pods. Out of the case by the status byte, a 0x5
+    /// lid byte says nothing.
+    #[test]
+    fn a_0x5_lid_byte_alone_reports_no_lid() {
+        for lid in [0x51, 0x59] {
+            let pd = parse_proximity_data(&advert_with_lid(0x0b, 0x76, 0xcf, lid)).unwrap();
+            assert_eq!(pd.lid_open, None, "lid byte {lid:#04x}");
+        }
     }
 
     #[test]
@@ -582,8 +764,9 @@ mod tests {
 
     #[test]
     fn parses_unflipped_layout() {
-        // bit 5 set -> primary is left -> not flipped.
-        let pd = parse_proximity_data(&advert(0b0010_0000, 0x87, 0x00)).unwrap();
+        // bit 5 set -> primary is left -> not flipped; bit 2 set -> both pods
+        // in the case, so the lid is read.
+        let pd = parse_proximity_data(&advert(0b0010_0100, 0x87, 0x00)).unwrap();
         assert!(!pd.is_flipped);
         assert_eq!(pd.primary_pod(), PodSide::Left);
         assert_eq!(pd.left_battery, Some(80));

@@ -469,7 +469,8 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
 
 /// The one-line summary under the battery display.
 fn status_line(state: &PodState) -> String {
-    // Absent unless the earbuds are in the case; the case is what reports it.
+    // Absent unless a pod is in the case: the pods report it, and only one in
+    // the case can see it.
     let lid = match state.lid_open {
         Some(true) => " • Lid: Open",
         Some(false) => " • Lid: Closed",
