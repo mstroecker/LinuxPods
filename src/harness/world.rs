@@ -3,9 +3,11 @@
 //! real ones (#72).
 //!
 //! The fake BlueZ has the adapters the world is made with: one, `hci0`, unless
-//! [`World::with_adapters`] says otherwise. Each pair is a [`Pods`] model at a
-//! real address, paired with one of them. The world carries out what the
-//! model asks for and nothing else:
+//! [`World::with_adapters`] says otherwise. They can be powered off and on,
+//! plugged in and out, and the fake BlueZ restarted, at any time (#50). Each
+//! pair is a [`Pods`] model at a real address, paired with one of them, and
+//! loses its link when its adapter powers off or goes. The world carries out
+//! what the model asks for and nothing else:
 //!
 //! - **BLE.** Every [`ADVERTISING_INTERVAL`] each pair's advertisement goes to
 //!   the fake BlueZ, which signals it while the app discovers - from the
@@ -29,6 +31,11 @@
 //! | Method | Does |
 //! |---|---|
 //! | `AddPods(s mac, q model, s alias)` | Pairs new AirPods with the world's first adapter - model by product ID, such as `0x2027` for Pro 3 - in range and disconnected |
+//! | `AddPodsOn(s adapter, s mac, q model, s alias)` | The same, with the adapter called `adapter` |
+//! | `AddAdapter(s name, b powered)` | Plugs in an adapter at `/org/bluez/<name>`; one plugged in before has its pairs back, disconnected |
+//! | `RemoveAdapter(s name)` | Unplugs it: its pairs disconnect, and its devices and battery providers go |
+//! | `SetPowered(s name, b powered)` | Powers it on or off; off, discovery there ends and its pairs disconnect |
+//! | `RestartBluez()` | bluetoothd restarting as after a crash, under a new unique name: `NameOwnerChanged` twice, and every client's discovery and battery providers forgotten. Nothing is announced again, as a real one would - see [`FakeBluez::restart`] |
 //! | `Connect(s mac)` | Connects them to the host, which the app takes up |
 //! | `Disconnect(s mac)` | Disconnects them, which takes the AAP connection along |
 //! | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case`; a level above 100 is unknown |
@@ -94,10 +101,10 @@ struct Inner {
     /// The connection `FakeWorld1` is served on - not the fake BlueZ's, whose
     /// ObjectManager at `/` would list it among bluetoothd's objects.
     control: Connection,
+    /// The bus it is on, for the connection a restarted fake BlueZ comes
+    /// back on.
+    bus: String,
     socket_dir: PathBuf,
-    /// The fake BlueZ's adapters, by name, in the order the world was made
-    /// with them: [`World::add_pods`] pairs with the first.
-    adapters: Vec<String>,
     /// Where the models' time starts.
     epoch: Instant,
     pairs: Mutex<BTreeMap<Address, Pair>>,
@@ -138,6 +145,11 @@ fn no_pair(mac: Address) -> anyhow::Error {
     anyhow::anyhow!("no pair at {mac}")
 }
 
+/// An adapter's power, for the logs.
+fn power(powered: bool) -> &'static str {
+    if powered { "powered on" } else { "powered off" }
+}
+
 async fn connect(bus: &str) -> Result<Connection> {
     zbus::connection::Builder::address(bus)?
         .build()
@@ -174,8 +186,8 @@ impl World {
         let world = Self(Arc::new(Inner {
             bluez,
             control,
+            bus: bus.to_string(),
             socket_dir: socket_dir.to_path_buf(),
-            adapters: adapters.iter().map(|(name, _)| name.to_string()).collect(),
             epoch: Instant::now(),
             pairs: Mutex::default(),
             due: Notify::new(),
@@ -213,14 +225,12 @@ impl World {
         self.0.epoch.elapsed()
     }
 
-    /// Pairs new AirPods with the host's first adapter: `product_id` as
-    /// `parse_proximity_data` reads it, fresh keys, in range and disconnected.
+    /// Pairs new AirPods with the host's first adapter, of those it has now:
+    /// `product_id` as `parse_proximity_data` reads it, fresh keys, in range
+    /// and disconnected.
     pub async fn add_pods(&self, mac: Address, product_id: u16, alias: &str) -> Result<()> {
-        let adapter = self
-            .0
-            .adapters
-            .first()
-            .context("the world has no adapter")?;
+        let adapters = self.0.bluez.adapters();
+        let adapter = adapters.first().context("the world has no adapter")?;
         self.add_pods_on(adapter, mac, product_id, alias).await
     }
 
@@ -274,10 +284,17 @@ impl World {
     async fn set_connected(&self, mac: Address, connected: bool) -> Result<()> {
         let mut pairs = self.0.pairs.lock().await;
         let pair = pairs.get_mut(&mac).ok_or_else(|| no_pair(mac))?;
-        pair.pods.set_connected(connected);
-        // Disconnected, the model hangs up an open connection.
-        pair.flush(self.now());
-        self.0.bluez.set_connected(mac, connected).await?;
+        if connected {
+            // BlueZ first, as it turns away a pair whose adapter is off.
+            self.0.bluez.set_connected(mac, true).await?;
+            pair.pods.set_connected(true);
+            pair.flush(self.now());
+        } else {
+            pair.pods.set_connected(false);
+            // Disconnected, the model hangs up an open connection.
+            pair.flush(self.now());
+            self.0.bluez.set_connected(mac, false).await?;
+        }
         tracing::info!(
             "fake world: {mac} {}",
             if connected {
@@ -287,6 +304,60 @@ impl World {
             }
         );
         Ok(())
+    }
+
+    /// Plugs in an adapter, as a USB dongle is - see
+    /// [`FakeBluez::add_adapter`]. Pairs added from here on may pair with it.
+    pub async fn add_adapter(&self, name: &str, powered: bool) -> Result<()> {
+        self.0.bluez.add_adapter(name, powered).await?;
+        tracing::info!("fake world: adapter {name} plugged in, {}", power(powered));
+        Ok(())
+    }
+
+    /// Unplugs an adapter - see [`FakeBluez::remove_adapter`]. Its pairs
+    /// lose their link, and AAP with it, and stay in range.
+    pub async fn remove_adapter(&self, name: &str) -> Result<()> {
+        let mut pairs = self.0.pairs.lock().await;
+        self.drop_links(&mut pairs, name);
+        self.0.bluez.remove_adapter(name).await?;
+        tracing::info!("fake world: adapter {name} unplugged");
+        Ok(())
+    }
+
+    /// Powers an adapter on or off - see [`FakeBluez::set_powered`]. Off, its
+    /// pairs lose their link, and AAP with it; on again, they stay
+    /// disconnected until connected.
+    pub async fn set_powered(&self, name: &str, powered: bool) -> Result<()> {
+        let mut pairs = self.0.pairs.lock().await;
+        if !powered {
+            self.drop_links(&mut pairs, name);
+        }
+        self.0.bluez.set_powered(name, powered).await?;
+        tracing::debug!("fake world: adapter {name} {}", power(powered));
+        Ok(())
+    }
+
+    /// Restarts the fake BlueZ on a connection of its own, and so under a
+    /// new unique name - see [`FakeBluez::restart`]. The pairs keep
+    /// their links, as the controllers keep them.
+    pub async fn restart_bluez(&self) -> Result<()> {
+        self.0.bluez.restart(connect(&self.0.bus).await?).await?;
+        tracing::info!("fake world: BlueZ restarted");
+        Ok(())
+    }
+
+    /// Disconnects the models of the pairs on the adapter called `adapter`,
+    /// which hangs up their AAP connections. BlueZ is the caller's to tell.
+    fn drop_links(&self, pairs: &mut BTreeMap<Address, Pair>, adapter: &str) {
+        let now = self.now();
+        for mac in self.0.bluez.paired_with(adapter) {
+            if let Some(pair) = pairs.get_mut(&mac)
+                && pair.pods.is_connected()
+            {
+                pair.pods.set_connected(false);
+                pair.flush(now);
+            }
+        }
     }
 
     /// Closes a pair's AAP connection from its end. The Bluetooth link stays.
@@ -449,6 +520,11 @@ impl World {
         let Some(pair) = pairs.get_mut(&mac) else {
             return;
         };
+        if !self.0.bluez.can_connect(mac) {
+            // There is no L2CAP without the adapter.
+            tracing::info!("fake world: turned away AAP to {mac}: its adapter is off or gone");
+            return;
+        }
         if pair.link.is_some() {
             // What AirPods do with a second connection is not recorded.
             // Turning it away keeps the first, the one the app uses: a
@@ -584,6 +660,36 @@ impl FakeWorld1 {
     async fn add_pods(&self, mac: &str, model: u16, alias: &str) -> fdo::Result<()> {
         let mac = parse_mac(mac)?;
         self.world.add_pods(mac, model, alias).await.map_err(failed)
+    }
+
+    async fn add_pods_on(
+        &self,
+        adapter: &str,
+        mac: &str,
+        model: u16,
+        alias: &str,
+    ) -> fdo::Result<()> {
+        let mac = parse_mac(mac)?;
+        self.world
+            .add_pods_on(adapter, mac, model, alias)
+            .await
+            .map_err(failed)
+    }
+
+    async fn add_adapter(&self, name: &str, powered: bool) -> fdo::Result<()> {
+        self.world.add_adapter(name, powered).await.map_err(failed)
+    }
+
+    async fn remove_adapter(&self, name: &str) -> fdo::Result<()> {
+        self.world.remove_adapter(name).await.map_err(failed)
+    }
+
+    async fn set_powered(&self, name: &str, powered: bool) -> fdo::Result<()> {
+        self.world.set_powered(name, powered).await.map_err(failed)
+    }
+
+    async fn restart_bluez(&self) -> fdo::Result<()> {
+        self.world.restart_bluez().await.map_err(failed)
     }
 
     async fn connect(&self, mac: &str) -> fdo::Result<()> {
@@ -790,6 +896,47 @@ mod tests {
         world.disconnect(MAC).await.unwrap();
         assert!(next_packet(&client).await.is_err());
         assert!(!bluez_connected(&bus, MAC).await);
+    }
+
+    /// An adapter powering off takes its pairs' links, and AAP with them, and
+    /// nothing connects until it is on again. Unplugged, it takes them too.
+    #[tokio::test]
+    async fn an_adapter_going_takes_its_pairs_links() {
+        let (bus, world, dir) = world().await;
+        world.connect(MAC).await.unwrap();
+        let client = aap(&dir, MAC).await;
+        client.handshake().await.unwrap();
+
+        world.set_powered(DEFAULT_ADAPTER, false).await.unwrap();
+        assert!(next_packet(&client).await.is_err(), "AAP stays up");
+        assert!(!bluez_connected(&bus, MAC).await);
+        assert!(
+            !world
+                .with_pods(MAC, |pods| pods.is_connected())
+                .await
+                .unwrap()
+        );
+        assert!(world.connect(MAC).await.is_err(), "connected while off");
+        let turned_away = aap(&dir, MAC).await;
+        assert!(next_packet(&turned_away).await.is_err());
+
+        world.set_powered(DEFAULT_ADAPTER, true).await.unwrap();
+        world.connect(MAC).await.unwrap();
+        let client = aap(&dir, MAC).await;
+        client.handshake().await.unwrap();
+
+        world.remove_adapter(DEFAULT_ADAPTER).await.unwrap();
+        assert!(next_packet(&client).await.is_err(), "AAP stays up");
+        assert!(
+            !world
+                .with_pods(MAC, |pods| pods.is_connected())
+                .await
+                .unwrap()
+        );
+        assert!(
+            world.connect(MAC).await.is_err(),
+            "connected with no adapter"
+        );
     }
 
     /// A second connection is turned away, and the first carries on.
@@ -1001,6 +1148,33 @@ mod tests {
         let batteries: HashMap<String, u8> = control.call("Batteries", &()).await.unwrap();
         assert!(batteries.is_empty());
         control.call_method("Flood", &(2u32,)).await.unwrap();
+
+        // Adapters, and the fake BlueZ behind them.
+        let third = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x03]).to_string();
+        control
+            .call_method("AddAdapter", &("hci1", false))
+            .await
+            .unwrap();
+        control
+            .call_method("AddPodsOn", &("hci1", &third, PRO_3, "Third"))
+            .await
+            .unwrap();
+        assert!(
+            control.call_method("Connect", &(&third,)).await.is_err(),
+            "while off"
+        );
+        control
+            .call_method("SetPowered", &("hci1", true))
+            .await
+            .unwrap();
+        control.call_method("Connect", &(&third,)).await.unwrap();
+        control
+            .call_method("RemoveAdapter", &("hci1",))
+            .await
+            .unwrap();
+        assert_eq!(world.bluez().adapters(), [DEFAULT_ADAPTER]);
+        control.call_method("RestartBluez", &()).await.unwrap();
+        assert!(world.bluez().is_powered(DEFAULT_ADAPTER));
 
         for (method, error) in [
             (
