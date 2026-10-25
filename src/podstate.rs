@@ -1869,6 +1869,34 @@ mod tests {
         assert_eq!(s.lowest_earbud(), None);
     }
 
+    /// Regression (#108): a part reported as Disconnected comes with a
+    /// placeholder level, `0x00` included. Read as a level, a pod reported that
+    /// way would have been the lowest earbud at 0%, and so what GNOME Settings
+    /// showed. It is unknown, and the other pod is the lowest known.
+    #[tokio::test]
+    async fn a_disconnected_earbud_is_not_the_lowest() {
+        use aap::battery::{Battery, Component, Status};
+
+        let (coordinator, client, _dir) = linked();
+        let battery = |component, level, status| Battery {
+            component,
+            level: Some(level),
+            status,
+        };
+        let packet = aap::battery::battery_packet(&[
+            battery(Component::Right, 0, Status::Disconnected),
+            battery(Component::Left, 70, Status::Discharging),
+            battery(Component::Case, 0, Status::Disconnected),
+        ]);
+        let info = aap::parse_battery_packet(&packet).unwrap();
+        coordinator.handle_battery_info(info, MAC, &client).await;
+
+        let state = coordinator.subscribe().borrow().states[&MAC].clone();
+        assert_eq!(state.right_battery, None);
+        assert_eq!(state.case_battery, None);
+        assert_eq!(state.lowest_earbud(), Some(70));
+    }
+
     /// The longest link wins, even before it has reported and with another pair
     /// in range: a second pair connecting must not take over.
     #[test]

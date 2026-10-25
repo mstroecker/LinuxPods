@@ -139,7 +139,10 @@ packet arrives; this deadlocked the Request Keys button.
   `ble::decrypt` take bytes and return values, and carry the bulk of the test suite.
 - Use synthetic test vectors - never commit a real device key. Encrypt in the test and
   assert the round trip.
-- `Option<u8>` for unknown battery, never a sentinel. Levels above 100 mean unavailable.
+- `Option<u8>` for unknown battery, never a sentinel. Levels above 100 mean unavailable,
+  and so does an AAP part with status Disconnected (`0x04`), whatever its level byte: it
+  comes as `0x00` as well as `0xFF`, and the `0x00` read as a real 0% put the case at 0%
+  (#108).
 - Log stages separately: `BLE parsable:` covers every advertisement that parses, including
   ones the coordinator later drops; `BLE decryptable:` reports identification. Noisy
   non-proximity Apple data goes to `trace`.

@@ -81,7 +81,7 @@ carries a GTK object toward tokio.
 - parses a noise report without checking both byte 4 and byte 6;
 - reuses an L2CAP socket whose `cid` was zero right after connect, rather than discarding it;
 - uses a sentinel (0, 255, -1) for an unknown battery instead of `None`, or lets a level
-  above 100 through as a reading.
+  above 100, or the level beside an AAP status Disconnected (`0x04`), through as a reading.
 
 **Parsing and tests.** `aap::battery`, `aap::keys`, `aap::noise`, `ble::parser` and
 `ble::decrypt` take bytes and return values - flag I/O, global state or coordinator access

@@ -329,6 +329,26 @@ mod tests {
         assert_eq!(tray.tool_tip().description, "AirPods - 73%");
     }
 
+    /// An earbud the AirPods report as disconnected is unknown (#108): its line
+    /// reads `--`, and the tooltip shows the lowest earbud that is known.
+    #[test]
+    fn a_disconnected_earbud_shows_as_unknown() {
+        let mut snapshot = reading();
+        let state = snapshot.states.get_mut(&MAC).unwrap();
+        state.left_battery = None;
+        state.left_charging = false;
+        state.case_battery = None;
+        let mut tray = Indicator::new(Arc::new(NoActions));
+        tray.show(tray_state(&snapshot));
+
+        assert_eq!((tray.left, tray.right, tray.case), (None, Some(80), None));
+        assert_eq!(tray.tool_tip().description, "AirPods - 80%");
+        assert_eq!(
+            battery_label("Left", tray.left, tray.left_charging),
+            "  Left : --"
+        );
+    }
+
     /// Records the noise control commands the tray hands back.
     #[derive(Default)]
     struct Recorder(std::sync::Mutex<Vec<(Address, NoiseMode)>>);

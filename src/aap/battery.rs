@@ -48,7 +48,11 @@ impl std::fmt::Display for Component {
 pub enum Status {
     Charging,
     Discharging,
+    /// The part is not reporting - the case while both pods are worn, say. Its
+    /// level byte is a placeholder, `0x00` or `0xFF`.
     Disconnected,
+    /// A status this parser has no meaning for; the level still counts. `0x05`
+    /// was reported once, with the pods in the open case.
     Unknown(u8),
 }
 
@@ -88,7 +92,9 @@ impl std::fmt::Display for Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Battery {
     pub component: Component,
-    /// `None` when the device reports a level above 100, which means unavailable.
+    /// `None` when the device reports a level above 100, which means
+    /// unavailable, or the part as [`Status::Disconnected`], whatever its level
+    /// byte holds.
     pub level: Option<u8>,
     pub status: Status,
 }
@@ -118,7 +124,8 @@ pub enum BatteryParseError {
 const HEADER: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x04, 0x00];
 
 /// What [`battery_packet`] writes for a level of `None`. Anything above 100
-/// reads as unavailable; which value the device itself sends is not recorded.
+/// reads as unavailable. A part the device reports as disconnected comes with
+/// `0x00` or `0xFF`, read as unknown by its status alone.
 #[cfg(any(test, feature = "harness"))]
 const LEVEL_UNAVAILABLE: u8 = 0xFF;
 
@@ -143,10 +150,13 @@ pub fn parse_battery_packet(packet: &[u8]) -> Result<BatteryInfo, BatteryParseEr
         }
 
         let level = packet[offset + 2];
+        let status = Status::from(packet[offset + 3]);
         let battery = Battery {
             component: Component::from(packet[offset]),
-            level: (level <= 100).then_some(level),
-            status: Status::from(packet[offset + 3]),
+            // A disconnected part's level is a placeholder, `0x00` or
+            // `0xFF`: read as a level, the former showed the case at 0% (#108).
+            level: (level <= 100 && status != Status::Disconnected).then_some(level),
+            status,
         };
 
         match battery.component {
@@ -165,7 +175,8 @@ pub fn parse_battery_packet(packet: &[u8]) -> Result<BatteryInfo, BatteryParseEr
 /// Builds the packet [`parse_battery_packet`] reads, one entry per battery in
 /// the order given. The device lists right, left, case.
 ///
-/// The level goes out as given, so a test can write one above 100; `None` goes
+/// The level goes out as given, so a test can write one above 100, or one
+/// beside [`Status::Disconnected`] that the parser reads as `None`; `None` goes
 /// out as 0xFF.
 ///
 /// # Panics
@@ -298,6 +309,69 @@ mod tests {
         assert_eq!(right.level, None);
         assert!(right.is_charging());
         assert_eq!(info.case.unwrap().level, None);
+    }
+
+    /// Captured on AirPods Pro 3 with both pods worn and the case away: the case
+    /// comes as level 0 with status Disconnected, and showed 0% for 53 s (#108).
+    #[test]
+    fn reads_the_case_away_from_both_worn_pods_as_unknown() {
+        let packet = [
+            0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x03, 0x02, 0x01, 0x64, 0x02, 0x01, 0x04, 0x01,
+            0x64, 0x02, 0x01, 0x08, 0x01, 0x00, 0x04, 0x01,
+        ];
+        let info = parse_battery_packet(&packet).unwrap();
+        let right = info.right.unwrap();
+        assert_eq!(
+            (right.level, right.status),
+            (Some(100), Status::Discharging)
+        );
+        let left = info.left.unwrap();
+        assert_eq!((left.level, left.status), (Some(100), Status::Discharging));
+        let case = info.case.unwrap();
+        assert_eq!((case.level, case.status), (None, Status::Disconnected));
+    }
+
+    /// Captured on AirPods Pro 3 with the right pod worn and the left one in the
+    /// case: the case comes as level 0xFF with status Disconnected, while the
+    /// pod in it reports charging, at a level that counts (#108).
+    #[test]
+    fn reads_the_case_holding_one_pod_as_unknown() {
+        let packet = [
+            0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x03, 0x02, 0x01, 0x64, 0x02, 0x01, 0x04, 0x01,
+            0x64, 0x01, 0x01, 0x08, 0x01, 0xFF, 0x04, 0x01,
+        ];
+        let info = parse_battery_packet(&packet).unwrap();
+        let right = info.right.unwrap();
+        assert_eq!(
+            (right.level, right.status),
+            (Some(100), Status::Discharging)
+        );
+        let left = info.left.unwrap();
+        assert_eq!(left.level, Some(100));
+        assert!(left.is_charging());
+        let case = info.case.unwrap();
+        assert_eq!((case.level, case.status), (None, Status::Disconnected));
+    }
+
+    /// A disconnected part is unknown whatever its level byte holds - a level
+    /// of 0 included, which would otherwise read as an empty battery.
+    #[test]
+    fn treats_disconnected_parts_as_unknown() {
+        for level in [0, 42, 100, 0xFF] {
+            let info = parse_battery_packet(&packet(&[(4, level, 4)])).unwrap();
+            let left = info.left.unwrap();
+            assert_eq!(left.level, None, "level {level:#04x}");
+            assert_eq!(left.status, Status::Disconnected);
+        }
+    }
+
+    /// A status with no known meaning still parses, and leaves the level alone.
+    #[test]
+    fn keeps_the_level_beside_an_unknown_status() {
+        let info = parse_battery_packet(&packet(&[(8, 60, 5)])).unwrap();
+        let case = info.case.unwrap();
+        assert_eq!((case.level, case.status), (Some(60), Status::Unknown(5)));
+        assert!(!case.is_charging());
     }
 
     #[test]
