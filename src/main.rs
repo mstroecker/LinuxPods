@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use bluer::Address;
-use futures_util::StreamExt;
 use gtk::{gio, glib};
 
 use indicator::{Indicator, TrayActions};
 use linuxpods::aap::NoiseMode;
+use linuxpods::bluez::Backoff;
 use podstate::Coordinator;
 
 const APP_ID: &str = "io.github.mstroecker.LinuxPods";
@@ -246,37 +246,37 @@ fn main() -> glib::ExitCode {
     code
 }
 
-/// Feeds BLE advertisements from every powered adapter into the coordinator.
+/// Feeds BLE advertisements from every powered adapter into the coordinator,
+/// for as long as the app runs: discovery follows the adapters as they change
+/// (see `Scanning`), and when the system bus cannot be reached, or BlueZ's
+/// signals on it end, scanning starts over, waiting longer each time.
 async fn ble_task(coordinator: Arc<Coordinator>) {
-    let scanner = match ble::scanner::Scanner::new().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("failed to create BLE scanner: {e}");
-            return;
-        }
-    };
-
-    // Subscribed before discovery starts, so that no advertisement falls in
-    // between: the first from each address comes with its device.
-    let stream = match scanner.advertisements().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("failed to subscribe to advertisements: {e}");
-            return;
-        }
-    };
-    tokio::pin!(stream);
-
-    if let Err(e) = scanner.start_discovery().await {
-        tracing::error!("failed to start BLE discovery: {e:#}");
-        return;
+    let mut backoff = Backoff::default();
+    loop {
+        let wait = match scan().await {
+            Ok(mut scanning) => {
+                let began = std::time::Instant::now();
+                while let Some(advert) = scanning.next().await {
+                    coordinator
+                        .handle_advertisement(advert.data, advert.ble_mac)
+                        .await;
+                }
+                tracing::warn!("BLE scanning stopped: BlueZ's signals ended");
+                backoff.ended(began.elapsed())
+            }
+            Err(e) => {
+                tracing::error!("failed to start BLE scanning: {e:#}");
+                backoff.failed()
+            }
+        };
+        tracing::info!("starting BLE scanning again in {}s", wait.as_secs());
+        tokio::time::sleep(wait).await;
     }
+}
 
-    while let Some(advert) = stream.next().await {
-        coordinator
-            .handle_advertisement(advert.data, advert.ble_mac)
-            .await;
-    }
+/// Scanning on the system bus, where BlueZ is.
+async fn scan() -> anyhow::Result<ble::scanner::Scanning> {
+    ble::scanner::Scanner::new().await?.scan().await
 }
 
 /// Expires cached BLE readings on a clock. Advertisements prune as they arrive,

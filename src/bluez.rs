@@ -1,8 +1,8 @@
-//! BlueZ integration: its adapters, found by [`adapters`], its device objects,
-//! read and watched by [`Devices`], and the batteries [`BatteryProvider`]
-//! exports to it for GNOME Settings. All go over a connection they are given -
-//! the system bus, or under the test harness a fake BlueZ on a private one
-//! (#72).
+//! BlueZ integration: its adapters, read by [`adapters`] and followed by
+//! [`watch_adapters`], its device objects, read and watched by [`Devices`],
+//! and the batteries [`BatteryProvider`] exports to it for GNOME Settings.
+//! All go over a connection they are given - the system bus, or under the
+//! test harness a fake BlueZ on a private one (#72).
 //!
 //! zbus ships `fdo::ObjectManager` and derives properties, so serving the
 //! provider root needs none of the usual ObjectManager boilerplate - no
@@ -10,17 +10,18 @@
 //! InterfacesAdded / InterfacesRemoved / PropertiesChanged: registering the
 //! interface at a child path emits InterfacesAdded on its own.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Poll, ready};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bluer::Address;
 use futures_util::{Stream, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use zbus::fdo::ManagedObjects;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
-use zbus::{Connection, MatchRule, MessageStream, interface, proxy};
+use zbus::{Connection, MatchRule, Message, MessageStream, interface, proxy};
 
 pub const BLUEZ_SERVICE: &str = "org.bluez";
 const ADAPTER_INTERFACE: &str = "org.bluez.Adapter1";
@@ -90,7 +91,8 @@ impl BatteryProvider1 {
 /// takes a battery only for a device on its own adapter: bluetoothd looks the
 /// battery's `Device` up among that adapter's devices, and ignores the battery,
 /// with a warning in its log, when it is not one of them (`src/battery.c`). So
-/// every adapter has a provider of its own, at a root of its own. One root
+/// every adapter has a provider of its own, at a root of its own - and of the
+/// connection's own, see [`provider_root`]. One root
 /// registered with every adapter would work too, but every manager would read
 /// every battery, and warn of each on another adapter.
 ///
@@ -105,12 +107,22 @@ pub struct BatteryProvider {
     root: OwnedObjectPath,
 }
 
-/// Where the provider for the adapter at `adapter` keeps its batteries: a root
-/// named after the adapter, as `.../battery/hci1` for `/org/bluez/hci1`.
+/// Where the provider for the adapter at `adapter`, served by the connection
+/// whose unique name is `owner`, keeps its batteries: a root named after both,
+/// as `.../battery/_1_42/hci1` for `/org/bluez/hci1` and `:1.42`.
 /// bluetoothd reads a provider's objects from the ObjectManager at its root.
-fn provider_root(adapter: &str) -> Result<OwnedObjectPath> {
+///
+/// bluetoothd tells providers apart by their root alone, whoever registered
+/// it. A root of one connection's own is one no other can hold: two LinuxPods
+/// on one system bus - two users logged in - each get a provider, and BlueZ
+/// refusing a root as registered already can only mean this connection's.
+fn provider_root(owner: &str, adapter: &str) -> Result<OwnedObjectPath> {
     let name = adapter.rsplit('/').next().unwrap_or_default();
-    let path = format!("{PROVIDER_PATH}/{name}");
+    let owner: String = owner
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let path = format!("{PROVIDER_PATH}/{owner}/{name}");
     OwnedObjectPath::try_from(path.as_str())
         .with_context(|| format!("invalid provider root {path} for adapter {adapter}"))
 }
@@ -155,8 +167,18 @@ impl BatteryProvider {
     /// Serves the provider root for the adapter at `adapter` on `conn`, and
     /// registers it with that adapter's manager, in whichever BlueZ answers
     /// there.
+    ///
+    /// The root is this connection's own - see [`provider_root`] - so BlueZ
+    /// refusing it as registered already means this connection registered it
+    /// before, and it is registered: registering again, after an adapter
+    /// change that turned out to change nothing for BlueZ, must not lose the
+    /// registration that stands (#50).
     pub async fn register(conn: Connection, adapter: &str) -> Result<Self> {
-        let root = provider_root(adapter)?;
+        let owner = conn
+            .unique_name()
+            .context("the connection has no unique name")?
+            .to_string();
+        let root = provider_root(&owner, adapter)?;
         // Serving ObjectManager at the provider root is what makes BlueZ pick up
         // batteries added underneath it.
         conn.object_server()
@@ -167,10 +189,15 @@ impl BatteryProvider {
         let manager = BatteryProviderManager1Proxy::new(&conn, adapter)
             .await
             .context("failed to reach BatteryProviderManager1")?;
-        manager
-            .register_battery_provider(&root)
-            .await
-            .context("failed to register battery provider")?;
+        match manager.register_battery_provider(&root).await {
+            Ok(()) => {}
+            Err(zbus::Error::MethodError(name, _, _))
+                if name.as_str() == "org.bluez.Error.AlreadyExists" =>
+            {
+                tracing::debug!("{adapter} holds the battery provider at {root} already");
+            }
+            Err(e) => return Err(e).context("failed to register battery provider"),
+        }
 
         Ok(Self {
             conn,
@@ -302,6 +329,496 @@ async fn managed_objects(conn: &Connection) -> Result<ManagedObjects> {
     om.get_managed_objects()
         .await
         .context("failed to get managed objects")
+}
+
+/// BlueZ's adapters as a client needs to know them, to keep what it has on
+/// each in step with BlueZ (#50).
+///
+/// What a client starts on an adapter lasts only as long as BlueZ keeps it.
+/// bluetoothd ends every client's discovery on an adapter as it powers off;
+/// an adapter that goes takes the battery providers registered with it along;
+/// and a new bluetoothd - a restart - knows of neither, for any adapter,
+/// saying so only by the name changing hands. So the set holds, for each
+/// adapter there is, two tokens: what a client started there under a token
+/// stands while the adapter has that token still. A new one is a sign to
+/// start again.
+///
+/// From [`watch_adapters`], which keeps it as the adapters change. Each token
+/// is new to the watch: none is ever given out twice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdapterSet {
+    adapters: BTreeMap<String, AdapterState>,
+    /// The unique name of the bluetoothd the adapters were read from, `None`
+    /// while none answered. A restarted one has a new one.
+    owner: Option<String>,
+}
+
+/// One adapter in an [`AdapterSet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdapterState {
+    /// What was registered with the adapter - a battery provider - stands
+    /// while this is unchanged. It changes when an adapter is new at the
+    /// path, or bluetoothd is.
+    pub registration: u64,
+    /// `Some` while the adapter is powered. Discovery started there stands
+    /// while this is unchanged. It changes each time the adapter powers on,
+    /// as powering off ended it, and with `registration`.
+    pub discovery: Option<u64>,
+}
+
+impl AdapterSet {
+    /// The adapter whose object is at `path`.
+    pub fn get(&self, path: &str) -> Option<&AdapterState> {
+        self.adapters.get(path)
+    }
+
+    /// Every adapter, by path, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &AdapterState)> {
+        self.adapters
+            .iter()
+            .map(|(path, adapter)| (path.as_str(), adapter))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.adapters.is_empty()
+    }
+
+    /// Whether BlueZ is on the bus, as far as the watch knows: once it has
+    /// left, until it is read again.
+    pub fn on_bus(&self) -> bool {
+        self.owner.is_some()
+    }
+
+    /// The set as read from the bluetoothd at `owner`: `adapters`, each new
+    /// unless that is the bluetoothd this set was read from and the adapter
+    /// was here all along. `changes` are what each sender signalled since
+    /// the last time, by sender: that bluetoothd's tell what it ended in
+    /// between - see [`AdapterChange`] - and the rest are not its.
+    ///
+    /// Read twice from one bluetoothd - its leaving and coming back seen
+    /// apart, the first read answered by the new one already - the second
+    /// changes nothing. Given new tokens, attachment registered its
+    /// providers again, BlueZ refused each as registered already, and GNOME
+    /// Settings lost the batteries.
+    fn read(
+        &self,
+        adapters: Vec<Adapter>,
+        owner: String,
+        mut changes: BySender,
+        tokens: &mut Tokens,
+    ) -> Self {
+        let changes = changes.remove(&owner).unwrap_or_default();
+        let same = self.owner.as_ref() == Some(&owner);
+        let adapters = adapters
+            .into_iter()
+            .map(|adapter| {
+                let change = changes.get(&adapter.path);
+                let kept = self
+                    .adapters
+                    .get(&adapter.path)
+                    .filter(|_| same && !change.is_some_and(|c| c.removed));
+                let state = AdapterState {
+                    registration: kept.map_or_else(|| tokens.next(), |k| k.registration),
+                    discovery: adapter
+                        .powered
+                        .then(|| match kept.and_then(|k| k.discovery) {
+                            Some(token) if !change.is_some_and(|c| c.off) => token,
+                            _ => tokens.next(),
+                        }),
+                };
+                (adapter.path, state)
+            })
+            .collect();
+        Self {
+            adapters,
+            owner: Some(owner),
+        }
+    }
+
+    /// Takes in what each adapter's signals said since the last time - see
+    /// [`AdapterChange`] - from the bluetoothd this set was read from. What
+    /// any other sender said is stale - from one that has left, taken out of
+    /// order - or not bluetoothd's at all, and is left out; while none was
+    /// read from, everything is.
+    fn apply(&mut self, mut changes: BySender, tokens: &mut Tokens) {
+        let Some(owner) = &self.owner else {
+            return;
+        };
+        let changes = changes.remove(owner).unwrap_or_default();
+        for (path, change) in changes {
+            let now = change.now.filter(|_| !change.removed || change.added);
+            let Some(powered) = now else {
+                self.adapters.remove(&path);
+                continue;
+            };
+            // Removed in between, the one there now is another.
+            let before = self
+                .adapters
+                .get(&path)
+                .filter(|_| !change.removed)
+                .copied();
+            // Only an adapter announced comes in: a change of power to one
+            // never announced is stale, or not bluetoothd's.
+            if before.is_none() && !change.added {
+                continue;
+            }
+            let registration = before.map_or_else(|| tokens.next(), |b| b.registration);
+            let discovery = powered.then(|| match before.and_then(|b| b.discovery) {
+                Some(token) if !change.off => token,
+                _ => tokens.next(),
+            });
+            let state = AdapterState {
+                registration,
+                discovery,
+            };
+            self.adapters.insert(path, state);
+        }
+    }
+}
+
+/// Where an [`AdapterSet`]'s tokens come from.
+#[derive(Debug, Default)]
+struct Tokens(u64);
+
+impl Tokens {
+    fn next(&mut self) -> u64 {
+        self.0 += 1;
+        self.0
+    }
+}
+
+/// Watches BlueZ's adapters on `conn` (#50). Back once they have been read,
+/// with the set as it is then - empty when BlueZ is not on the bus - and from
+/// there on kept as the adapters power on and off, come and go, and
+/// bluetoothd restarts: see [`AdapterSet`].
+///
+/// The receiver gets the latest set, never a queue of them, so a flapping
+/// adapter is one change waiting however often it flaps, and it gets each
+/// set once. The signals are read as they come, in a task of their own, and
+/// coalesced - see [`AdapterChanges`] - while another task answers them: an
+/// answer may need BlueZ asked, and the subscription takes in every signal
+/// bluetoothd sends, a crowd's advertisements among them, which left unread
+/// would stop zbus reading the connection, and the answer with it (#90).
+///
+/// Only the bluetoothd the set was read from changes it: a signal from any
+/// other sender is stale - from one that has left, taken out of order - or
+/// not bluetoothd's at all, as zbus cannot check a well-known sender.
+///
+/// The watch ends - `changed` fails - when the connection's signals do. Its
+/// tasks end with it, or once every receiver is dropped.
+pub async fn watch_adapters(conn: &Connection) -> Result<watch::Receiver<AdapterSet>> {
+    // Subscribed before the adapters are read, so no change falls between.
+    let changes = adapter_changes(conn).await?;
+    let mut tokens = Tokens::default();
+    let first = read_adapters(conn, &AdapterSet::default(), BTreeMap::new(), &mut tokens).await;
+    let (sender, receiver) = watch::channel(first);
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        tokio::pin!(changes);
+        loop {
+            let changes = tokio::select! {
+                () = sender.closed() => return,
+                changes = changes.next() => match changes {
+                    Some(changes) => changes,
+                    None => return,
+                },
+            };
+            let mut set = sender.borrow().clone();
+            // bluetoothd came or went: read again, from whichever answers -
+            // keeping the tokens if that is the one read from before. What it
+            // signalled meanwhile is in what is read, but for what it ended
+            // on the way, which the signals say.
+            if changes.owner {
+                set = read_adapters(&conn, &set, changes.adapters, &mut tokens).await;
+            } else {
+                set.apply(changes.adapters, &mut tokens);
+            }
+            sender.send_if_modified(|current| {
+                let changed = *current != set;
+                *current = set;
+                changed
+            });
+        }
+    });
+    Ok(receiver)
+}
+
+/// BlueZ's adapters on `conn`, as read anew by `before` - see
+/// [`AdapterSet::read`] - with `changes` what each sender signalled since.
+/// None when BlueZ is not on the bus.
+async fn read_adapters(
+    conn: &Connection,
+    before: &AdapterSet,
+    changes: BySender,
+    tokens: &mut Tokens,
+) -> AdapterSet {
+    match managed_objects_and_owner(conn).await {
+        Ok((objects, owner)) => before.read(adapters_in(objects), owner, changes, tokens),
+        Err(e) => {
+            tracing::debug!("no Bluetooth adapters to read: {e:#}");
+            AdapterSet::default()
+        }
+    }
+}
+
+/// Every object of whichever BlueZ answers on `conn`, and the unique name of
+/// the one that did: its reply's sender, so the two cannot be from two
+/// bluetoothds.
+async fn managed_objects_and_owner(conn: &Connection) -> Result<(ManagedObjects, String)> {
+    let reply = conn
+        .call_method(
+            Some(BLUEZ_SERVICE),
+            "/",
+            Some("org.freedesktop.DBus.ObjectManager"),
+            "GetManagedObjects",
+            &(),
+        )
+        .await
+        .context("failed to get managed objects")?;
+    let owner = reply
+        .header()
+        .sender()
+        .context("BlueZ's reply names no sender")?
+        .to_string();
+    let objects = reply
+        .body()
+        .deserialize::<ManagedObjects>()
+        .context("failed to read managed objects")?;
+    Ok((objects, owner))
+}
+
+/// What changes BlueZ's adapters, as it is signalled, coalesced since it was
+/// last taken - see [`watch_adapters`].
+async fn adapter_changes(conn: &Connection) -> Result<impl Stream<Item = AdapterChanges> + use<>> {
+    // Two rules, as `NameOwnerChanged` comes from the bus, not from BlueZ.
+    // The bus's first: it brings so few that none waits long while the bus
+    // confirms the second. The second takes in every signal bluetoothd
+    // sends - `InterfacesAdded` from its ObjectManager, `PropertiesChanged`
+    // from each adapter - in one stream, which keeps them in the order they
+    // were sent: an adapter's `Powered` comes after the `InterfacesAdded`
+    // that announces it.
+    let owner = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.freedesktop.DBus")?
+        .interface("org.freedesktop.DBus")?
+        .member("NameOwnerChanged")?
+        .arg(0, BLUEZ_SERVICE)?
+        .build();
+    let owner = MessageStream::for_match_rule(owner, conn, None)
+        .await
+        .context("failed to subscribe to BlueZ's name")?;
+    let bluez = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender(BLUEZ_SERVICE)?
+        .build();
+    let bluez = MessageStream::for_match_rule(bluez, conn, None)
+        .await
+        .context("failed to subscribe to BlueZ's signals")?;
+    let signals = futures_util::stream::select(owner, bluez)
+        .filter_map(|msg| async move { adapter_signal(&msg.ok()?) });
+    Ok(drain::<AdapterChanges, _>(signals))
+}
+
+/// A signal that changes BlueZ's adapters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdapterSignal {
+    /// `org.bluez` changed hands: bluetoothd left the bus, or came on it.
+    Owner,
+    /// One adapter's, from the unique name `sender`.
+    Adapter {
+        sender: String,
+        path: String,
+        event: AdapterEvent,
+    },
+}
+
+/// What happened to one adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdapterEvent {
+    /// It appeared, powered or not.
+    Added {
+        powered: bool,
+    },
+    Powered(bool),
+    Removed,
+}
+
+/// The [`AdapterSignal`] `msg` is, if it is one. zbus cannot check a
+/// well-known sender, so whatever signal the connection gets comes through
+/// here: what is not an adapter's goes by its headers wherever it can, before
+/// its body is read. Which sender an adapter's is from is the watch's to
+/// judge; `NameOwnerChanged` counts only from the bus itself.
+fn adapter_signal(msg: &Message) -> Option<AdapterSignal> {
+    let header = msg.header();
+    let sender = header.sender()?.as_str();
+    let adapter = |path: &str, event| AdapterSignal::Adapter {
+        sender: sender.to_string(),
+        path: path.to_string(),
+        event,
+    };
+    match (header.interface()?.as_str(), header.member()?.as_str()) {
+        ("org.freedesktop.DBus", "NameOwnerChanged") => {
+            if sender != "org.freedesktop.DBus" {
+                return None;
+            }
+            let (name, _, _) = msg.body().deserialize::<(String, String, String)>().ok()?;
+            (name == BLUEZ_SERVICE).then_some(AdapterSignal::Owner)
+        }
+        ("org.freedesktop.DBus.Properties", "PropertiesChanged") => {
+            // BlueZ keeps its adapters at `/org/bluez/<name>`, and their
+            // devices under them: a device's changes, one per advertisement,
+            // go here.
+            let path = header.path()?.as_str();
+            let name = path.strip_prefix("/org/bluez/")?;
+            if name.contains('/') {
+                return None;
+            }
+            let (iface, changed, _) = msg
+                .body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                .ok()?;
+            if iface != ADAPTER_INTERFACE {
+                return None;
+            }
+            let powered = bool::try_from(changed.get("Powered")?.clone()).ok()?;
+            Some(adapter(path, AdapterEvent::Powered(powered)))
+        }
+        ("org.freedesktop.DBus.ObjectManager", "InterfacesAdded") => {
+            let (path, interfaces) = msg
+                .body()
+                .deserialize::<(
+                    OwnedObjectPath,
+                    HashMap<String, HashMap<String, OwnedValue>>,
+                )>()
+                .ok()?;
+            let props = interfaces.get(ADAPTER_INTERFACE)?;
+            let powered = bool_prop(props, "Powered");
+            Some(adapter(path.as_str(), AdapterEvent::Added { powered }))
+        }
+        ("org.freedesktop.DBus.ObjectManager", "InterfacesRemoved") => {
+            let (path, interfaces) = msg
+                .body()
+                .deserialize::<(OwnedObjectPath, Vec<String>)>()
+                .ok()?;
+            interfaces
+                .iter()
+                .any(|iface| iface == ADAPTER_INTERFACE)
+                .then(|| adapter(path.as_str(), AdapterEvent::Removed))
+        }
+        _ => None,
+    }
+}
+
+/// The adapter signals waiting for the watch, taken all at once: what each
+/// adapter's said, by sender, and whether bluetoothd came or went, since they
+/// were last taken.
+///
+/// An adapter flapping, or a burst of them, is one change per adapter
+/// however long it goes on: its signals say where it ended up, and what it
+/// went through on the way that a client has to start again after - see
+/// [`AdapterChange`]. Queued one per signal, each would be answered in turn,
+/// long after the adapter had settled (#96).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AdapterChanges {
+    /// Whether bluetoothd left the bus or came on it.
+    owner: bool,
+    /// What each adapter's signals said, by sender, then by path.
+    adapters: BySender,
+}
+
+/// What adapters' signals said, by the unique name that sent them, then by
+/// the adapter's path.
+type BySender = BTreeMap<String, BTreeMap<String, AdapterChange>>;
+
+/// What one adapter's signals said since they were last taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdapterChange {
+    /// Whether it is there now, and powered: `None` once removed.
+    now: Option<bool>,
+    /// Whether it was announced in between.
+    added: bool,
+    /// Whether it was removed in between: one there now is another.
+    removed: bool,
+    /// Whether it was off in between, which ended discovery there.
+    off: bool,
+}
+
+impl Queue for AdapterChanges {
+    type Item = AdapterSignal;
+    type Out = AdapterChanges;
+
+    fn push(&mut self, signal: AdapterSignal) {
+        let (sender, path, event) = match signal {
+            AdapterSignal::Owner => {
+                self.owner = true;
+                return;
+            }
+            AdapterSignal::Adapter {
+                sender,
+                path,
+                event,
+            } => (sender, path, event),
+        };
+        let now = match event {
+            AdapterEvent::Added { powered } | AdapterEvent::Powered(powered) => Some(powered),
+            AdapterEvent::Removed => None,
+        };
+        let change = self
+            .adapters
+            .entry(sender)
+            .or_default()
+            .entry(path)
+            .or_insert(AdapterChange {
+                now,
+                added: false,
+                removed: false,
+                off: false,
+            });
+        change.now = now;
+        change.added |= matches!(event, AdapterEvent::Added { .. });
+        change.removed |= now.is_none();
+        change.off |= now != Some(true);
+    }
+
+    fn pop(&mut self) -> Option<AdapterChanges> {
+        (self.owner || !self.adapters.is_empty()).then(|| std::mem::take(self))
+    }
+}
+
+/// The longest a task waits before it tries again - see [`backoff`].
+pub const RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// How long to wait before trying again after `failures` failures in a row:
+/// a second, doubling up to [`RETRY_MAX`].
+pub fn backoff(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(6);
+    Duration::from_secs(1 << doublings).min(RETRY_MAX)
+}
+
+/// The waits of a background task that sets itself up again whenever it
+/// stops - when the system bus cannot be reached, or BlueZ's signals on it
+/// end: [`backoff`], counting a run that ended within [`RETRY_MAX`] as a
+/// failure too, so that a connection failing at once is not tried in a loop.
+#[derive(Debug, Default)]
+pub struct Backoff {
+    failures: u32,
+}
+
+impl Backoff {
+    /// How long to wait after another failure.
+    pub fn failed(&mut self) -> Duration {
+        self.failures = self.failures.saturating_add(1);
+        backoff(self.failures)
+    }
+
+    /// How long to wait after a run of `ran` that ended. One that went on a
+    /// while starts the waits from the shortest again.
+    pub fn ended(&mut self, ran: Duration) -> Duration {
+        if ran >= RETRY_MAX {
+            self.failures = 0;
+        }
+        self.failed()
+    }
 }
 
 /// BlueZ's device objects: which are connected AirPods, what each is called,
@@ -493,19 +1010,21 @@ impl Devices {
 
 /// What [`drain`] holds for its reader, kept as the subscription needs it:
 /// [`Pending`] for the connection watch, the latest advertisement from each
-/// address for the scanner. Neither `push` nor `pop` may panic halfway - see
-/// [`lock`].
+/// address for the scanner, [`AdapterChanges`] for the adapter watch. Each
+/// `pop` gives out an `Out`: one item, or all of them in one. Neither `push`
+/// nor `pop` may panic halfway - see [`lock`].
 pub(crate) trait Queue: Default + Send + 'static {
     type Item: Send + 'static;
+    type Out: Send + 'static;
     fn push(&mut self, item: Self::Item);
-    fn pop(&mut self) -> Option<Self::Item>;
+    fn pop(&mut self) -> Option<Self::Out>;
 }
 
 /// Reads `events` as they come, in a task of its own, into a `Q`, from where
 /// the returned stream takes them at its reader's pace. The task ends with
 /// `events`, or once the stream is dropped; the stream ends once the task has
 /// and nothing is pending.
-pub(crate) fn drain<Q, S>(events: S) -> impl Stream<Item = Q::Item>
+pub(crate) fn drain<Q, S>(events: S) -> impl Stream<Item = Q::Out>
 where
     Q: Queue,
     S: Stream<Item = Q::Item> + Send + 'static,
@@ -576,6 +1095,7 @@ struct Pending {
 
 impl Queue for Pending {
     type Item = ConnectionEvent;
+    type Out = ConnectionEvent;
 
     fn push(&mut self, event: ConnectionEvent) {
         match event.connected {
@@ -747,22 +1267,27 @@ mod tests {
     /// One object per device, under its adapter's root, and a MAC's colons
     /// are not legal in an object path.
     #[test]
-    fn battery_paths_are_per_device_and_adapter() {
-        let root = provider_root("/org/bluez/hci1").unwrap();
+    fn battery_paths_are_per_device_adapter_and_connection() {
+        let root = provider_root(":1.42", "/org/bluez/hci1").unwrap();
         assert_eq!(
             root.as_str(),
-            "/com/github/mstroecker/linuxpods/battery/hci1"
+            "/com/github/mstroecker/linuxpods/battery/_1_42/hci1"
         );
         assert_eq!(
             battery_path(&root, MAC_A).unwrap().as_str(),
-            "/com/github/mstroecker/linuxpods/battery/hci1/airpods_battery_AA_BB_CC_DD_EE_FF"
+            "/com/github/mstroecker/linuxpods/battery/_1_42/hci1/airpods_battery_AA_BB_CC_DD_EE_FF"
         );
         assert_ne!(
             battery_path(&root, MAC_A).unwrap(),
             battery_path(&root, MAC_B).unwrap()
         );
-        assert_ne!(provider_root("/org/bluez/hci0").unwrap(), root);
-        assert!(provider_root("/").is_err(), "names no adapter");
+        assert_ne!(provider_root(":1.42", "/org/bluez/hci0").unwrap(), root);
+        assert_ne!(
+            provider_root(":1.43", "/org/bluez/hci1").unwrap(),
+            root,
+            "another app's"
+        );
+        assert!(provider_root(":1.42", "/").is_err(), "names no adapter");
     }
 
     /// A GetManagedObjects reply, of `objects` each with `interfaces`.
@@ -959,6 +1484,324 @@ mod tests {
                 services(PATH_B),
             ]
         );
+    }
+
+    const HCI0: &str = "/org/bluez/hci0";
+    const HCI1: &str = "/org/bluez/hci1";
+    /// The unique names of two bluetoothds, one after the other.
+    const OLD: &str = ":1.5";
+    const NEW: &str = ":1.9";
+
+    fn signal(sender: &str, path: &str, event: AdapterEvent) -> AdapterSignal {
+        AdapterSignal::Adapter {
+            sender: sender.to_string(),
+            path: path.to_string(),
+            event,
+        }
+    }
+
+    fn added(path: &str, powered: bool) -> AdapterSignal {
+        signal(OLD, path, AdapterEvent::Added { powered })
+    }
+
+    fn powered(path: &str, powered: bool) -> AdapterSignal {
+        signal(OLD, path, AdapterEvent::Powered(powered))
+    }
+
+    fn removed(path: &str) -> AdapterSignal {
+        signal(OLD, path, AdapterEvent::Removed)
+    }
+
+    /// The changes `signals` make, as the watch takes them.
+    fn changes(signals: impl IntoIterator<Item = AdapterSignal>) -> AdapterChanges {
+        let mut changes = AdapterChanges::default();
+        for signal in signals {
+            changes.push(signal);
+        }
+        let taken = changes.pop().unwrap_or_default();
+        assert_eq!(changes.pop(), None, "all taken at once");
+        taken
+    }
+
+    /// What `signals` say of each adapter, by sender.
+    fn by_sender(signals: impl IntoIterator<Item = AdapterSignal>) -> BySender {
+        changes(signals).adapters
+    }
+
+    fn adapters(adapters: &[(&str, bool)]) -> Vec<Adapter> {
+        adapters
+            .iter()
+            .map(|&(path, powered)| Adapter {
+                path: path.to_string(),
+                powered,
+            })
+            .collect()
+    }
+
+    /// A set with `adapters`, each new, as first read from the bluetoothd at
+    /// `owner`.
+    fn read(owner: &str, list: &[(&str, bool)], tokens: &mut Tokens) -> AdapterSet {
+        AdapterSet::default().read(adapters(list), owner.to_string(), BySender::new(), tokens)
+    }
+
+    /// An adapter flapping is one change however long it flaps, which says
+    /// where it ended up and that it was off on the way - and each adapter's
+    /// is its own, as is each sender's.
+    #[test]
+    fn a_flapping_adapter_is_one_change() {
+        let mut flapping = Vec::new();
+        for _ in 0..1000 {
+            flapping.push(powered(HCI0, false));
+            flapping.push(powered(HCI0, true));
+        }
+        flapping.push(powered(HCI1, true));
+        flapping.push(signal(NEW, HCI1, AdapterEvent::Removed));
+        let mut taken = changes(flapping);
+        assert!(!taken.owner);
+        let change = |now, removed, off| AdapterChange {
+            now,
+            added: false,
+            removed,
+            off,
+        };
+        assert_eq!(
+            taken.adapters.remove(OLD).unwrap(),
+            BTreeMap::from([
+                (HCI0.to_string(), change(Some(true), false, true)),
+                (HCI1.to_string(), change(Some(true), false, false)),
+            ])
+        );
+        assert_eq!(
+            taken.adapters.remove(NEW).unwrap(),
+            BTreeMap::from([(HCI1.to_string(), change(None, true, true))])
+        );
+        assert!(changes([]).adapters.is_empty());
+        assert!(changes([AdapterSignal::Owner, AdapterSignal::Owner]).owner);
+    }
+
+    /// Discovery has to start again on an adapter that was off at any point,
+    /// and everything on one that went at any point; neither on one that
+    /// stayed. One that went for good is gone from the set.
+    #[test]
+    fn tokens_change_with_what_bluez_forgot() {
+        let mut tokens = Tokens::default();
+        let mut set = read(OLD, &[(HCI0, true), (HCI1, false)], &mut tokens);
+        assert!(set.on_bus());
+        let before = *set.get(HCI0).unwrap();
+        assert_eq!(set.get(HCI1).unwrap().discovery, None, "off");
+
+        // Announced again, as it was: nothing to start again.
+        let mut same = set.clone();
+        same.apply(by_sender([added(HCI0, true)]), &mut tokens);
+        assert_eq!(same, set);
+
+        let mut cycled = set.clone();
+        cycled.apply(
+            by_sender([powered(HCI0, false), powered(HCI0, true)]),
+            &mut tokens,
+        );
+        let after = *cycled.get(HCI0).unwrap();
+        assert_eq!(after.registration, before.registration, "providers kept");
+        assert_ne!(after.discovery, before.discovery, "discovery ended");
+        assert!(after.discovery.is_some());
+
+        let mut replugged = set.clone();
+        replugged.apply(by_sender([removed(HCI0), added(HCI0, true)]), &mut tokens);
+        let after = *replugged.get(HCI0).unwrap();
+        assert_ne!(after.registration, before.registration);
+        assert_ne!(after.discovery, before.discovery);
+
+        set.apply(
+            by_sender([removed(HCI1), powered(HCI0, false)]),
+            &mut tokens,
+        );
+        assert_eq!(set.iter().map(|(path, _)| path).collect::<Vec<_>>(), [HCI0]);
+        assert_eq!(set.get(HCI0).unwrap().discovery, None);
+        assert!(!AdapterSet::default().on_bus());
+    }
+
+    /// Read again from the bluetoothd it was read from, the set keeps its
+    /// tokens - but for what that bluetoothd ended meanwhile. Read from a new
+    /// one, every token is new. Regression (rules review of #121): a restart
+    /// seen as two changes of owner, the first read answered by the new
+    /// bluetoothd already, gave new tokens twice; attachment registered its
+    /// provider again, BlueZ refused it as registered already, and GNOME
+    /// Settings lost the battery.
+    #[test]
+    fn reading_one_bluetoothd_again_keeps_the_tokens() {
+        let mut tokens = Tokens::default();
+        let both = [(HCI0, true), (HCI1, true)];
+        let old = read(OLD, &both, &mut tokens);
+        let new = old.read(
+            adapters(&both),
+            NEW.to_string(),
+            BySender::new(),
+            &mut tokens,
+        );
+        for path in [HCI0, HCI1] {
+            let (was, now) = (old.get(path).unwrap(), new.get(path).unwrap());
+            assert_ne!(now.registration, was.registration);
+            assert_ne!(now.discovery, was.discovery);
+        }
+
+        // Off and on again meanwhile, as the new one signalled; the old one's
+        // last word, out of order, counts for nothing.
+        let meanwhile = by_sender([
+            signal(NEW, HCI1, AdapterEvent::Powered(false)),
+            signal(NEW, HCI1, AdapterEvent::Powered(true)),
+            signal(OLD, HCI0, AdapterEvent::Removed),
+        ]);
+        let again = new.read(adapters(&both), NEW.to_string(), meanwhile, &mut tokens);
+        assert_eq!(again.get(HCI0), new.get(HCI0), "read twice");
+        let (was, now) = (new.get(HCI1).unwrap(), again.get(HCI1).unwrap());
+        assert_eq!(now.registration, was.registration);
+        assert_ne!(now.discovery, was.discovery, "it was off in between");
+    }
+
+    /// Only the bluetoothd the set was read from changes it. A change of
+    /// power for an adapter it never announced is stale - its last before it
+    /// left, taken after the read that found it gone - and is not taken in,
+    /// and nor is anything from another sender: one that has left, or one
+    /// that is not bluetoothd at all. While none was read from, nothing is.
+    #[test]
+    fn signals_from_anyone_but_the_bluetoothd_read_from_change_nothing() {
+        let mut tokens = Tokens::default();
+        let mut set = read(NEW, &[(HCI0, true)], &mut tokens);
+        let before = set.clone();
+        let from_new = |path, event| signal(NEW, path, event);
+        set.apply(
+            by_sender([from_new(HCI1, AdapterEvent::Powered(true))]),
+            &mut tokens,
+        );
+        assert_eq!(set, before, "a power change for an adapter never announced");
+
+        set.apply(
+            by_sender([
+                powered(HCI0, false),
+                signal(":1.66", HCI1, AdapterEvent::Added { powered: true }),
+            ]),
+            &mut tokens,
+        );
+        assert_eq!(set, before, "from the old one, or a stranger");
+
+        // Gone from the bus: the old one's shutdown, taken after the read
+        // that found nobody, adds nothing.
+        let mut away = AdapterSet::default();
+        away.apply(
+            by_sender([added(HCI0, true), powered(HCI0, false)]),
+            &mut tokens,
+        );
+        assert!(away.is_empty() && !away.on_bus());
+
+        // An announced one comes in, from the bluetoothd read from.
+        set.apply(
+            by_sender([from_new(HCI1, AdapterEvent::Added { powered: true })]),
+            &mut tokens,
+        );
+        assert!(set.get(HCI1).is_some());
+    }
+
+    /// The signals that change the adapters are told from the rest - a
+    /// device's, another name's, one claiming to be the bus's - and each says
+    /// what it should, and who sent it.
+    #[test]
+    fn reads_the_signals_that_change_adapters() {
+        let props = |powered: bool| HashMap::from([("Powered", Value::from(powered))]);
+        let path = ObjectPath::try_from(HCI0).unwrap();
+        let from = |builder: zbus::message::Builder<'static>| builder.sender(OLD).unwrap();
+        let interfaces = HashMap::from([(ADAPTER_INTERFACE, props(true))]);
+        let msg = from(
+            Message::signal("/", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded").unwrap(),
+        )
+        .build(&(&path, interfaces))
+        .unwrap();
+        assert_eq!(adapter_signal(&msg), Some(added(HCI0, true)));
+
+        let msg = from(
+            Message::signal(
+                "/",
+                "org.freedesktop.DBus.ObjectManager",
+                "InterfacesRemoved",
+            )
+            .unwrap(),
+        )
+        .build(&(&path, vec![ADAPTER_INTERFACE]))
+        .unwrap();
+        assert_eq!(adapter_signal(&msg), Some(removed(HCI0)));
+
+        let changed = |object: &'static str, iface: &str, props| {
+            from(
+                Message::signal(
+                    object,
+                    "org.freedesktop.DBus.Properties",
+                    "PropertiesChanged",
+                )
+                .unwrap(),
+            )
+            .build(&(iface, props, Vec::<&str>::new()))
+            .unwrap()
+        };
+        let msg = changed(HCI0, ADAPTER_INTERFACE, props(false));
+        assert_eq!(adapter_signal(&msg), Some(powered(HCI0, false)));
+        let discovering = HashMap::from([("Discovering", Value::from(true))]);
+        assert_eq!(
+            adapter_signal(&changed(HCI0, ADAPTER_INTERFACE, discovering)),
+            None
+        );
+        assert_eq!(
+            adapter_signal(&changed(PATH_A, "org.bluez.Device1", props(false))),
+            None,
+            "a device's"
+        );
+
+        let owner = |sender: &str, name: &str| {
+            Message::signal(
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                "NameOwnerChanged",
+            )
+            .unwrap()
+            .sender(sender)
+            .unwrap()
+            .build(&(name, OLD, ""))
+            .unwrap()
+        };
+        assert_eq!(
+            adapter_signal(&owner("org.freedesktop.DBus", BLUEZ_SERVICE)),
+            Some(AdapterSignal::Owner)
+        );
+        assert_eq!(
+            adapter_signal(&owner("org.freedesktop.DBus", "org.example")),
+            None
+        );
+        assert_eq!(
+            adapter_signal(&owner(":1.66", BLUEZ_SERVICE)),
+            None,
+            "not the bus's"
+        );
+
+        let device = ObjectPath::try_from(PATH_A).unwrap();
+        let interfaces = HashMap::from([("org.bluez.Device1", props(false))]);
+        let msg = from(
+            Message::signal("/", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded").unwrap(),
+        )
+        .build(&(&device, interfaces))
+        .unwrap();
+        assert_eq!(adapter_signal(&msg), None, "a device appearing");
+    }
+
+    /// A second, doubling to a minute; a run that went on a while starts the
+    /// waits over, one that ended at once does not.
+    #[test]
+    fn retries_back_off_to_a_minute() {
+        let waits: Vec<u64> = (1..=8).map(|n| backoff(n).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60]);
+        assert_eq!(backoff(u32::MAX), RETRY_MAX);
+
+        let mut backoff = Backoff::default();
+        assert_eq!(backoff.failed().as_secs(), 1);
+        assert_eq!(backoff.ended(Duration::from_secs(1)).as_secs(), 2);
+        assert_eq!(backoff.ended(RETRY_MAX).as_secs(), 1);
     }
 
     /// Dropping the stream ends the task, which drops the subscription.

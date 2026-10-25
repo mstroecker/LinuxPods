@@ -10,9 +10,25 @@
 //! pipeline tests run against the harness's fake BlueZ the code the app runs
 //! against bluetoothd.
 //!
-//! Each adapter has a battery provider of its own, registered with it at
-//! startup, and a pair's battery goes to the provider of the adapter it is on:
-//! the one its `Device1.Adapter` names. [`BatteryProvider`] says why one each.
+//! Each adapter has a battery provider of its own, and a pair's battery goes
+//! to the provider of the adapter it is on: the one its `Device1.Adapter`
+//! names. [`BatteryProvider`] says why one each.
+//!
+//! # Adapters coming and going
+//!
+//! The providers follow BlueZ's adapters, as [`bluez::watch_adapters`] tells
+//! of them (#50): one is registered with each adapter as it is found - at
+//! startup, plugged in later, or there again after bluetoothd restarted and
+//! forgot every provider - and dropped once BlueZ has dropped it, with the
+//! adapter gone or bluetoothd restarted. A provider dropped takes its
+//! batteries off its root; registered again, it has them exported anew at the
+//! next sync. bluetoothd keeps an adapter's providers while it is off, so
+//! power alone changes nothing here.
+//!
+//! After every change to the adapters the attached pairs are swept again
+//! against what BlueZ reports connected: pairs that connected while nothing
+//! could be heard of it are attached, and those whose connection went - with
+//! their adapter, say - detached.
 //!
 //! The battery is the only part that needs BlueZ to take a provider, and the
 //! only part that needs the pair's adapter. When an adapter refuses, none is
@@ -42,6 +58,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bluer::Address;
@@ -49,38 +66,73 @@ use futures_util::{Stream, StreamExt};
 use tokio::sync::watch;
 use zbus::Connection;
 
-use crate::bluez::{self, BatteryAction, BatteryProvider, ConnectionEvent, Devices};
+use crate::bluez::{
+    self, AdapterSet, Backoff, BatteryAction, BatteryProvider, ConnectionEvent, Devices,
+};
 use crate::podstate::{Coordinator, Snapshot};
 
-/// Runs attachment on the system bus, where BlueZ is. What `main.rs` spawns.
+/// Runs attachment on the system bus, where BlueZ is, for as long as the app
+/// runs. What `main.rs` spawns. When the bus cannot be reached, or BlueZ's
+/// signals on it end, it starts over, waiting longer each time - see
+/// [`Backoff`].
 pub async fn run(coordinator: Arc<Coordinator>) {
-    let conn = match Connection::system().await {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!("failed to connect to the system bus: {e}");
-            return;
-        }
-    };
-    match Attachment::new(conn, coordinator).await {
-        Ok(attachment) => attachment.run().await,
-        Err(e) => tracing::warn!("{e:#}"),
+    let mut backoff = Backoff::default();
+    loop {
+        let wait = match start(&coordinator).await {
+            Ok(attachment) => {
+                let began = Instant::now();
+                attachment.run().await;
+                tracing::warn!("attachment stopped: BlueZ's signals ended");
+                backoff.ended(began.elapsed())
+            }
+            Err(e) => {
+                tracing::warn!("{e:#}");
+                backoff.failed()
+            }
+        };
+        tracing::info!("starting attachment again in {}s", wait.as_secs());
+        tokio::time::sleep(wait).await;
     }
+}
+
+/// [`Attachment::new`] on the system bus.
+async fn start(coordinator: &Arc<Coordinator>) -> Result<Attachment> {
+    let conn = Connection::system()
+        .await
+        .context("failed to connect to the system bus")?;
+    Attachment::new(conn, coordinator.clone()).await
 }
 
 /// Attaches and detaches pairs as BlueZ reports them connecting and
 /// disconnecting, and mirrors their batteries into GNOME Settings.
 pub struct Attachment {
     coordinator: Arc<Coordinator>,
+    /// Where BlueZ is, and the battery providers are served.
+    conn: Connection,
     devices: Devices,
     /// The battery provider registered with each adapter, by the adapter's
-    /// path. An adapter that refused it has none - see the module docs.
-    providers: HashMap<String, BatteryProvider>,
+    /// path - see the module docs.
+    providers: HashMap<String, Registration>,
+    /// BlueZ's adapters, from before the startup sweep on.
+    adapters: watch::Receiver<AdapterSet>,
     /// BlueZ's connection events, from before the startup sweep on.
     events: Pin<Box<dyn Stream<Item = ConnectionEvent> + Send + Sync>>,
     /// Every attached pair, by real MAC. A disconnect names the BlueZ object;
     /// the MAC is kept rather than looked up then, by when the device may be
     /// gone.
     attached: HashMap<Address, Attached>,
+}
+
+/// The battery provider registered with one adapter.
+struct Registration {
+    /// The adapter's [`bluez::AdapterState::registration`] it was registered
+    /// under. Once that changes, BlueZ may have forgotten it; registering
+    /// again is harmless, as the root is this connection's own and BlueZ
+    /// holding it still counts as registered.
+    token: u64,
+    /// `None` when the adapter refused it - see the module docs. It is not
+    /// asked again until the token changes.
+    provider: Option<BatteryProvider>,
 }
 
 /// One attached pair - see the module docs.
@@ -97,71 +149,172 @@ struct Attached {
 
 impl Attachment {
     /// Starts attachment over `conn`, with whichever BlueZ answers there:
-    /// registers a battery provider with every adapter, watches for
-    /// connections, and attaches the pairs that are connected already. Back
-    /// from here, the startup sweep is over, and [`Attachment::run`] takes
-    /// every connection from then on.
+    /// watches for connections and adapters, registers a battery provider
+    /// with every adapter, and attaches the pairs that are connected already.
+    /// Back from here, the startup sweep is over, and [`Attachment::run`]
+    /// takes every connection and adapter change from then on.
     ///
-    /// Fails only when connections cannot be watched.
+    /// Fails only when connections or adapters cannot be watched.
     pub async fn new(conn: Connection, coordinator: Arc<Coordinator>) -> Result<Self> {
-        let providers = register_providers(&conn).await;
-        let devices = Devices::new(conn);
+        let devices = Devices::new(conn.clone());
 
-        // Subscribe before the sweep so a connection racing startup is not missed.
+        // Subscribe before the sweep so a connection racing startup is not missed,
+        // and an adapter likewise.
         let events = Box::pin(
             devices
                 .watch_connections()
                 .await
                 .context("failed to watch device connections")?,
         );
+        let adapters = bluez::watch_adapters(&conn)
+            .await
+            .context("failed to watch Bluetooth adapters")?;
         tracing::info!("watching for AirPods connections");
 
         let mut attachment = Self {
             coordinator,
+            conn,
             devices,
-            providers,
+            providers: HashMap::new(),
+            adapters,
             events,
             attached: HashMap::new(),
         };
-        // Names for the device switcher. Read once up front so paired devices are
-        // labelled before any of them connects, then again on every event - a rename
-        // made while the app was running takes effect at the next one, and a newly
-        // paired pair shows up with its services, which BlueZ fills in once pairing
-        // is done.
-        attachment.update_names().await;
-        attachment.sweep().await;
+        attachment.update_adapters().await;
+        if attachment.providers.is_empty() {
+            tracing::warn!("found no Bluetooth adapter to register the battery provider with");
+            tracing::warn!("Battery won't appear in GNOME Settings until one is, but the UI works");
+        }
         Ok(attachment)
     }
 
-    /// Follows BlueZ's connection events and the coordinator's snapshots until
-    /// both end.
+    /// Follows BlueZ's connection events and adapters, and the coordinator's
+    /// snapshots, until BlueZ's signals on the connection end.
     pub async fn run(mut self) {
         let mut updates = self.coordinator.subscribe();
         loop {
             tokio::select! {
-                Some(event) = self.events.next() => self.handle(event).await,
+                event = self.events.next() => match event {
+                    Some(event) => self.handle(event).await,
+                    None => return,
+                },
+
+                changed = self.adapters.changed() => match changed {
+                    Ok(()) => self.update_adapters().await,
+                    Err(_) => return,
+                },
 
                 // A snapshot can bring a pair's reading, change it or take it away.
                 Ok(()) = updates.changed() => {}
-
-                else => break,
             }
 
             // After a connection event as well: it changes which pairs are attached,
-            // and a pair whose AAP link failed may have a BLE reading already.
+            // and a pair whose AAP link failed may have a BLE reading already. And
+            // after an adapter change, which may have brought a provider.
             self.sync_batteries(&mut updates).await;
         }
     }
 
-    /// Attaches every pair that is connected already - every pair, not just one.
-    async fn sweep(&mut self) {
-        match self.devices.connected_airpods().await {
-            Ok(paths) => {
-                for path in paths {
-                    self.attach(&path).await;
+    /// Brings the battery providers in line with BlueZ's adapters - see the
+    /// module docs - then the attached pairs with what BlueZ reports
+    /// connected.
+    async fn update_adapters(&mut self) {
+        // Cloned out: the borrow holds the watch's lock.
+        let adapters = self.adapters.borrow_and_update().clone();
+        let forgotten: Vec<String> = self
+            .providers
+            .iter()
+            .filter(|(path, registration)| {
+                adapters
+                    .get(path)
+                    .is_none_or(|adapter| adapter.registration != registration.token)
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in forgotten {
+            if !adapters.on_bus() {
+                tracing::info!("BlueZ left the bus, and the battery provider on {path} with it");
+            } else if adapters.get(&path).is_some() {
+                tracing::info!(
+                    "registering the battery provider on {path} again: \
+                     it was replugged, or bluetoothd restarted"
+                );
+            } else {
+                tracing::info!("{path} is gone, and its battery provider with it");
+            }
+            self.forget_provider(&path).await;
+        }
+        // Nothing to ask until it is back, and then everything.
+        if !adapters.on_bus() {
+            return;
+        }
+        for (path, adapter) in adapters.iter() {
+            if !self.providers.contains_key(path) {
+                let registration = Registration {
+                    token: adapter.registration,
+                    provider: register_provider(&self.conn, path).await,
+                };
+                self.providers.insert(path.to_string(), registration);
+            }
+        }
+        // Names for the device switcher. Read up front so paired devices are
+        // labelled before any of them connects, then again on every event - a rename
+        // made while the app was running takes effect at the next one, and a newly
+        // paired pair shows up with its services, which BlueZ fills in once pairing
+        // is done. An adapter plugged in brings its paired devices.
+        self.update_names().await;
+        self.sweep().await;
+    }
+
+    /// Drops the provider of the adapter at `path`, which BlueZ has dropped,
+    /// with the adapter or on restarting. Its batteries are withdrawn from its
+    /// root, and the pairs they were for show none until a provider is there
+    /// again.
+    async fn forget_provider(&mut self, path: &str) {
+        let Some(registration) = self.providers.remove(path) else {
+            return;
+        };
+        let Some(mut provider) = registration.provider else {
+            return;
+        };
+        for (&mac, pair) in &mut self.attached {
+            if pair.adapter.as_deref() == Some(path) && pair.battery.take().is_some() {
+                let withdraw = BatteryAction::Remove { mac };
+                if let Err(e) = provider.apply(&withdraw).await {
+                    tracing::debug!("failed to withdraw the battery for {mac}: {e:#}");
                 }
             }
-            Err(e) => tracing::warn!("failed to list connected devices: {e:#}"),
+        }
+    }
+
+    /// Brings the attached pairs in line with the AirPods BlueZ reports
+    /// connected: attaches every one not attached yet - every pair, not just
+    /// one - and detaches every attached one no longer among them.
+    async fn sweep(&mut self) {
+        let paths = match self.devices.connected_airpods().await {
+            Ok(paths) => paths,
+            Err(e) => {
+                tracing::warn!("failed to list connected devices: {e:#}");
+                return;
+            }
+        };
+        let gone: Vec<(Address, String)> = self
+            .attached
+            .iter()
+            .filter(|(_, pair)| !paths.contains(&pair.path))
+            .map(|(&mac, pair)| (mac, pair.path.clone()))
+            .collect();
+        for (mac, path) in gone {
+            tracing::info!("AirPods no longer connected: {path}");
+            self.detach(mac).await;
+        }
+        for path in paths {
+            // One attached already keeps its link, or the lack of one: AAP is
+            // not retried here (#49).
+            if self.attached_at(&path).is_none() {
+                tracing::info!("AirPods found connected: {path}");
+                self.attach(&path).await;
+            }
         }
     }
 
@@ -313,11 +466,15 @@ impl Attachment {
     async fn apply(&mut self, adapter: Option<&str>, action: &BatteryAction) -> bool {
         // Without the pair's adapter, or a provider for it, nothing goes
         // through, and nothing is logged: that was said once, at attachment or
-        // at startup.
+        // as the provider was refused or dropped.
         let Some(adapter) = adapter else {
             return false;
         };
-        let Some(provider) = self.providers.get_mut(adapter) else {
+        let Some(provider) = self
+            .providers
+            .get_mut(adapter)
+            .and_then(|registration| registration.provider.as_mut())
+        else {
             return false;
         };
         if let Err(e) = provider.apply(action).await {
@@ -335,43 +492,24 @@ impl Attachment {
     }
 }
 
-/// Registers a battery provider with every adapter BlueZ has on `conn`,
+/// Registers a battery provider on `conn` with the adapter at `adapter`,
 /// powered or not: bluetoothd keeps an adapter's providers while it is off.
-/// The ones that took it are returned by the adapter's path; each one that did
-/// not, and BlueZ having none, is logged here.
-async fn register_providers(conn: &Connection) -> HashMap<String, BatteryProvider> {
-    let adapters = match bluez::adapters(conn).await {
-        Ok(adapters) => adapters,
+/// `None`, logged here, when the adapter does not take it.
+async fn register_provider(conn: &Connection, adapter: &str) -> Option<BatteryProvider> {
+    match BatteryProvider::register(conn.clone(), adapter).await {
+        Ok(provider) => {
+            tracing::info!("battery provider registered with {adapter}");
+            Some(provider)
+        }
         Err(e) => {
-            tracing::warn!("failed to list Bluetooth adapters: {e:#}");
-            Vec::new()
-        }
-    };
-    if adapters.is_empty() {
-        tracing::warn!("found no Bluetooth adapter to register the battery provider with");
-        tracing::warn!("Battery won't appear in GNOME Settings, but the UI still works");
-    }
-
-    let mut providers = HashMap::new();
-    for adapter in adapters {
-        match BatteryProvider::register(conn.clone(), &adapter.path).await {
-            Ok(provider) => {
-                tracing::info!("battery provider registered with {}", adapter.path);
-                providers.insert(adapter.path, provider);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "failed to register the battery provider with {}: {e:#}",
-                    adapter.path
-                );
-                tracing::warn!(
-                    "Batteries of pairs on {} won't appear in GNOME Settings, but the UI still works",
-                    adapter.path
-                );
-            }
+            tracing::warn!("failed to register the battery provider with {adapter}: {e:#}");
+            tracing::warn!(
+                "Batteries of pairs on {adapter} won't appear in GNOME Settings, \
+                 but the UI still works"
+            );
+            None
         }
     }
-    providers
 }
 
 /// Decides how the GNOME Settings batteries change so that each attached pair

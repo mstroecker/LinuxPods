@@ -9,23 +9,27 @@
 //! the first advertisement from every address, and AirPods rotate theirs every
 //! few seconds while disconnected (#86).
 //!
-//! Discovery runs on every powered adapter, whatever it is called (#51). The
-//! signals come from devices under any of them, as the subscription takes in
-//! every signal bluetoothd sends.
+//! Discovery runs on every powered adapter, whatever it is called (#51), and
+//! starts again on each as it powers on, is plugged in, or bluetoothd restarts
+//! (#50) - see [`Scanning`]. The signals come from devices under any of them,
+//! as the subscription takes in every signal bluetoothd sends.
 //!
 //! Accuracy note carried over from the Go docs: cleartext advertisements give
 //! battery in 10% steps. Decrypting with a stored ENC_KEY yields 1% accuracy.
 
 use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
 
 use anyhow::{Context, Result};
 use bluer::Address;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
+use tokio::sync::watch;
+use tokio::time::Instant;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, MatchRule, Message, MessageStream, proxy};
 
 use super::parser::{ProximityData, parse_proximity_data};
-use crate::bluez::{self, BLUEZ_SERVICE, Queue, drain};
+use crate::bluez::{self, AdapterSet, BLUEZ_SERVICE, Queue, drain};
 
 /// The key of Apple's entry in a device's `ManufacturerData`.
 pub const APPLE_COMPANY_ID: u16 = 0x004C;
@@ -76,6 +80,10 @@ impl Scanner {
     ///
     /// Fails when BlueZ cannot be asked for its adapters, or scanning started
     /// on none of them.
+    ///
+    /// Once, for a probe or a test: discovery started here ends with the
+    /// first power cycle. The app scans with [`Scanner::scan`], which starts
+    /// it again.
     pub async fn start_discovery(&self) -> Result<Vec<String>> {
         let adapters = bluez::adapters(&self.conn)
             .await
@@ -103,6 +111,37 @@ impl Scanner {
         Ok(scanning)
     }
 
+    /// Starts scanning on every powered adapter, and keeps it going on each
+    /// as adapters change - see [`Scanning`]. Back once discovery has been
+    /// asked for on every adapter powered now; there may be none.
+    ///
+    /// Subscribed to advertisements first, then to the adapters, so that
+    /// nothing falls in between - see [`Scanner::start_discovery`].
+    ///
+    /// Fails only when either subscription does.
+    pub async fn scan(self) -> Result<Scanning> {
+        let adverts = Box::pin(self.advertisements().await?);
+        let adapters = bluez::watch_adapters(&self.conn)
+            .await
+            .context("failed to watch Bluetooth adapters")?;
+        let none = {
+            let adapters = adapters.borrow();
+            adapters.on_bus() && adapters.is_empty()
+        };
+        if none {
+            tracing::info!("found no Bluetooth adapter to scan on; waiting for one");
+        }
+        let mut scanning = Scanning {
+            scanner: self,
+            adverts,
+            adapters,
+            discovery: HashMap::new(),
+            bluez_gone: false,
+        };
+        scanning.update().await;
+        Ok(scanning)
+    }
+
     /// Sets an LE-only discovery filter on the adapter at `adapter`, and
     /// starts scanning there.
     pub async fn start_discovery_on(&self, adapter: &str) -> Result<()> {
@@ -126,8 +165,8 @@ impl Scanner {
     /// ScanForAirPods(timeout) polling call with a stream the coordinator drives.
     ///
     /// The stream may be read at the caller's pace, with calls to BlueZ on the
-    /// scanner's connection in between - [`Scanner::start_discovery`] makes
-    /// them after subscribing. A task of its own drains the subscription as
+    /// scanner's connection in between - [`Scanning`] makes them whenever
+    /// discovery has to start again. A task of its own drains the subscription as
     /// the signals arrive, as [`crate::bluez::drain`] does: left in zbus's
     /// queue, 64 advertisements would stop zbus reading the connection, and
     /// the reply to such a call would never come. What waits for the reader
@@ -197,6 +236,162 @@ impl Scanner {
     }
 }
 
+/// Scanning on every powered adapter, from [`Scanner::scan`], for as long as
+/// the scanner's connection lasts (#50).
+///
+/// Discovery is BlueZ's to end: an adapter powering off - the desktop's
+/// Bluetooth switch, rfkill, a suspend - ends it there, and so does one
+/// unplugged, or bluetoothd restarting. So it is started again on each adapter
+/// whenever [`AdapterSet`] says what was started there is gone: on one that
+/// powers on, is plugged in, or is there after bluetoothd restarted. A refusal
+/// is tried again after a while, [`bluez::backoff`] longer each time in a row.
+/// The advertisement stream is the same throughout: subscribed once, ahead of
+/// every start, so that none of them leaves a gap.
+///
+/// Its own connection's discovery: bluetoothd keeps discovery by client.
+pub struct Scanning {
+    scanner: Scanner,
+    adverts: Pin<Box<dyn Stream<Item = Advertisement> + Send>>,
+    adapters: watch::Receiver<AdapterSet>,
+    /// Where discovery stands on each adapter there is, by path.
+    discovery: HashMap<String, Discovery>,
+    /// Whether BlueZ was not on the bus at the last update.
+    bluez_gone: bool,
+}
+
+/// Where discovery stands on one adapter - see
+/// [`bluez::AdapterState::discovery`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discovery {
+    /// The adapter is off.
+    Off,
+    /// Started under that token.
+    On(u64),
+    /// Refused under that token, `failures` times in a row, and to be tried
+    /// again at `retry`.
+    Failed {
+        token: u64,
+        failures: u32,
+        retry: Instant,
+    },
+}
+
+impl Scanning {
+    /// The next advertisement from any adapter. Meanwhile discovery is
+    /// started again wherever it has to be. `None` once the scanner's
+    /// connection's signals have ended: nothing more is heard on it.
+    pub async fn next(&mut self) -> Option<Advertisement> {
+        loop {
+            let retry = self
+                .discovery
+                .values()
+                .filter_map(|discovery| match discovery {
+                    Discovery::Failed { retry, .. } => Some(*retry),
+                    _ => None,
+                })
+                .min();
+            tokio::select! {
+                advert = self.adverts.next() => return advert,
+                changed = self.adapters.changed() => {
+                    changed.ok()?;
+                    self.update().await;
+                }
+                () = until(retry) => self.update().await,
+            }
+        }
+    }
+
+    /// Starts discovery on every adapter where it has to be, and forgets the
+    /// adapters that are gone.
+    async fn update(&mut self) {
+        // Cloned out: the borrow holds the watch's lock.
+        let adapters = self.adapters.borrow_and_update().clone();
+        let gone = !adapters.on_bus();
+        if gone && !self.bluez_gone {
+            tracing::info!("BlueZ is not on the bus: no BLE discovery until it is");
+            self.discovery.clear();
+        }
+        self.bluez_gone = gone;
+        self.discovery.retain(|path, _| {
+            let here = adapters.get(path).is_some();
+            if !here {
+                tracing::info!("{path} is gone, and BLE discovery there with it");
+            }
+            here
+        });
+        for (path, adapter) in adapters.iter() {
+            let was = self.discovery.get(path).copied();
+            let Some(token) = adapter.discovery else {
+                match was {
+                    Some(Discovery::Off) => {}
+                    Some(Discovery::On(_)) => {
+                        tracing::info!("BLE discovery on {path} ended: it powered off");
+                    }
+                    _ => tracing::info!("not scanning on {path}: it is powered off"),
+                }
+                self.discovery.insert(path.to_string(), Discovery::Off);
+                continue;
+            };
+            let failures = match was {
+                Some(Discovery::On(on)) if on == token => continue,
+                Some(Discovery::Failed {
+                    token: failed,
+                    failures,
+                    retry,
+                }) if failed == token => {
+                    if retry > Instant::now() {
+                        continue;
+                    }
+                    failures
+                }
+                _ => 0,
+            };
+            let next = match self.scanner.start_discovery_on(path).await {
+                Ok(()) => {
+                    let again = matches!(was, Some(Discovery::On(_)));
+                    let started = if again { "restarted" } else { "started" };
+                    tracing::info!("BLE discovery {started} on {path}");
+                    Discovery::On(token)
+                }
+                // Started already, by this connection: a token can change
+                // without BlueZ ending discovery, as when a re-read sees an
+                // off-and-on it had seen already. Harmless.
+                Err(e) if is_in_progress(&e) => Discovery::On(token),
+                Err(e) => {
+                    let failures = failures + 1;
+                    let wait = bluez::backoff(failures);
+                    tracing::warn!(
+                        "failed to start BLE discovery on {path}: {e:#}; trying again in {}s",
+                        wait.as_secs()
+                    );
+                    Discovery::Failed {
+                        token,
+                        failures,
+                        retry: Instant::now() + wait,
+                    }
+                }
+            };
+            self.discovery.insert(path.to_string(), next);
+        }
+    }
+}
+
+/// Whether BlueZ refused discovery as started already by the caller.
+fn is_in_progress(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<zbus::Error>(),
+        Some(zbus::Error::MethodError(name, _, _)) if name.as_str() == "org.bluez.Error.InProgress"
+    )
+}
+
+/// Returns at `at`, or never.
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The advertisements waiting for the scanner's reader: the latest from each
 /// address, in the order each address first came since it was last taken.
 ///
@@ -216,6 +411,7 @@ struct Latest {
 
 impl Queue for Latest {
     type Item = Advertisement;
+    type Out = Advertisement;
 
     fn push(&mut self, advert: Advertisement) {
         let address = advert.ble_mac;

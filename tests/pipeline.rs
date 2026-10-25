@@ -36,9 +36,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bluer::Address;
-use futures_util::StreamExt;
 use tempfile::TempDir;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use zbus::Connection;
@@ -128,8 +127,17 @@ impl Fixture {
         adapters: &[(&str, bool)],
         pairs: &[(&str, Address, u16, [u8; 3])],
     ) -> Self {
-        init_logs();
         let bus = PrivateBus::start().expect("dbus-daemon starts");
+        Self::on_bus(bus, adapters, pairs).await
+    }
+
+    /// [`Fixture::with_adapters`], on `bus`.
+    async fn on_bus(
+        bus: PrivateBus,
+        adapters: &[(&str, bool)],
+        pairs: &[(&str, Address, u16, [u8; 3])],
+    ) -> Self {
+        init_logs();
         let sockets = tempfile::Builder::new()
             .prefix("linuxpods-aap")
             .tempdir()
@@ -223,6 +231,27 @@ impl Fixture {
         .await;
     }
 
+    /// Waits until some client - the app, as no other is on the test's bus -
+    /// discovers on the adapter called `adapter`.
+    async fn until_discovering(&self, adapter: &str) {
+        let bluez = self.world.bluez();
+        eventually(&format!("discovery on {adapter}"), move || async move {
+            bluez.is_discovering(adapter)
+        })
+        .await;
+    }
+
+    /// Waits until a provider is registered with the adapter called
+    /// `adapter`, and no more than one.
+    async fn until_provider_on(&self, adapter: &str) {
+        let bluez = self.world.bluez();
+        eventually(
+            &format!("a battery provider on {adapter}"),
+            move || async move { bluez.providers_on(adapter) == 1 },
+        )
+        .await;
+    }
+
     /// Waits until a pair is in `mode`, whichever way it got there.
     async fn until_mode(&self, mac: Address, mode: NoiseMode) {
         let world = &self.world;
@@ -251,27 +280,23 @@ impl Fixture {
         let updates = coordinator.subscribe();
 
         // As main.rs's ble_task, on the test's bus: subscribed, then
-        // discovering on every powered adapter. Stopping the task stops both.
+        // discovering on every powered adapter, and following the adapters
+        // from there. Back from `scan`, discovery is on wherever it can be.
+        // Stopping the task stops it all.
         let conn = self.bus.connect().await.unwrap();
-        let (ready, started) = oneshot::channel();
+        let mut scanning = timeout(TIMEOUT, Scanner::with_connection(conn).scan())
+            .await
+            .expect("timed out starting the scanner")
+            .expect("the scanner starts");
         let (handled, handled_rx) = mpsc::unbounded_channel();
         let feed = coordinator.clone();
         let listening = tokio::spawn(async move {
-            let scanner = Scanner::with_connection(conn);
-            let adverts = scanner.advertisements().await.expect("the scanner listens");
-            tokio::pin!(adverts);
-            scanner.start_discovery().await.expect("discovery starts");
-            let _ = ready.send(());
-            while let Some(advert) = adverts.next().await {
+            while let Some(advert) = scanning.next().await {
                 feed.handle_advertisement(advert.data.clone(), advert.ble_mac)
                     .await;
                 let _ = handled.send(advert);
             }
         });
-        timeout(TIMEOUT, started)
-            .await
-            .expect("timed out starting the scanner")
-            .expect("the scanner started");
 
         // As main.rs's attachment task, on a connection of its own. Back from
         // `new`, the startup sweep is over: a pair the test connects from here
@@ -972,8 +997,7 @@ async fn two_pairs_attach_and_detach_independently() {
 /// a refused provider stopped attachment altogether, and every pair stayed on
 /// BLE, a pair new to the app with no key to be read by.
 ///
-/// Refused here because the app's connection has a provider registered at the
-/// same root with the first adapter already.
+/// Refused here as the first adapter has no battery API at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_battery_provider_refused_on_one_adapter_leaves_attachment_working() {
     let fixture = Fixture::with_adapters(
@@ -984,11 +1008,8 @@ async fn a_battery_provider_refused_on_one_adapter_leaves_attachment_working() {
         ],
     )
     .await;
-    let bluez = fixture.bus.connect().await.unwrap();
-    let _registered = BatteryProvider::register(bluez.clone(), "/org/bluez/hci0")
-        .await
-        .unwrap();
-    let mut app = fixture.start_app_on(bluez).await;
+    fixture.world.bluez().drop_battery_api(HCI0).await.unwrap();
+    let mut app = fixture.start_app().await;
 
     app.attach(PAIR).await;
     app.attach(OTHER).await;
@@ -1001,6 +1022,30 @@ async fn a_battery_provider_refused_on_one_adapter_leaves_attachment_working() {
     fixture
         .until_batteries(&HashMap::from([(OTHER, lowest(OTHER_LEVELS))]))
         .await;
+}
+
+/// A provider BlueZ holds already for the app's connection is registered:
+/// BlueZ refuses it again as `AlreadyExists`, and that refusal is the
+/// registration standing. Its battery shows. Regression (rules review of
+/// #121): the refusal left the adapter with no provider until its next
+/// change, so registering again after a change that changed nothing for
+/// BlueZ - a restart seen twice - lost GNOME Settings its battery.
+///
+/// Registered here by the test, on the connection the app then runs on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_battery_provider_registered_already_is_registered() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let bluez = fixture.bus.connect().await.unwrap();
+    let _registered = BatteryProvider::register(bluez.clone(), "/org/bluez/hci0")
+        .await
+        .unwrap();
+    let mut app = fixture.start_app_on(bluez).await;
+
+    app.attach(PAIR).await;
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+    assert_eq!(fixture.world.bluez().providers_on(HCI0), 1);
 }
 
 /// A machine whose only adapter is not `hci0` - a USB dongle, an internal
@@ -1192,4 +1237,303 @@ async fn a_device_resignalling_its_services_does_not_delay_attachment() {
         bluez.set_airpods_service(ADVERTISER, true).await.unwrap();
     }
     app.attach(PAIR).await;
+}
+
+/// An adapter powering off and on - GNOME's Bluetooth switch, rfkill, a
+/// suspend - ends discovery there and disconnects its pairs, as bluetoothd
+/// does. Back on, discovery resumes: a pair in range is heard again, with
+/// levels only a fresh advertisement brings. Regression (#50): discovery was
+/// started once, at startup, and after the first power cycle nothing was
+/// heard over BLE. Discovery and the pair heard again are what the fix
+/// brings; the connected pair getting its battery back as it reconnects is
+/// checked along the way, but held before it too, as bluetoothd keeps an
+/// adapter's providers while it is off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovery_resumes_after_an_adapter_power_cycle() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    fixture.seed_keys(&[PAIR, OTHER]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(OTHER).await;
+    let battery = HashMap::from([(OTHER, lowest(OTHER_LEVELS))]);
+    fixture.until_batteries(&battery).await;
+    app.until("the pair in range over BLE", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+
+    fixture.world.set_powered(HCI0, false).await.unwrap();
+    app.until("the connected pair off AAP", |s| !s.is_connected(OTHER))
+        .await;
+    fixture.until_batteries(&HashMap::new()).await;
+    let changed = [PAIR_LEVELS[0] - 5, PAIR_LEVELS[1] - 3, PAIR_LEVELS[2]];
+    fixture.set_levels(PAIR, changed).await;
+
+    fixture.world.set_powered(HCI0, true).await.unwrap();
+    fixture.until_discovering(HCI0).await;
+    app.until("the pair in range heard again", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(changed)
+    })
+    .await;
+    app.attach(OTHER).await;
+    fixture.until_batteries(&battery).await;
+}
+
+/// An adapter off when the app starts is not scanned, and is once it powers
+/// on; it has its battery provider all along, as bluetoothd keeps providers
+/// while an adapter is off. Regression (#50): an adapter off at startup was
+/// left out, and nothing noticed it powering on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adapter_off_at_startup_is_scanned_once_it_powers_on() {
+    let fixture =
+        Fixture::with_adapters(&[(HCI0, false)], &[(HCI0, PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let mut app = fixture.start_app().await;
+    let bluez = fixture.world.bluez();
+    assert!(!bluez.is_discovering(HCI0), "discovering while off");
+    fixture.until_provider_on(HCI0).await;
+
+    fixture.world.set_powered(HCI0, true).await.unwrap();
+    fixture.until_discovering(HCI0).await;
+    app.until("a BLE reading", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+    app.attach(PAIR).await;
+    fixture
+        .until_batteries_on(HCI0, &HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+}
+
+/// A USB dongle plugged in while the app runs is scanned and gets a battery
+/// provider, so a pair connected through it gets its battery from that
+/// adapter's manager. Unplugged, it takes its pair's link and battery along,
+/// and the other adapter's pair keeps its own; plugged in again, it gets a
+/// provider again. Regression (#50): adapters were found at startup only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adapter_plugged_in_gets_a_provider_and_unplugged_takes_it_along() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    let first = HashMap::from([(PAIR, lowest(PAIR_LEVELS))]);
+    fixture.until_batteries_on(HCI0, &first).await;
+
+    let world = &fixture.world;
+    world.add_adapter(HCI1, true).await.unwrap();
+    world
+        .add_pods_on(HCI1, OTHER, PRO_2_USB_C, "Fake AirPods")
+        .await
+        .unwrap();
+    fixture.set_levels(OTHER, OTHER_LEVELS).await;
+    fixture.until_discovering(HCI1).await;
+    app.attach(OTHER).await;
+    let second = HashMap::from([(OTHER, lowest(OTHER_LEVELS))]);
+    fixture.until_batteries_on(HCI1, &second).await;
+
+    world.remove_adapter(HCI1).await.unwrap();
+    app.until("the pair on it off AAP", |s| !s.is_connected(OTHER))
+        .await;
+    fixture.until_batteries(&first).await;
+    assert!(app.updates.borrow().is_connected(PAIR), "the other's link");
+
+    world.add_adapter(HCI1, true).await.unwrap();
+    fixture.until_provider_on(HCI1).await;
+    app.attach(OTHER).await;
+    fixture.until_batteries_on(HCI1, &second).await;
+    fixture.until_batteries_on(HCI0, &first).await;
+}
+
+/// bluetoothd restarting forgets every client's discovery and battery
+/// providers, and says so only by leaving the bus and coming back: its
+/// adapters, and the pair's connection, are as they were. The app registers
+/// its provider again, so the connected pair's battery is back without a
+/// reconnection, and scans again, so the pair in range is heard. Regression
+/// (#50): nothing watched for it, and both stayed gone until the app was
+/// restarted, with nothing in its log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bluez_restart_brings_the_provider_and_discovery_back() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    fixture.seed_keys(&[PAIR, OTHER]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(OTHER).await;
+    let battery = HashMap::from([(OTHER, lowest(OTHER_LEVELS))]);
+    fixture.until_batteries(&battery).await;
+    app.until("the pair in range over BLE", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+
+    fixture.world.restart_bluez().await.unwrap();
+    assert!(fixture.world.batteries().is_empty(), "kept by the restart");
+    fixture.until_batteries(&battery).await;
+    fixture.until_provider_on(HCI0).await;
+    fixture.until_discovering(HCI0).await;
+    let changed = [PAIR_LEVELS[0] - 5, PAIR_LEVELS[1] - 3, PAIR_LEVELS[2]];
+    fixture.set_levels(PAIR, changed).await;
+    app.until("the pair in range heard again", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(changed)
+    })
+    .await;
+    assert!(app.updates.borrow().is_connected(OTHER), "AAP went");
+}
+
+/// A bluetoothd restart under systemd, where `org.bluez` is activated: the
+/// old one leaves, the app asks for the adapters straight away, and the call
+/// waits for the new one, which answers it - before the bus says it is
+/// there. The app reads the new bluetoothd twice, once for each change of
+/// owner, and the second read changes nothing: the provider registered after
+/// the first stands, and the connected pair keeps its battery. Regression
+/// (rules review of #121): each read gave new tokens, the provider was
+/// registered again, BlueZ refused it as registered already, and GNOME
+/// Settings lost the battery for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bluez_restart_read_twice_keeps_the_battery() {
+    let bus = PrivateBus::activating("org.bluez").expect("dbus-daemon starts");
+    let fixture = Fixture::on_bus(
+        bus,
+        &[(HCI0, true)],
+        &[(HCI0, OTHER, PRO_2_USB_C, OTHER_LEVELS)],
+    )
+    .await;
+    let attachment = fixture.bus.connect().await.unwrap();
+    let reads = reads_by(&fixture.bus, &attachment).await;
+    let mut app = fixture.start_app_on(attachment).await;
+    app.attach(OTHER).await;
+    let battery = HashMap::from([(OTHER, lowest(OTHER_LEVELS))]);
+    fixture.until_batteries(&battery).await;
+
+    let bluez = fixture.world.bluez();
+    let before = reads();
+    bluez.stop().await.unwrap();
+    // Attachment's first read, held until the new one takes the name.
+    let bus = &fixture.bus;
+    let reads = &reads;
+    eventually(
+        "attachment to read while BlueZ is away",
+        move || async move { bus.activations() > 0 && reads() > before },
+    )
+    .await;
+    bluez.start(bus.connect().await.unwrap()).await.unwrap();
+
+    // That read changes the adapters - the provider is registered, the names
+    // read and the pairs swept, two reads more - and the second change of
+    // owner brings a fourth. Nothing else here reads.
+    eventually(
+        "attachment to read the new BlueZ again",
+        move || async move { reads() >= before + 4 },
+    )
+    .await;
+    // An adapter plugged in now is taken in after what the second read
+    // brought: once it has a provider, attachment has answered that.
+    fixture.world.add_adapter(HCI1, true).await.unwrap();
+    fixture.until_provider_on(HCI1).await;
+    fixture.until_batteries(&battery).await;
+    assert_eq!(bluez.providers_on(HCI0), 1);
+}
+
+/// Two LinuxPods on one system bus - two users logged in, each with the app
+/// starting with their session - each get a battery provider of their own,
+/// at a root of their own: bluetoothd tells providers apart by root alone.
+/// Once the first has gone, the second's batteries are the ones GNOME
+/// Settings shows. Regression (rules review of #121): both served the same
+/// root, the second took BlueZ's refusal of it as registered already for its
+/// own registration, and was never read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_apps_on_one_bus_each_register_a_provider() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let mut first = fixture.start_app().await;
+    first.attach(PAIR).await;
+    let battery = HashMap::from([(PAIR, lowest(PAIR_LEVELS))]);
+    fixture.until_batteries(&battery).await;
+
+    let mut second = fixture.start_app().await;
+    let bluez = fixture.world.bluez();
+    eventually("a provider for each app", move || async move {
+        bluez.providers_on(HCI0) == 2
+    })
+    .await;
+
+    // The second's battery for the pair was turned away while the first's
+    // stood, as bluetoothd turns away a second; its next one is taken.
+    drop(first);
+    fixture.until_provider_on(HCI0).await;
+    fixture.until_batteries(&HashMap::new()).await;
+    second.detach(PAIR).await;
+    second.attach(PAIR).await;
+    fixture.until_batteries(&battery).await;
+}
+
+/// Counts the `GetManagedObjects` calls `conn` makes on `bus`, as a monitor
+/// sees them - a call waiting for BlueZ to be activated among them, which
+/// BlueZ itself does not see until it is there. Returns the count so far, on
+/// each call.
+async fn reads_by(bus: &PrivateBus, conn: &Connection) -> impl Fn() -> usize + use<> {
+    let caller = conn.unique_name().unwrap().to_string();
+    let monitor = bus.connect().await.unwrap();
+    let mut messages = zbus::MessageStream::from(&monitor);
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::MethodCall)
+        .member("GetManagedObjects")
+        .unwrap()
+        .build();
+    zbus::fdo::MonitoringProxy::new(&monitor)
+        .await
+        .unwrap()
+        .become_monitor(&[rule], 0)
+        .await
+        .unwrap();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = count.clone();
+    tokio::spawn(async move {
+        let _monitor = monitor;
+        while let Some(Ok(msg)) = futures_util::StreamExt::next(&mut messages).await {
+            let header = msg.header();
+            if header.member().is_some_and(|m| m == "GetManagedObjects")
+                && header.sender().is_some_and(|s| s.as_str() == caller)
+            {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
+    move || count.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// An adapter flapping - powered off and on over and over, faster than the
+/// app can answer each change - leaves discovery running once it settles,
+/// and attachment answering: a pair connecting then is attached and given
+/// its battery, and heard over BLE once it disconnects. The fix (#50) is what
+/// brings discovery back; that the flapping is coalesced rather than queued
+/// is the adapter watch's unit tests' to show, as nothing here can tell a
+/// backlog worked through from none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovery_resumes_after_a_flap_storm() {
+    const FLAPS: usize = 10_000;
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let mut app = fixture.start_app().await;
+
+    for _ in 0..FLAPS {
+        fixture.world.set_powered(HCI0, false).await.unwrap();
+        fixture.world.set_powered(HCI0, true).await.unwrap();
+    }
+    let changed = [PAIR_LEVELS[0] - 5, PAIR_LEVELS[1] - 3, PAIR_LEVELS[2]];
+    fixture.set_levels(PAIR, changed).await;
+    app.attach(PAIR).await;
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(changed))]))
+        .await;
+    fixture.until_discovering(HCI0).await;
+    app.detach(PAIR).await;
+    app.until("a BLE reading after the flapping", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(changed)
+    })
+    .await;
 }
