@@ -54,6 +54,12 @@
 //!   nothing is announced again. A real bluetoothd also announces every
 //!   object again with `InterfacesAdded`. A test passing on a restart proves
 //!   the `NameOwnerChanged` path only.
+//! - [`FakeBluez::set_discovery_busy`] has an adapter refuse every client's
+//!   discovery start as bluetoothd does while the kernel is busy - as it is
+//!   for a few seconds after a `kill -9`, the dead bluetoothd's discovery
+//!   still running in the controller (#123): `InProgress`, the very error a
+//!   client that discovers already gets, and the client not taken on. It
+//!   outlasts a restart, as that discovery does, until cleared.
 //!
 //! # Advertisements
 //!
@@ -260,6 +266,10 @@ struct State {
     watcher: Option<AbortHandle>,
     /// The clients that have discovery on, by adapter.
     discovering: HashMap<String, HashSet<OwnedUniqueName>>,
+    /// The adapters whose discovery starts are refused as a busy kernel's
+    /// are - see [`FakeBluez::set_discovery_busy`] - with how many each has
+    /// refused so far, by adapter.
+    busy: HashMap<String, usize>,
     /// Registered providers, with the task reading each.
     providers: HashMap<Provider, AbortHandle>,
     /// The battery each device has from a provider, by device path.
@@ -850,6 +860,32 @@ impl FakeBluez {
         self.state().is_discovering(adapter)
     }
 
+    /// Has the adapter called `adapter` refuse discovery starts, or take them
+    /// again, as bluetoothd does while the kernel refuses its own start with
+    /// `Busy` (#123). bluetoothd answers the client with
+    /// `org.bluez.Error.InProgress` - what `discovery_complete` sends for a
+    /// failed start, as `start_discovery` does for a client that has discovery
+    /// already - and drops it as a discovery client: so here every
+    /// `StartDiscovery` there is refused that way, and the caller is not
+    /// taken on. Clients discovering already keep their discovery. Kept
+    /// through [`FakeBluez::restart`], as the dead bluetoothd's discovery
+    /// outlives it in the controller.
+    pub fn set_discovery_busy(&self, adapter: &str, busy: bool) {
+        let mut state = self.state();
+        if busy {
+            state.busy.entry(adapter.to_string()).or_default();
+        } else {
+            state.busy.remove(adapter);
+        }
+    }
+
+    /// How many discovery starts the adapter called `adapter` has refused
+    /// since [`FakeBluez::set_discovery_busy`] made it busy; 0 while it is
+    /// not.
+    pub fn busy_refusals(&self, adapter: &str) -> usize {
+        self.state().busy.get(adapter).copied().unwrap_or_default()
+    }
+
     /// An advertisement from `address`, `apple_data` the value of its Apple
     /// entry in `ManufacturerData`, heard by every adapter that discovers.
     /// Signalled as the module docs describe: returns whether any adapter
@@ -1346,14 +1382,17 @@ impl Adapter1 {
     ) -> Result<(), BluezError> {
         self.ready()?;
         let client = sender(&header)?;
+        let in_progress = || BluezError::InProgress("Operation already in progress".into());
         let started = {
             let mut state = self.bluez.state();
+            if let Some(refused) = state.busy.get_mut(&self.name) {
+                *refused += 1;
+                return Err(in_progress());
+            }
             let clients = state.discovering.entry(self.name.clone()).or_default();
             let idle = clients.is_empty();
             if !clients.insert(client) {
-                return Err(BluezError::InProgress(
-                    "Operation already in progress".into(),
-                ));
+                return Err(in_progress());
             }
             idle
         };
@@ -1866,6 +1905,80 @@ mod tests {
         assert_eq!(advert.ble_mac, ad.address);
         assert!(bluez.advertisers_on(SECOND).contains(&ad.address));
         assert!(bluez.advertisers_on("hci2").is_empty(), "heard while off");
+    }
+
+    /// A busy adapter refuses a discovery start with `InProgress`, as
+    /// bluetoothd does when the kernel refuses its own (#123), and does not
+    /// take the caller on: a stop is refused as there is nothing to stop, and
+    /// nothing is heard. Through a restart and until cleared; then a start is
+    /// taken again.
+    #[tokio::test]
+    async fn a_busy_adapter_refuses_discovery_without_taking_the_client() {
+        let (bus, bluez) = served().await;
+        let conn = bus.connect().await.unwrap();
+        let path = adapter_path(ADAPTER);
+        let adapter = proxy(&conn, &path, "org.bluez.Adapter1").await;
+
+        bluez.set_discovery_busy(ADAPTER, true);
+        bluez.restart(bus.connect().await.unwrap()).await.unwrap();
+        assert_eq!(
+            error_name(adapter.call_method("StartDiscovery", &()).await),
+            "org.bluez.Error.InProgress"
+        );
+        assert_eq!(bluez.busy_refusals(ADAPTER), 1);
+        assert!(!bluez.is_discovering(ADAPTER));
+        assert!(!adapter.get_property::<bool>("Discovering").await.unwrap());
+        assert_eq!(
+            error_name(adapter.call_method("StopDiscovery", &()).await),
+            "org.bluez.Error.Failed"
+        );
+        assert!(!bluez.advertise(RANDOM, &[0x07]).await.unwrap());
+
+        bluez.set_discovery_busy(ADAPTER, false);
+        assert_eq!(bluez.busy_refusals(ADAPTER), 0);
+        adapter.call_method("StartDiscovery", &()).await.unwrap();
+        assert!(bluez.is_discovering(ADAPTER));
+    }
+
+    /// Discovery refused as busy is asked for again, once more at once and
+    /// then after a while, and runs once the adapter takes it. Regression
+    /// (#123): the scanner took `InProgress` for discovery it had already,
+    /// and never asked again.
+    #[tokio::test]
+    async fn the_scanner_asks_again_for_discovery_refused_as_busy() {
+        let (bus, bluez) = served().await;
+        bluez.set_discovery_busy(ADAPTER, true);
+        let mut scanning = Scanner::with_connection(bus.connect().await.unwrap())
+            .scan()
+            .await
+            .unwrap();
+        assert_eq!(
+            bluez.busy_refusals(ADAPTER),
+            2,
+            "the start, and the one after a stop"
+        );
+        assert!(!bluez.is_discovering(ADAPTER));
+
+        bluez.set_discovery_busy(ADAPTER, false);
+        let scanning = tokio::spawn(async move { while scanning.next().await.is_some() {} });
+        eventually(|| bluez.is_discovering(ADAPTER)).await;
+        scanning.abort();
+    }
+
+    /// Discovery the scanner's connection has already is kept: `InProgress`
+    /// to its start, it is stopped and started again, and runs.
+    #[tokio::test]
+    async fn the_scanner_keeps_discovery_it_has_already() {
+        let (bus, bluez) = served().await;
+        let conn = bus.connect().await.unwrap();
+        proxy(&conn, &adapter_path(ADAPTER), "org.bluez.Adapter1")
+            .await
+            .call_method("StartDiscovery", &())
+            .await
+            .unwrap();
+
+        let _scanning = Scanner::with_connection(conn).scan().await.unwrap();
+        assert!(bluez.is_discovering(ADAPTER));
     }
 
     /// With no adapter, or none powered, nothing scans, and the scanner says

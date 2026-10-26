@@ -122,12 +122,19 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   discovery, one going drops its battery providers, and a bluetoothd restart drops both,
   saying so only by `NameOwnerChanged`. `bluez::watch_adapters` turns that into
   `AdapterSet` tokens, tied to the bluetoothd instance they were read from; consumers
-  start again when a token changes, never on a single signal, and take `InProgress` and
-  `AlreadyExists` as success, which is safe because both are keyed to this connection
-  (discovery per client, the provider root by its unique name). A restart's two owner
-  changes can each bring a re-read, and a second registration was refused and never
-  retried. Started once at startup, discovery went with the first power cycle and the
-  provider with the first restart, with nothing in the log (#50).
+  start again when a token changes, never on a single signal. A provider's `AlreadyExists`
+  counts as registered: the root is named after this connection's unique name, so only
+  this connection can hold it. A restart's two owner changes can each bring a re-read,
+  and a second registration was refused and never retried. Started once at startup,
+  discovery went with the first power cycle and the provider with the first restart,
+  with nothing in the log (#50).
+- `InProgress` from `StartDiscovery` never counts as started. bluetoothd sends it to a
+  client that discovers already, and also when the kernel refuses its start as busy,
+  dropping the client (`discovery_complete` in BlueZ's `src/adapter.c`). The kernel is
+  busy for seconds after `kill -9 bluetoothd`, as the dead daemon's discovery runs on.
+  The scanner stops its discovery there, which BlueZ refuses harmlessly if there is none,
+  and starts again, and a second refusal waits for the backoff. Taken as started, BLE
+  stayed dead until the app restarted (#123).
 
 ## Protocol
 
