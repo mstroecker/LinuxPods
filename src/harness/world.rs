@@ -42,7 +42,7 @@
 //! | `SetLid(s mac, b open)` | Opens or closes the case |
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
-//! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, `echo_delay_ms` in milliseconds |
+//! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, `echo_delay_ms` and `report_delay_ms` in milliseconds |
 //! | `Flood(u count)` | That many advertisers no key decrypts, each from an address of its own |
 //! | `Received(s mac) → aay` | Every AAP packet the app sent the pair, in order |
 //! | `Batteries() → a{sy}` | What GNOME Settings shows: the level a battery provider gave each device, by MAC |
@@ -116,6 +116,8 @@ struct Inner {
 struct Pair {
     pods: Pods,
     link: Option<Link>,
+    /// AAP connections the app has opened to the pair, turned away or not.
+    aap_attempts: usize,
 }
 
 /// The app's AAP connection to a pair, as the world holds it.
@@ -258,6 +260,7 @@ impl World {
             Pair {
                 pods: Pods::new(product_id, mac),
                 link: None,
+                aap_attempts: 0,
             },
         );
         tokio::spawn(self.clone().accept(mac, listener));
@@ -405,6 +408,14 @@ impl World {
         self.with_pods(mac, |pods| pods.received().to_vec()).await
     }
 
+    /// How many AAP connections the app has opened to a pair, those turned
+    /// away included.
+    pub async fn aap_attempts(&self, mac: Address) -> Result<usize> {
+        let pairs = self.0.pairs.lock().await;
+        let pair = pairs.get(&mac).ok_or_else(|| no_pair(mac))?;
+        Ok(pair.aap_attempts)
+    }
+
     /// What GNOME Settings shows: each device's level, by MAC.
     pub fn batteries(&self) -> HashMap<Address, u8> {
         self.0.bluez.batteries()
@@ -520,6 +531,7 @@ impl World {
         let Some(pair) = pairs.get_mut(&mac) else {
             return;
         };
+        pair.aap_attempts += 1;
         if !self.0.bluez.can_connect(mac) {
             // There is no L2CAP without the adapter.
             tracing::info!("fake world: turned away AAP to {mac}: its adapter is off or gone");
@@ -530,6 +542,10 @@ impl World {
             // Turning it away keeps the first, the one the app uses: a
             // second only comes from a connect racing another.
             tracing::info!("fake world: turned away a second AAP connection to {mac}");
+            return;
+        }
+        if pair.pods.refuses_aap() {
+            tracing::info!("fake world: {mac} turned AAP away, as its quirk asks");
             return;
         }
         let now = self.now();
@@ -616,8 +632,9 @@ fn parse_part(part: &str) -> Result<Part, String> {
     }
 }
 
-/// Sets the quirk named by its field in [`Quirks`]. `echo_delay` goes by
-/// `echo_delay_ms`, in milliseconds. A number may come as any integer type,
+/// Sets the quirk named by its field in [`Quirks`]. `echo_delay` and
+/// `report_delay` go by `echo_delay_ms` and `report_delay_ms`, in
+/// milliseconds. A number may come as any integer type,
 /// as `gdbus` sends `<4>` as an `int32`.
 fn set_quirk(quirks: &mut Quirks, name: &str, value: &Value<'_>) -> Result<(), String> {
     let flag = || bool::try_from(value).map_err(|_| format!("{name} takes a boolean"));
@@ -641,6 +658,8 @@ fn set_quirk(quirks: &mut Quirks, name: &str, value: &Value<'_>) -> Result<(), S
         "echo_delay_ms" => quirks.echo_delay = Duration::from_millis(count()?.into()),
         "zero_suffix_when_connected" => quirks.zero_suffix_when_connected = flag()?,
         "silent_handshake" => quirks.silent_handshake = flag()?,
+        "refuse_aap" => quirks.refuse_aap = count()?,
+        "report_delay_ms" => quirks.report_delay = Duration::from_millis(count()?.into()),
         _ => return Err(format!("no quirk {name:?}")),
     }
     Ok(())
@@ -834,7 +853,9 @@ mod tests {
         set_quirk(&mut quirks, "silent_handshake", &Value::from(true)).unwrap();
         set_quirk(&mut quirks, "echo_every", &Value::from(1i32)).unwrap();
         set_quirk(&mut quirks, "echo_delay_ms", &Value::from(20u32)).unwrap();
+        set_quirk(&mut quirks, "refuse_aap", &Value::from(3i32)).unwrap();
         assert!(quirks.silent_handshake);
+        assert_eq!(quirks.refuse_aap, 3);
         assert_eq!(quirks.echo_every, 1);
         assert_eq!(quirks.echo_delay, Duration::from_millis(20));
 

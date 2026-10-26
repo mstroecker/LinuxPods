@@ -143,6 +143,17 @@ pub struct Quirks {
     /// after 5 s and closes the connection first, so through the app the
     /// hang-up is never reached.
     pub silent_handshake: bool,
+    /// Turn away this many AAP connections, from the next one on: each is
+    /// taken and closed at once, unanswered. Counted down by each one turned
+    /// away; 0, the default, takes every connection. How real AirPods refuse
+    /// one is not recorded - a busy pair, a link not up yet - so this is a
+    /// failed connect at its plainest.
+    pub refuse_aap: u32,
+    /// How long after the notification request the battery and the startup
+    /// dump come, holding the state as it was when asked. None by default; a
+    /// pair seen in #62 took about a second, which the GNOME Settings battery
+    /// went missing for.
+    pub report_delay: Duration,
 }
 
 impl Default for Quirks {
@@ -154,6 +165,8 @@ impl Default for Quirks {
             echo_delay: Duration::from_millis(500),
             zero_suffix_when_connected: true,
             silent_handshake: false,
+            refuse_aap: 0,
+            report_delay: Duration::ZERO,
         }
     }
 }
@@ -506,6 +519,17 @@ impl Pods {
         self.session = Some(session);
     }
 
+    /// Whether the pair turns away an AAP connection the app is opening - see
+    /// [`Quirks::refuse_aap`] - counting it off the quirk if so. One turned
+    /// away opens nothing: [`Pods::aap_opened`] is for those taken.
+    pub fn refuses_aap(&mut self) -> bool {
+        if self.quirks.refuse_aap == 0 {
+            return false;
+        }
+        self.quirks.refuse_aap -= 1;
+        true
+    }
+
     /// The app closed the AAP connection, or it dropped. Whatever was still
     /// due on it goes with it.
     pub fn aap_closed(&mut self) {
@@ -671,9 +695,10 @@ impl Pods {
                 .iter()
                 .map(|(sub_cmd, value)| noise::settings_report(*sub_cmd, value).to_vec()),
         );
+        let at = now + self.quirks.report_delay;
         if let Some(session) = &mut self.session {
             for packet in packets {
-                session.schedule(now, Action::Send(packet));
+                session.schedule(at, Action::Send(packet));
             }
             session.reported = Some(Reported {
                 batteries,
@@ -1136,6 +1161,36 @@ mod tests {
         assert_eq!(pods.poll(opened + SILENT_HANG_UP), [Action::HangUp]);
         assert!(!pods.has_aap());
         assert_eq!(pods.received().len(), 4);
+    }
+
+    /// Each connection turned away counts down the quirk, and the one after
+    /// the last is taken.
+    #[test]
+    fn a_refusing_pair_turns_away_as_many_connections_as_asked() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        assert!(!pods.refuses_aap(), "takes every connection by default");
+        pods.quirks.refuse_aap = 2;
+        assert!(pods.refuses_aap());
+        assert!(pods.refuses_aap());
+        assert!(!pods.refuses_aap());
+        assert_eq!(pods.quirks.refuse_aap, 0);
+    }
+
+    /// The battery and the startup dump wait for the report delay, and come
+    /// together once it is over.
+    #[test]
+    fn the_report_waits_for_its_delay() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        pods.quirks.report_delay = ms(500);
+        pods.aap_opened(ms(0));
+        pods.receive(&HANDSHAKE, ms(0));
+        pods.receive(&NOTIFICATIONS, ms(0));
+        assert_eq!(sent(&pods.poll(ms(0))), [HANDSHAKE_ACK.to_vec()]);
+        assert_eq!(pods.next_due(), Some(ms(500)));
+        assert!(pods.poll(ms(499)).is_empty());
+        let report = sent(&pods.poll(ms(500)));
+        assert!(parse_battery_packet(&report[0]).is_ok(), "{report:02x?}");
+        assert_eq!(report.len(), 3 + OTHER_SETTINGS.len());
     }
 
     /// Switched on during a connection, the quirk waits for the next one.

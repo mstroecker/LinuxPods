@@ -267,6 +267,8 @@ struct State {
     /// Every battery a manager ignored, once, in the order it did: its
     /// adapter, and the `Device` the battery named.
     ignored: Vec<(String, OwnedObjectPath)>,
+    /// The device of every battery a provider withdrew, in the order it did.
+    withdrawn: Vec<Address>,
 }
 
 /// A paired device's pairing: the adapter it is with, and its name.
@@ -988,6 +990,13 @@ impl FakeBluez {
         self.state().ignored.clone()
     }
 
+    /// The device of every battery a provider withdrew from its root, by
+    /// address, in the order it did - not those that went with their
+    /// provider, unregistered or gone.
+    pub fn withdrawn_batteries(&self) -> Vec<Address> {
+        self.state().withdrawn.clone()
+    }
+
     /// How many providers are registered with the manager of the adapter
     /// called `adapter`.
     pub fn providers_on(&self, adapter: &str) -> usize {
@@ -1083,16 +1092,16 @@ impl FakeBluez {
             .build()
             .await?;
         // Subscribed before the objects are read, so nothing falls in between.
-        let mut added = manager.receive_interfaces_added().await?;
-        let mut removed = manager.receive_interfaces_removed().await?;
+        // One stream for every signal, so that they are taken in the order the
+        // provider sent them, as bluetoothd takes them. From a stream each, a
+        // battery withdrawn and offered again within a moment could be taken
+        // the other way round - and the offer refused as provided already.
         let rule = MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .sender(owner.as_ref())?
-            .interface("org.freedesktop.DBus.Properties")?
-            .member("PropertiesChanged")?
             .path_namespace(root.as_ref())?
             .build();
-        let mut changed = MessageStream::for_match_rule(rule, &self.conn(), None).await?;
+        let mut signals = MessageStream::for_match_rule(rule, &self.conn(), None).await?;
 
         for (object, interfaces) in manager.get_managed_objects().await? {
             let props = interfaces
@@ -1104,45 +1113,56 @@ impl FakeBluez {
             }
         }
 
-        loop {
-            tokio::select! {
-                Some(signal) = added.next() => {
-                    let args = signal.args()?;
-                    let props = args
-                        .interfaces_and_properties()
-                        .iter()
-                        .find(|(name, _)| name.as_str() == PROVIDER_INTERFACE);
-                    if let Some((_, props)) = props {
-                        let provided = Provided::read(props.iter().map(|(k, v)| (*k, v)));
-                        let object = args.object_path().to_owned().into();
+        while let Some(msg) = signals.next().await {
+            let Ok(msg) = msg else { continue };
+            let header = msg.header();
+            let interface = header.interface().map(|i| i.as_str());
+            let member = header.member().map(|m| m.as_str());
+            let body = msg.body();
+            match (interface, member) {
+                (Some("org.freedesktop.DBus.ObjectManager"), Some("InterfacesAdded")) => {
+                    type Added = (
+                        OwnedObjectPath,
+                        HashMap<String, HashMap<String, OwnedValue>>,
+                    );
+                    let Ok((object, interfaces)) = body.deserialize::<Added>() else {
+                        continue;
+                    };
+                    if let Some(props) = interfaces.get(PROVIDER_INTERFACE) {
+                        let provided =
+                            Provided::read(props.iter().map(|(k, v)| (k.as_str(), &**v)));
                         self.battery_added(provider, object, provided).await;
                     }
                 }
-                Some(signal) = removed.next() => {
-                    let args = signal.args()?;
-                    if args.interfaces().iter().any(|name| name.as_str() == PROVIDER_INTERFACE) {
-                        self.battery_removed(provider, args.object_path()).await;
-                    }
-                }
-                Some(msg) = changed.next() => {
-                    let Ok(msg) = msg else { continue };
-                    let Some(object) = msg.header().path().map(|p| p.to_owned()) else {
-                        continue;
-                    };
-                    let Ok((iface, props, _)) = msg
-                        .body()
-                        .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                (Some("org.freedesktop.DBus.ObjectManager"), Some("InterfacesRemoved")) => {
+                    let Ok((object, interfaces)) =
+                        body.deserialize::<(OwnedObjectPath, Vec<String>)>()
                     else {
                         continue;
                     };
-                    if iface == PROVIDER_INTERFACE {
-                        let provided = Provided::read(props.iter().map(|(k, v)| (k.as_str(), &**v)));
-                        self.battery_changed(provider, &object, provided.percentage).await;
+                    if interfaces.iter().any(|name| name == PROVIDER_INTERFACE) {
+                        self.battery_removed(provider, &object).await;
                     }
                 }
-                else => return Ok(()),
+                (Some("org.freedesktop.DBus.Properties"), Some("PropertiesChanged")) => {
+                    let Some(object) = header.path().map(|p| p.to_owned()) else {
+                        continue;
+                    };
+                    type Changed = (String, HashMap<String, OwnedValue>, Vec<String>);
+                    let Ok((iface, props, _)) = body.deserialize::<Changed>() else {
+                        continue;
+                    };
+                    if iface == PROVIDER_INTERFACE {
+                        let provided =
+                            Provided::read(props.iter().map(|(k, v)| (k.as_str(), &**v)));
+                        self.battery_changed(provider, &object, provided.percentage)
+                            .await;
+                    }
+                }
+                _ => {}
             }
         }
+        Ok(())
     }
 
     async fn battery_added(
@@ -1220,8 +1240,10 @@ impl FakeBluez {
                 .iter()
                 .find(|(_, b)| b.provider == *provider && b.object.as_str() == object.as_str())
                 .map(|(device, _)| device.clone());
-            if let Some(device) = &device {
-                state.batteries.remove(device);
+            if let Some(device) = &device
+                && let Some(battery) = state.batteries.remove(device)
+            {
+                state.withdrawn.push(battery.address);
             }
             device
         };
@@ -2159,6 +2181,44 @@ mod tests {
             .unwrap();
         eventually(|| bluez.batteries().is_empty()).await;
         assert!(battery.get_property::<u8>("Percentage").await.is_err());
+    }
+
+    /// A provider's changes are taken in the order it made them, however
+    /// fast they come: a battery added, withdrawn and added again at once is
+    /// there at the end, at its last level. Regression: added, withdrawn and
+    /// added each came on a stream of its own, and taken out of order, the
+    /// second offer was refused as provided already, the withdrawal after it
+    /// left no battery.
+    #[tokio::test]
+    async fn takes_a_providers_changes_in_order() {
+        let (bus, bluez) = served().await;
+        let mut provider =
+            BatteryProvider::register(bus.connect().await.unwrap(), &adapter_path(ADAPTER))
+                .await
+                .unwrap();
+        let add = |percentage| BatteryAction::Add {
+            mac: PAIR,
+            device_path: device_path(ADAPTER, PAIR).to_string(),
+            percentage,
+        };
+        // Registering returns before the fake reads the provider, as with
+        // bluetoothd: until the first battery shows, what follows could fall
+        // ahead of the read, and only how it ended be seen.
+        provider.apply(&add(73)).await.unwrap();
+        eventually(|| bluez.batteries() == HashMap::from([(PAIR, 73)])).await;
+        for round in 0..20 {
+            provider
+                .apply(&BatteryAction::Remove { mac: PAIR })
+                .await
+                .unwrap();
+            let last = round == 19;
+            provider
+                .apply(&add(if last { 60 } else { 73 }))
+                .await
+                .unwrap();
+        }
+        eventually(|| bluez.batteries() == HashMap::from([(PAIR, 60)])).await;
+        assert_eq!(bluez.withdrawn_batteries(), [PAIR; 20]);
     }
 
     /// A manager takes a battery only for a paired device on its own adapter,
