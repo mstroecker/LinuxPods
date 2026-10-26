@@ -823,6 +823,7 @@ impl Backoff {
 
 /// BlueZ's device objects: which are connected AirPods, what each is called,
 /// and the connection watch.
+#[derive(Clone)]
 pub struct Devices {
     conn: Connection,
 }

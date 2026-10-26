@@ -440,14 +440,82 @@ struct Persistence {
     saved: HashMap<Address, Vec<u8>>,
 }
 
+/// A device's AAP link as [`Coordinator::open_aap`] opens it, for
+/// [`AapLink::run`] to read.
+///
+/// Dropped, it closes the link - the connection at once, the coordinator's
+/// record of it soon after - whether it was run or not, and wherever its run
+/// stopped: the link lasts no longer than whatever holds it. Its own record
+/// only, never a newer link's to the device, as the record goes by client.
+pub struct AapLink {
+    coordinator: Arc<Coordinator>,
+    mac: Address,
+    client: Arc<aap::Client>,
+    /// Set once [`AapLink::run`] has seen the record go, leaving nothing for
+    /// the drop to do.
+    ended: bool,
+}
+
+/// How an AAP link ended, as [`AapLink::run`] tells.
+#[derive(Debug)]
+pub enum LinkEnd {
+    /// Closed here, by [`Coordinator::disconnect_aap`].
+    Closed,
+    /// Gone on its own, with the read that failed: the device hung up, the
+    /// connection went with the Bluetooth link - see
+    /// [`aap::client::is_link_gone`] - or something went wrong on it.
+    Lost(anyhow::Error),
+}
+
+impl AapLink {
+    /// Reads the link's packets until it ends, then takes it down, and says
+    /// how it ended. Logs nothing of it: what is worth saying is the caller's
+    /// to judge.
+    pub async fn run(mut self) -> LinkEnd {
+        let error = self.coordinator.aap_read_loop(self.mac, &self.client).await;
+        // Gone already when it was closed on purpose.
+        let lost = self
+            .coordinator
+            .drop_link(self.mac, Some(&self.client))
+            .await;
+        self.ended = true;
+        if lost {
+            LinkEnd::Lost(error)
+        } else {
+            LinkEnd::Closed
+        }
+    }
+}
+
+impl Drop for AapLink {
+    fn drop(&mut self) {
+        if self.ended {
+            return;
+        }
+        // Wakes a read parked in recv, and closes the connection.
+        self.client.shutdown();
+        // The record needs the lock, which a drop cannot wait for. Without a
+        // runtime - it is shutting down - there is no one left to read it.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let (coordinator, mac, client) =
+                (self.coordinator.clone(), self.mac, self.client.clone());
+            runtime.spawn(async move {
+                coordinator.drop_link(mac, Some(&client)).await;
+            });
+        }
+    }
+}
+
 /// Coordinates sources and broadcasts snapshots.
 pub struct Coordinator {
     inner: RwLock<Inner>,
-    /// Held across a save, so saves never overlap - they share a temporary file.
-    keystore: Mutex<Persistence>,
+    /// Held across a save, so saves never overlap - they share a temporary
+    /// file. Owned by the save while it runs - see
+    /// `Coordinator::store_encryption_key`.
+    keystore: Arc<Mutex<Persistence>>,
     /// The latest snapshot, which every subscriber sees - see [`Coordinator::subscribe`].
     updates: watch::Sender<Snapshot>,
-    /// Where [`Coordinator::connect_aap`] opens links in place of L2CAP, under
+    /// Where [`Coordinator::open_aap`] opens links in place of L2CAP, under
     /// the harness. Fixed at construction, so every link of a session goes the
     /// same way.
     #[cfg(feature = "harness")]
@@ -456,6 +524,10 @@ pub struct Coordinator {
     /// hold an update up there.
     #[cfg(test)]
     before_send: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, in the next save just before it writes, for a test to hold
+    /// a save up there.
+    #[cfg(test)]
+    before_save: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Coordinator {
@@ -546,12 +618,14 @@ impl Coordinator {
 
         Self {
             inner: RwLock::new(inner),
-            keystore: Mutex::new(persistence),
+            keystore: Arc::new(Mutex::new(persistence)),
             updates,
             #[cfg(feature = "harness")]
             aap_socket_dir: None,
             #[cfg(test)]
             before_send: std::sync::Mutex::default(),
+            #[cfg(test)]
+            before_save: std::sync::Mutex::default(),
         }
     }
 
@@ -769,14 +843,29 @@ impl Coordinator {
         self.broadcast(&inner);
     }
 
-    /// Opens an AAP connection to one device, performs the handshake sequence and
-    /// starts the link's read loop. Other devices' links are untouched, and a
-    /// device that already has one keeps it.
+    /// Opens a device's AAP link and reads it in a task of its own until it
+    /// ends, and nothing opens it again. For a caller that has no supervisor,
+    /// as the examples have none; the app's links are each opened and run by
+    /// their pair's supervisor, in `attachment`.
     pub async fn connect_aap(self: &Arc<Self>, mac_addr: Address) -> Result<()> {
-        if self.inner.read().await.links.contains_key(&mac_addr) {
-            tracing::debug!("AAP already connected to {mac_addr}");
-            return Ok(());
-        }
+        let link = self.open_aap(mac_addr).await?;
+        tokio::spawn(link.run());
+        Ok(())
+    }
+
+    /// Opens an AAP connection to one device and performs the handshake
+    /// sequence, which makes it the device's link, for [`AapLink::run`] to
+    /// read. Other devices' links are untouched. Fails when the device has a
+    /// link already, or gets one meanwhile: that one stands.
+    ///
+    /// Dropped before it is done - timed out, or the pair detached - it leaves
+    /// nothing behind: the connection closes with it, and the link is recorded
+    /// only at the last step, which nothing awaits after.
+    pub async fn open_aap(self: &Arc<Self>, mac_addr: Address) -> Result<AapLink> {
+        anyhow::ensure!(
+            !self.inner.read().await.links.contains_key(&mac_addr),
+            "AAP to {mac_addr} is up already"
+        );
 
         let mut client = self.aap_client(mac_addr);
         client.connect().await?;
@@ -802,14 +891,13 @@ impl Coordinator {
         }
 
         let client = Arc::new(client);
-        {
+        let link = {
             let mut inner = self.inner.write().await;
             // Connecting takes a while, and another attempt may have got there
             // first. Its link stands; this one goes.
             if inner.links.contains_key(&mac_addr) {
                 client.shutdown();
-                tracing::debug!("AAP already connected to {mac_addr}; dropping the duplicate");
-                return Ok(());
+                anyhow::bail!("AAP to {mac_addr} came up meanwhile; dropping the duplicate");
             }
             // Advertised before the link came up, if the cache still has it.
             let identity = inner.ble.get(&mac_addr).and_then(|e| e.state.identity);
@@ -825,15 +913,19 @@ impl Coordinator {
                 },
             );
             self.broadcast(&inner);
-        }
-
-        tokio::spawn(self.clone().aap_read_loop(mac_addr, client));
+            AapLink {
+                coordinator: self.clone(),
+                mac: mac_addr,
+                client,
+                ended: false,
+            }
+        };
 
         tracing::info!(
             "AAP connected to {mac_addr} - exact battery for this device; \
              devices without a link continue over BLE"
         );
-        Ok(())
+        Ok(link)
     }
 
     /// A client for a new link to `mac_addr`: to the device over L2CAP, or under
@@ -889,23 +981,15 @@ impl Coordinator {
         true
     }
 
-    /// Reads one link's packets until its connection drops. It is handed the
-    /// client rather than looking it up, so it only ever hears its own device.
-    async fn aap_read_loop(self: Arc<Self>, mac_addr: Address, client: Arc<aap::Client>) {
+    /// Reads one link's packets until a read fails, and returns that error.
+    /// It is handed the client rather than looking it up, so it only ever
+    /// hears its own device.
+    async fn aap_read_loop(&self, mac_addr: Address, client: &Arc<aap::Client>) -> anyhow::Error {
         tracing::debug!("AAP read loop started for {mac_addr}");
         loop {
             let packet = match client.read_packet().await {
                 Ok(p) => p,
-                Err(e) => {
-                    // A link closed on purpose is already gone; only one that
-                    // died on its own is worth a warning.
-                    if self.drop_link(mac_addr, Some(&client)).await {
-                        tracing::warn!("AAP read error from {mac_addr}: {e}");
-                    } else {
-                        tracing::debug!("AAP read loop for {mac_addr} ended: {e}");
-                    }
-                    return;
-                }
+                Err(e) => return e,
             };
 
             tracing::debug!(
@@ -921,7 +1005,7 @@ impl Coordinator {
 
             if aap::is_battery_packet(&packet) {
                 match aap::parse_battery_packet(&packet) {
-                    Ok(info) => self.handle_battery_info(info, mac_addr, &client).await,
+                    Ok(info) => self.handle_battery_info(info, mac_addr, client).await,
                     Err(e) => tracing::warn!("AAP battery parse error: {e}"),
                 }
             }
@@ -930,7 +1014,7 @@ impl Coordinator {
             // another device such as an iPhone.
             if aap::is_noise_mode_packet(&packet) {
                 match aap::parse_noise_mode_packet(&packet) {
-                    Ok(mode) => self.handle_noise_mode(mode, mac_addr, &client).await,
+                    Ok(mode) => self.handle_noise_mode(mode, mac_addr, client).await,
                     Err(e) => tracing::warn!("AAP noise control parse error: {e}"),
                 }
             }
@@ -1070,7 +1154,12 @@ impl Coordinator {
             }
         }
 
-        let mut persistence = self.keystore.lock().await;
+        // Owned, so that it can go with the save, which then holds it until
+        // the save is done and recorded, whatever becomes of this call. The
+        // read loop calling it is dropped wherever it is when its pair
+        // detaches: the drop let go of the lock while the save went on, and
+        // the next save ran alongside it, the older keys landing last.
+        let mut persistence = self.keystore.clone().lock_owned().await;
         let Some(keystore) = persistence.keystore.clone() else {
             tracing::debug!("Encryption key for {mac_addr} kept for this session only");
             return;
@@ -1081,13 +1170,25 @@ impl Coordinator {
             return;
         }
 
-        // Off the async workers: the save waits on the disk.
-        let saved = tokio::task::spawn_blocking(move || keystore.save(&keys).map(|()| keys))
-            .await
-            .unwrap_or_else(|e| Err(e.into()));
-        match saved {
-            Ok(keys) => {
+        #[cfg(test)]
+        let hook = self.before_save.lock().unwrap().take();
+        // Off the async workers: the save waits on the disk. A blocking task
+        // runs to its end however its awaiter fares.
+        let saved = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                hook();
+            }
+            let saved = keystore.save(&keys);
+            if saved.is_ok() {
                 persistence.saved = keys;
+            }
+            saved
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.into()));
+        match saved {
+            Ok(()) => {
                 tracing::info!("Stored encryption key for {mac_addr} ({} bytes)", key.len());
             }
             Err(e) => tracing::warn!("failed to save encryption key to disk: {e:#}"),
@@ -1138,7 +1239,7 @@ mod tests {
         }
     }
 
-    /// A link as `connect_aap` leaves it. The client never connects; building
+    /// A link as `open_aap` leaves it. The client never connects; building
     /// one does no I/O, and which address it holds does not matter here.
     fn link(reading: Option<PodState>) -> Link {
         Link {
@@ -1155,14 +1256,15 @@ mod tests {
         let (updates, _) = watch::channel(inner.snapshot());
         let coordinator = Arc::new(Coordinator {
             inner: RwLock::new(inner),
-            keystore: Mutex::new(Persistence {
+            keystore: Arc::new(Mutex::new(Persistence {
                 keystore: Some(keystore_in(&dir)),
                 saved: HashMap::new(),
-            }),
+            })),
             updates,
             #[cfg(feature = "harness")]
             aap_socket_dir: None,
             before_send: std::sync::Mutex::default(),
+            before_save: std::sync::Mutex::default(),
         });
         (coordinator, dir)
     }
@@ -1260,6 +1362,50 @@ mod tests {
 
         coordinator.store_encryption_key(MAC, &KEY).await;
         assert_eq!(keystore_in(&dir).load().unwrap()[&MAC], KEY);
+    }
+
+    /// A save goes through whole, and ahead of the next one, though its
+    /// caller is dropped halfway - the read loop, with its link's supervisor
+    /// stopped as the pair detached. Regression (rules review of #122): the
+    /// abort let go of the keystore's lock while the save went on, and the
+    /// next save ran alongside it: the older keys, saved last, lost the newer
+    /// one from the disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_save_outlives_its_caller_and_the_next_one_waits() {
+        const OTHER_KEY: [u8; 16] = [8; 16];
+        let (coordinator, dir) = coordinator_with(inner_with(vec![]));
+        let (reached, at_save) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = std::sync::mpsc::channel::<()>();
+        *coordinator.before_save.lock().unwrap() = Some(Box::new(move || {
+            let _ = reached.send(());
+            // Blocking the save's thread, which nothing awaits on.
+            let _ = resumed.recv();
+        }));
+
+        let first = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.store_encryption_key(AA, &KEY).await }
+        });
+        at_save.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        let second = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.store_encryption_key(BB, &OTHER_KEY).await }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let alongside = second.is_finished();
+        resume.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!alongside, "saved alongside the first");
+        assert_eq!(
+            keystore_in(&dir).load().unwrap(),
+            HashMap::from([(AA, KEY.to_vec()), (BB, OTHER_KEY.to_vec())])
+        );
     }
 
     /// Keys are requested on every connection; one already saved is not
@@ -1570,7 +1716,7 @@ mod tests {
         );
 
         assert!(coordinator.drop_link(AA, Some(&client)).await);
-        // The reconnect, as `connect_aap` leaves it and the first battery
+        // The reconnect, as `open_aap` leaves it and the first battery
         // packet after.
         coordinator
             .inner
@@ -1870,7 +2016,7 @@ mod tests {
         std::fs::write(dir.path().join("keys.json"), file).unwrap();
         let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
 
-        // The link as `connect_aap` opens it, to the address as BlueZ reports it.
+        // The link as `open_aap` opens it, to the address as BlueZ reports it.
         let reported: Address = "AA:BB:CC:DD:EE:FF".parse().unwrap();
         let l = link(None);
         let client = l.client.clone();
