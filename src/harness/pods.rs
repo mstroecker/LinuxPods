@@ -146,8 +146,13 @@ pub struct Quirks {
     /// Turn away this many AAP connections, from the next one on: each is
     /// taken and closed at once, unanswered. Counted down by each one turned
     /// away; 0, the default, takes every connection. How real AirPods refuse
-    /// one is not recorded - a busy pair, a link not up yet - so this is a
-    /// failed connect at its plainest.
+    /// one is not recorded - a busy pair, a link not up yet. Through the app,
+    /// a connection taken and closed is mostly a link that went during setup
+    /// (#123): the handshake is sent and the close is read before an answer,
+    /// which is logged at debug and tried again, never reaching the warnings
+    /// of a refused connect. Closed before the app sends, the handshake
+    /// fails to send, and that is a failed connect, with the warnings. Tried
+    /// again either way, on a growing wait.
     pub refuse_aap: u32,
     /// How long after the notification request the battery and the startup
     /// dump come, holding the state as it was when asked. None by default; a
