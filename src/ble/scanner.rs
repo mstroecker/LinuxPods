@@ -41,6 +41,7 @@ const DEVICE_INTERFACE: &str = "org.bluez.Device1";
 trait Adapter1 {
     fn set_discovery_filter(&self, filter: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
     fn start_discovery(&self) -> zbus::Result<()>;
+    fn stop_discovery(&self) -> zbus::Result<()>;
 }
 
 /// One parsed advertisement plus the (randomized) MAC it arrived from.
@@ -158,6 +159,17 @@ impl Scanner {
             .start_discovery()
             .await
             .context("failed to start discovery")?;
+        Ok(())
+    }
+
+    /// Stops this connection's discovery on the adapter at `adapter`. BlueZ
+    /// refuses it when the connection has none there.
+    async fn stop_discovery_on(&self, adapter: &str) -> Result<()> {
+        Adapter1Proxy::new(&self.conn, adapter)
+            .await?
+            .stop_discovery()
+            .await
+            .context("failed to stop discovery")?;
         Ok(())
     }
 
@@ -346,17 +358,38 @@ impl Scanning {
                 }
                 _ => 0,
             };
-            let next = match self.scanner.start_discovery_on(path).await {
+            let mut started = self.scanner.start_discovery_on(path).await;
+            // InProgress means one of two things, and BlueZ does not say
+            // which: this connection discovers there already - a token can
+            // change without BlueZ ending discovery, as when a re-read sees
+            // an off-and-on it had seen already - or the start failed and it
+            // does not. bluetoothd answers InProgress as well when the kernel
+            // refuses its start as busy, and drops the caller as a discovery
+            // client (`discovery_complete`, `start_discovery_complete` in
+            // BlueZ 5.87's src/adapter.c); the kernel is busy so for seconds
+            // after a `kill -9`, the dead bluetoothd's discovery still
+            // running. Taken as started, nothing scanned again (#123). So
+            // this connection's discovery there, if any, is stopped - BlueZ
+            // refuses the stop where there is none, which changes nothing -
+            // and asked for afresh; refused again, it is tried later like any
+            // refusal. Not on the backoff alone: where discovery is ours,
+            // every start is InProgress for as long as it runs.
+            if let Err(e) = &started
+                && is_in_progress(e)
+            {
+                tracing::debug!(
+                    "BLE discovery on {path} in progress, or refused as busy; asking for it again"
+                );
+                let _ = self.scanner.stop_discovery_on(path).await;
+                started = self.scanner.start_discovery_on(path).await;
+            }
+            let next = match started {
                 Ok(()) => {
                     let again = matches!(was, Some(Discovery::On(_)));
                     let started = if again { "restarted" } else { "started" };
                     tracing::info!("BLE discovery {started} on {path}");
                     Discovery::On(token)
                 }
-                // Started already, by this connection: a token can change
-                // without BlueZ ending discovery, as when a re-read sees an
-                // off-and-on it had seen already. Harmless.
-                Err(e) if is_in_progress(&e) => Discovery::On(token),
                 Err(e) => {
                     let failures = failures + 1;
                     let wait = bluez::backoff(failures);
@@ -376,7 +409,8 @@ impl Scanning {
     }
 }
 
-/// Whether BlueZ refused discovery as started already by the caller.
+/// Whether BlueZ refused discovery as in progress: started already by the
+/// caller, or refused by a busy kernel - see [`Scanning::update`].
 fn is_in_progress(e: &anyhow::Error) -> bool {
     matches!(
         e.downcast_ref::<zbus::Error>(),

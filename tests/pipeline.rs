@@ -1439,6 +1439,43 @@ async fn a_bluez_restart_brings_the_provider_and_discovery_back() {
     assert!(app.updates.borrow().is_connected(OTHER), "AAP went");
 }
 
+/// bluetoothd killed leaves its discovery running in the controller for
+/// seconds, and the new one's own start is refused as busy: it answers the
+/// app's `StartDiscovery` with `InProgress`, as it answers a client that has
+/// discovery already, and does not take the app on. The app asks again until
+/// the controller is free, and the pair in range is heard again without the
+/// app restarting. Regression (#123): `InProgress` was taken as started, and
+/// nothing was scanned until the app restarted, with nothing in its log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovery_resumes_after_a_bluez_restart_found_the_adapter_busy() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let mut app = fixture.start_app().await;
+    app.until("the pair in range over BLE", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+
+    let bluez = fixture.world.bluez();
+    bluez.set_discovery_busy(HCI0, true);
+    fixture.world.restart_bluez().await.unwrap();
+    // The app's start, and the one after it stopped whatever it had.
+    eventually("the app to ask twice for discovery", move || async move {
+        bluez.busy_refusals(HCI0) >= 2
+    })
+    .await;
+    assert!(!bluez.is_discovering(HCI0), "taken on while busy");
+
+    bluez.set_discovery_busy(HCI0, false);
+    fixture.until_discovering(HCI0).await;
+    let changed = [PAIR_LEVELS[0] - 5, PAIR_LEVELS[1] - 3, PAIR_LEVELS[2]];
+    fixture.set_levels(PAIR, changed).await;
+    app.until("the pair in range heard again", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(changed)
+    })
+    .await;
+}
+
 /// A bluetoothd restart under systemd, where `org.bluez` is activated: the
 /// old one leaves, the app asks for the adapters straight away, and the call
 /// waits for the new one, which answers it - before the bus says it is
