@@ -17,6 +17,11 @@
 //! the device's snapshot takes from its cached advertisement what AAP does not
 //! carry: in-ear, lid, connection state and primary pod.
 //!
+//! A link supersedes the cached reading from its first battery packet, not
+//! from when it comes up: in between - about a second on one pair - the
+//! device would show no reading at all, and its GNOME Settings battery would
+//! go and come back with every reconnect (#62).
+//!
 //! # What is kept
 //!
 //! Only advertisements a stored key decrypts. That identifies the device, so its
@@ -330,10 +335,13 @@ struct Inner {
 }
 
 impl Inner {
-    /// True when a live AAP link makes this device's BLE advertisement redundant.
-    /// Per device: every other device's advertisements still count.
+    /// True when a live AAP link makes this device's BLE advertisement
+    /// redundant: once the link has a reading - see the module docs. Per
+    /// device: every other device's advertisements still count.
     fn supersedes_ble(&self, advertising_mac: Address) -> bool {
-        self.links.contains_key(&advertising_mac)
+        self.links
+            .get(&advertising_mac)
+            .is_some_and(|link| link.reading.is_some())
     }
 
     /// The device's link, while it is still `client`'s. A packet read, or a
@@ -377,8 +385,9 @@ impl Inner {
         let mut states: HashMap<Address, PodState> = self
             .ble
             .iter()
-            // Hidden even before the first AAP packet: a BLE reading would leave
-            // the controls insensitive on a device we can command.
+            // Shown until the link's first packet, while the controls stay
+            // insensitive: hidden, the device showed no reading at all
+            // meanwhile, and its GNOME Settings battery went with it.
             .filter(|&(&mac, _)| !self.supersedes_ble(mac))
             .map(|(&mac, entry)| {
                 let mut state = entry.state.clone();
@@ -1398,10 +1407,13 @@ mod tests {
         }
     }
 
-    /// While AAP is up the device shows its exact reading, and its cached
-    /// advertisement stays out of sight - AAP is always live.
+    /// From its first packet a link shows its exact reading, and the cached
+    /// advertisement stays out of sight - AAP is always live. Until then the
+    /// advertisement shows. Regression (#62): hidden as the link came up, the
+    /// device showed no reading meanwhile, and its GNOME Settings battery
+    /// went and came back with every reconnect.
     #[test]
-    fn aap_hides_the_connected_devices_ble_reading() {
+    fn a_link_shows_the_ble_reading_until_its_first_packet() {
         let mut inner = inner_with(vec![]);
         inner.ble.insert(
             AA,
@@ -1412,10 +1424,10 @@ mod tests {
         );
         inner.links.insert(AA, link(None));
 
-        assert!(
-            !inner.snapshot().states.contains_key(&AA),
-            "before the first AAP packet the device waits for data"
-        );
+        let snap = inner.snapshot();
+        assert!(snap.is_connected(AA));
+        assert_eq!(snap.states[&AA].source, DataSource::Ble);
+        assert_eq!(snap.states[&AA].left_battery, Some(70));
 
         inner.links.get_mut(&AA).unwrap().reading = Some(aap_state(83));
         let snap = inner.snapshot();
@@ -1895,7 +1907,11 @@ mod tests {
         // With nothing connected, everything is processed.
         assert!(!inner.supersedes_ble(AA));
 
+        // Nor while the link has not reported yet.
         inner.links.insert(AA, link(None));
+        assert!(!inner.supersedes_ble(AA));
+
+        inner.links.insert(AA, link(Some(aap_state(80))));
         // The connected device's own advertisements are dropped...
         assert!(inner.supersedes_ble(AA));
         // ...but a second pair of AirPods keeps being tracked over BLE.
