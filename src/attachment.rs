@@ -306,10 +306,12 @@ impl Attachment {
             }
         }
         // Names for the device switcher. Read up front so paired devices are
-        // labelled before any of them connects, then again on every event - a rename
-        // made while the app was running takes effect at the next one, and a newly
-        // paired pair shows up with its services, which BlueZ fills in once pairing
-        // is done. An adapter plugged in brings its paired devices.
+        // labelled before any of them connects, then again on every connection
+        // event, and on a services change of a connected device that is not
+        // attached yet - a rename made while the app was running takes effect at
+        // the next one, and a newly paired pair shows up with its services, which
+        // BlueZ fills in once pairing is done. An adapter plugged in brings its
+        // paired devices.
         self.update_names().await;
         self.sweep().await;
     }
@@ -377,6 +379,21 @@ impl Attachment {
     /// services marking it as AirPods.
     async fn handle(&mut self, event: ConnectionEvent) {
         let path = event.device_path.as_str();
+        let connected = match event.connected {
+            Some(connected) => connected,
+            // Only the services changed. That matters to a pair which
+            // connected before they marked it as AirPods, not to one
+            // already attached, nor to a device that is not connected -
+            // asked first, so that such a device costs one call: an
+            // advertiser can bring a services change with every address it
+            // rotates to.
+            None if self.attached_at(path).is_some() => return,
+            None if !self.devices.device_connected(path).await => {
+                tracing::trace!("services changed on {path}, which is not connected");
+                return;
+            }
+            None => true,
+        };
         let alias = self.devices.device_alias(path).await;
         tracing::debug!(
             "connection event: {path} connected={:?} alias={alias:?}",
@@ -384,15 +401,6 @@ impl Attachment {
         );
 
         self.update_names().await;
-
-        let connected = match event.connected {
-            Some(connected) => connected,
-            // Only the services changed. That matters to a pair which
-            // connected before they marked it as AirPods, not to one
-            // already attached.
-            None if self.attached_at(path).is_some() => return,
-            None => self.devices.device_connected(path).await,
-        };
 
         if connected {
             // Only react to AirPods, not every Bluetooth device on the system.

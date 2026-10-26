@@ -48,6 +48,7 @@ use linuxpods::attachment::Attachment;
 use linuxpods::ble::decrypt_for_device;
 use linuxpods::ble::scanner::{Advertisement, Scanner};
 use linuxpods::bluez::BatteryProvider;
+use linuxpods::harness::bluez::device_path;
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3, Part};
 use linuxpods::harness::{PrivateBus, World};
 use linuxpods::keystore::Keystore;
@@ -1533,13 +1534,26 @@ async fn two_apps_on_one_bus_each_register_a_provider() {
 /// BlueZ itself does not see until it is there. Returns the count so far, on
 /// each call.
 async fn reads_by(bus: &PrivateBus, conn: &Connection) -> impl Fn() -> usize + use<> {
+    calls_by(
+        bus,
+        conn,
+        Box::new(|header| header.member().is_some_and(|m| m == "GetManagedObjects")),
+    )
+    .await
+}
+
+/// Which calls [`calls_by`] counts.
+type Pick = Box<dyn Fn(&zbus::message::Header<'_>) -> bool + Send>;
+
+/// Counts the method calls `conn` makes on `bus` that `pick` picks out, as a
+/// monitor sees them: in the order `conn` made them. Returns the count so
+/// far, on each call.
+async fn calls_by(bus: &PrivateBus, conn: &Connection, pick: Pick) -> impl Fn() -> usize + use<> {
     let caller = conn.unique_name().unwrap().to_string();
     let monitor = bus.connect().await.unwrap();
     let mut messages = zbus::MessageStream::from(&monitor);
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::MethodCall)
-        .member("GetManagedObjects")
-        .unwrap()
         .build();
     zbus::fdo::MonitoringProxy::new(&monitor)
         .await
@@ -1553,14 +1567,17 @@ async fn reads_by(bus: &PrivateBus, conn: &Connection) -> impl Fn() -> usize + u
         let _monitor = monitor;
         while let Some(Ok(msg)) = futures_util::StreamExt::next(&mut messages).await {
             let header = msg.header();
-            if header.member().is_some_and(|m| m == "GetManagedObjects")
-                && header.sender().is_some_and(|s| s.as_str() == caller)
-            {
+            if header.sender().is_some_and(|s| s.as_str() == caller) && pick(&header) {
                 counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
     });
     move || count.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Picks the calls on the object at `path`.
+fn on_path(path: zbus::zvariant::OwnedObjectPath) -> Pick {
+    Box::new(move |header| header.path().is_some_and(|p| p.as_str() == path.as_str()))
 }
 
 /// An adapter flapping - powered off and on over and over, faster than the
@@ -1826,6 +1843,82 @@ async fn a_reconnect_keeps_the_battery_exported() {
         "withdrawn across the reconnect: {:?}",
         bluez.withdrawn_batteries()
     );
+}
+
+/// A services change on a device that is neither attached nor connected
+/// costs attachment one call to BlueZ, on that device: whether it is
+/// connected, asked first. Regression (rules review of #102): its alias and
+/// every device's names were read ahead of that, so an advertiser whose
+/// services changed at every address it rotated to cost three calls each.
+///
+/// The pair, connected before the app starts but not yet listing the AirPods
+/// service, is attached by a services change of its own, signalled after the
+/// device's: services changes are handled in the order they came, so once
+/// attachment calls on the pair, its calls on the device are all in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_services_change_on_a_disconnected_device_costs_one_call() {
+    const DEVICE: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x04]);
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let bluez = fixture.world.bluez();
+    bluez.add_device(HCI0, DEVICE, "Device").await.unwrap();
+    bluez.set_airpods_service(DEVICE, false).await.unwrap();
+    bluez.set_airpods_service(PAIR, false).await.unwrap();
+    fixture.world.connect(PAIR).await.unwrap();
+    let attachment = fixture.bus.connect().await.unwrap();
+    let on_device = calls_by(
+        &fixture.bus,
+        &attachment,
+        on_path(device_path(HCI0, DEVICE)),
+    )
+    .await;
+    let on_pair = calls_by(&fixture.bus, &attachment, on_path(device_path(HCI0, PAIR))).await;
+    let mut app = fixture.start_app_on(attachment).await;
+    assert!(
+        app.updates.borrow().connected_macs.is_empty(),
+        "attached by the sweep"
+    );
+
+    bluez.set_airpods_service(DEVICE, true).await.unwrap();
+    bluez.set_airpods_service(PAIR, true).await.unwrap();
+    app.until("the pair on AAP", |s| s.is_connected(PAIR)).await;
+    let on_pair = &on_pair;
+    eventually("attachment's calls on the pair", move || async move {
+        on_pair() > 0
+    })
+    .await;
+    assert_eq!(on_device(), 1, "calls on the device");
+}
+
+/// While BlueZ is off the bus, a pair whose link goes is not asked about: its
+/// supervisor waits for BlueZ to be back before it asks whether the pair is
+/// still connected, and links it again then. Asked meanwhile, a bus that
+/// activates bluetoothd - systemd's - would start it again, undoing a
+/// `systemctl stop bluetooth` within a second or two. Regression (rules
+/// review of #122): the supervisor asked BlueZ at every wait, though
+/// attachment asks it nothing while it is away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_whose_link_goes_while_bluez_is_away_waits_for_it() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let attachment = fixture.bus.connect().await.unwrap();
+    let on_pair = calls_by(&fixture.bus, &attachment, on_path(device_path(HCI0, PAIR))).await;
+    let mut app = fixture.start_app_on(attachment).await;
+    app.attach(PAIR).await;
+
+    let bluez = fixture.world.bluez();
+    bluez.stop().await.unwrap();
+    fixture.world.hang_up(PAIR).await.unwrap();
+    app.until("the link gone", |s| !s.is_connected(PAIR)).await;
+    let before = on_pair();
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(on_pair(), before, "asked BlueZ while it was away");
+
+    bluez
+        .start(fixture.bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    app.until("the pair linked again", |s| s.is_connected(PAIR))
+        .await;
+    assert_eq!(fixture.aap_attempts(PAIR).await, 2);
 }
 
 /// An adapter powering off while a pair is linked takes the link and
