@@ -107,6 +107,48 @@ pub struct BatteryProvider {
     root: OwnedObjectPath,
 }
 
+/// A connection [`BatteryProvider`]s can be served on, built by
+/// [`connection`] and only there: a provider takes nothing else, so none is
+/// served on a connection built plain. Dereferences to the connection.
+#[derive(Clone, Debug)]
+pub struct ProviderConnection(Connection);
+
+impl std::ops::Deref for ProviderConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.0
+    }
+}
+
+/// The connection [`BatteryProvider`]s are served on, from `builder`: the
+/// system bus's, or under the test harness a private bus's.
+///
+/// bluetoothd reads a provider's root with `GetManagedObjects` as it takes
+/// the registration, and a call the object server misses is never answered.
+/// On a connection built plain, zbus starts dispatching method calls in a
+/// task that the first `object_server()` spawns, and drops a method call
+/// that comes before that task has subscribed - no reply, no error, nothing
+/// in any log. Signals still reach their own subscriptions. The provider's
+/// own registration made that first call, and under load the task
+/// subscribed only after the read had come (#125). bluetoothd waits 25 s for
+/// its reply and takes the provider's `InterfacesAdded` meanwhile, so it
+/// would miss only a battery the root held already - and there is none, as
+/// attachment registers a provider before it exports to it. The fake BlueZ,
+/// which takes no signal before the reply, took no battery at all.
+///
+/// Built with something to serve, a connection has the task subscribed
+/// before it reads its first message. The ObjectManager over every provider
+/// root served here is there for that alone: it never emits, as zbus emits
+/// from the ObjectManager closest to an object, each root's own.
+pub async fn connection(builder: zbus::connection::Builder<'_>) -> Result<ProviderConnection> {
+    let conn = builder
+        .serve_at(PROVIDER_PATH, zbus::fdo::ObjectManager)?
+        .build()
+        .await?;
+    Ok(ProviderConnection(conn))
+}
+
 /// Where the provider for the adapter at `adapter`, served by the connection
 /// whose unique name is `owner`, keeps its batteries: a root named after both,
 /// as `.../battery/_1_42/hci1` for `/org/bluez/hci1` and `:1.42`.
@@ -166,14 +208,16 @@ impl BatteryAction {
 impl BatteryProvider {
     /// Serves the provider root for the adapter at `adapter` on `conn`, and
     /// registers it with that adapter's manager, in whichever BlueZ answers
-    /// there.
+    /// there. `conn` is from [`connection`], so that BlueZ's read of the root
+    /// is answered.
     ///
     /// The root is this connection's own - see [`provider_root`] - so BlueZ
     /// refusing it as registered already means this connection registered it
     /// before, and it is registered: registering again, after an adapter
     /// change that turned out to change nothing for BlueZ, must not lose the
     /// registration that stands (#50).
-    pub async fn register(conn: Connection, adapter: &str) -> Result<Self> {
+    pub async fn register(conn: &ProviderConnection, adapter: &str) -> Result<Self> {
+        let conn = Connection::clone(conn);
         let owner = conn
             .unique_name()
             .context("the connection has no unique name")?

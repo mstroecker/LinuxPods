@@ -8,7 +8,8 @@
 //!
 //! BlueZ is reached over the connection [`Attachment::new`] is given, so the
 //! pipeline tests run against the harness's fake BlueZ the code the app runs
-//! against bluetoothd.
+//! against bluetoothd. It is built by [`bluez::connection`], as the battery
+//! providers are served on it.
 //!
 //! Each adapter has a battery provider of its own, and a pair's battery goes
 //! to the provider of the adapter it is on: the one its `Device1.Adapter`
@@ -87,6 +88,7 @@ use zbus::Connection;
 use crate::aap::client::{is_link_gone, went_during_setup};
 use crate::bluez::{
     self, AdapterSet, Backoff, BatteryAction, BatteryProvider, ConnectionEvent, Devices,
+    ProviderConnection,
 };
 use crate::podstate::{Coordinator, LinkEnd, Snapshot};
 
@@ -122,7 +124,8 @@ pub async fn run(coordinator: Arc<Coordinator>) {
 
 /// [`Attachment::new`] on the system bus.
 async fn start(coordinator: &Arc<Coordinator>) -> Result<Attachment> {
-    let conn = Connection::system()
+    let builder = zbus::connection::Builder::system().context("failed to find the system bus")?;
+    let conn = bluez::connection(builder)
         .await
         .context("failed to connect to the system bus")?;
     Attachment::new(conn, coordinator.clone()).await
@@ -133,7 +136,7 @@ async fn start(coordinator: &Arc<Coordinator>) -> Result<Attachment> {
 pub struct Attachment {
     coordinator: Arc<Coordinator>,
     /// Where BlueZ is, and the battery providers are served.
-    conn: Connection,
+    conn: ProviderConnection,
     devices: Devices,
     /// The battery provider registered with each adapter, by the adapter's
     /// path - see the module docs.
@@ -202,9 +205,12 @@ impl Attachment {
     /// Back from here, the startup sweep is over, and [`Attachment::run`]
     /// takes every connection and adapter change from then on.
     ///
+    /// The battery providers are served on `conn`, which is why it is a
+    /// [`ProviderConnection`] - see [`bluez::connection`].
+    ///
     /// Fails only when connections or adapters cannot be watched.
-    pub async fn new(conn: Connection, coordinator: Arc<Coordinator>) -> Result<Self> {
-        let devices = Devices::new(conn.clone());
+    pub async fn new(conn: ProviderConnection, coordinator: Arc<Coordinator>) -> Result<Self> {
+        let devices = Devices::new(Connection::clone(&conn));
 
         // Subscribe before the sweep so a connection racing startup is not missed,
         // and an adapter likewise.
@@ -696,8 +702,8 @@ async fn supervise(
 /// Registers a battery provider on `conn` with the adapter at `adapter`,
 /// powered or not: bluetoothd keeps an adapter's providers while it is off.
 /// `None`, logged here, when the adapter does not take it.
-async fn register_provider(conn: &Connection, adapter: &str) -> Option<BatteryProvider> {
-    match BatteryProvider::register(conn.clone(), adapter).await {
+async fn register_provider(conn: &ProviderConnection, adapter: &str) -> Option<BatteryProvider> {
+    match BatteryProvider::register(conn, adapter).await {
         Ok(provider) => {
             tracing::info!("battery provider registered with {adapter}");
             Some(provider)

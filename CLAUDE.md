@@ -97,6 +97,15 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   BlueZ: awaiting a reply leaves its own subscription unread, the #90 stall again. An
   answer that needs BlueZ is worked out in another task, as `bluez::watch_adapters`
   re-reads the adapters.
+- A zbus connection that serves objects is built with one served already
+  (`connection::Builder::serve_at`), never plain: attachment's is a
+  `bluez::ProviderConnection`, which only `bluez::connection` builds, and the fake
+  world's come from `harness::connect_serving`. zbus dispatches method calls in a task
+  the first `object_server()` spawns, and drops a method call that comes before that task
+  has subscribed - no reply, nothing logged above trace. Built plain, attachment's
+  connection spawned that task in `BatteryProvider::register`, just before the
+  registration BlueZ answers by reading the root. Under load the read came first: the
+  fake BlueZ took no battery, and bluetoothd would wait 25 s for its reply (#125).
 - A signal matched by `sender=org.bluez` can come from anyone the connection hears: zbus
   cannot check a well-known sender, and the connection watch's rule names no sender at
   all. A BlueZ signal counts only from the unique name the state was read from (the
