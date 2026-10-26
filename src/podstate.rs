@@ -2263,10 +2263,10 @@ mod tests {
             assert!(coordinator.inner.read().await.links.is_empty());
         }
 
-        /// A device that hangs up without answering the handshake leaves no
-        /// link behind, so its BLE reading stays on show.
+        /// A device that takes the handshake and hangs up before answering
+        /// it leaves no link behind, so its BLE reading stays on show.
         #[tokio::test]
-        async fn connect_aap_fails_when_the_handshake_goes_unanswered() {
+        async fn connect_aap_fails_when_the_device_hangs_up_before_answering() {
             let (coordinator, mut listener, _dir) = harnessed();
             let (connected, ()) = tokio::join!(coordinator.connect_aap(MAC), async {
                 let fake = listener.accept().await.unwrap();

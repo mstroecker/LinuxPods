@@ -1683,7 +1683,9 @@ async fn a_pair_that_hangs_up_aap_while_connected_is_linked_again() {
 /// An AAP connection the pair turns away is tried again, after a wait that
 /// grows with each failure, until one is taken. Regression (#49): a failed
 /// connect was never tried again, and the pair stayed on BLE for as long as
-/// it was connected.
+/// it was connected. A connection turned away once it is taken counts as a
+/// link that went during setup (#123), logged at debug rather than warned
+/// of, and the wait grows all the same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_aap_connection_is_tried_again() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;

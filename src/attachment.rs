@@ -84,7 +84,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use zbus::Connection;
 
-use crate::aap::client::is_link_gone;
+use crate::aap::client::{is_link_gone, went_during_setup};
 use crate::bluez::{
     self, AdapterSet, Backoff, BatteryAction, BatteryProvider, ConnectionEvent, Devices,
 };
@@ -589,9 +589,13 @@ impl Attachment {
 /// A healthy session logs nothing past the link coming up. A link that goes
 /// away is logged at debug here, beside the coordinator's info line - a
 /// disconnect takes it along, and the detach says so - and a link that fails
-/// otherwise as a warning, both with their cause (#117). Reconnecting while BlueZ still reports the pair connected
-/// is logged at info; failed attempts at warn, the first in a row, and info
-/// after.
+/// otherwise as a warning, both with their cause (#117). One that goes while
+/// it is set up - before the handshake is answered, say - went all the same,
+/// and is logged at debug too: the pods reset one as they were handled, BlueZ
+/// reported them disconnected 50 ms later, and two warnings had blamed an
+/// unanswered handshake (#123). Reconnecting while BlueZ still reports the pair connected is logged at
+/// info; failed attempts - refused, timed out - at warn, the first in a row,
+/// and info after.
 async fn supervise(
     coordinator: Arc<Coordinator>,
     devices: Devices,
@@ -659,6 +663,11 @@ async fn supervise(
                 }
                 lost = true;
                 backoff.ended(began.elapsed())
+            }
+            Err(e) if went_during_setup(&e) => {
+                tracing::debug!("AAP link to {mac} went while it was set up: {e:#}");
+                lost = true;
+                backoff.failed()
             }
             Err(e) => {
                 failures += 1;

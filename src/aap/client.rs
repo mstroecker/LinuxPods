@@ -100,6 +100,23 @@ pub fn is_link_gone(e: &anyhow::Error) -> bool {
 /// Linux's "host is down", which `std` gives no kind of its own.
 const EHOSTDOWN: i32 = 112;
 
+/// What [`Client::connect`] fails with when the socket's connect does, and
+/// the handshake when its send does - the first on the socket, which an L2CAP
+/// connect can report up when it never came up: no connection came up. Its
+/// message is the whole of what it says.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct ConnectFailed(String);
+
+/// Whether `e`, from bringing a link up - [`Client::connect`], the handshake,
+/// the requests after it - is a connection that had come up going away, as
+/// [`is_link_gone`] tells. A connect that fails is never that, whatever its
+/// cause: nothing came up to go, and an L2CAP connect that times out or finds
+/// the host down has failed.
+pub fn went_during_setup(e: &anyhow::Error) -> bool {
+    is_link_gone(e) && e.downcast_ref::<ConnectFailed>().is_none()
+}
+
 /// Where a fake listens for the app's AAP link to `addr`: `<dir>/<MAC>.sock`,
 /// the MAC as [`Address`] displays it. One socket per pair keeps two fake pairs
 /// apart, and a fake that binds by this same function cannot drift from it.
@@ -186,11 +203,11 @@ impl Client {
         #[cfg(feature = "harness")]
         if let Some(path) = &self.unix_path {
             let socket = UnixSeqpacket::connect(path).await.with_context(|| {
-                format!(
+                ConnectFailed(format!(
                     "failed to connect to AirPods at {} over {}",
                     self.addr,
                     path.display()
-                )
+                ))
             })?;
             tracing::debug!("AAP connected to {} over {}", self.addr, path.display());
             self.socket = Some(Transport::Unix(socket));
@@ -249,8 +266,10 @@ impl Client {
         }
 
         match last_err {
-            Some(e) => Err(anyhow::Error::new(e)
-                .context(format!("failed to connect to AirPods at {}", self.addr))),
+            Some(e) => Err(anyhow::Error::new(e).context(ConnectFailed(format!(
+                "failed to connect to AirPods at {}",
+                self.addr
+            )))),
             None => anyhow::bail!(
                 "failed to establish L2CAP channel to {} after {CONNECT_ATTEMPTS} attempts",
                 self.addr
@@ -272,7 +291,12 @@ impl Client {
     }
 
     async fn handshake_within(&self, limit: Duration) -> Result<()> {
-        self.send_packet(&PACKET_HANDSHAKE, "handshake").await?;
+        // The first send on the socket. One that fails is a connection that
+        // never came up, not one that went: an L2CAP connect can report Ok
+        // on a socket that is dead from the start - see `connect`.
+        self.send_packet(&PACKET_HANDSHAKE, "handshake")
+            .await
+            .map_err(|e| e.context(ConnectFailed("the connection never came up".into())))?;
         let answered = async {
             loop {
                 let packet = self.read_packet().await?;
@@ -285,10 +309,20 @@ impl Client {
                 );
             }
         };
+        // Unanswered only past the limit. A read that fails first is the link
+        // going, as when the pods reset it while handled (#123) - or, when
+        // `is_link_gone` says otherwise, some other fault on it.
         tokio::time::timeout(limit, answered)
             .await
             .with_context(|| format!("handshake unanswered for {limit:?}"))?
-            .context("handshake unanswered")
+            .map_err(|e| {
+                let what = if is_link_gone(&e) {
+                    "link went before the handshake was answered"
+                } else {
+                    "handshake failed before it was answered"
+                };
+                e.context(what)
+            })
     }
 
     pub async fn request_battery_status(&self) -> Result<()> {
@@ -421,6 +455,32 @@ mod tests {
         assert!(!is_link_gone(&anyhow::anyhow!("connection closed")));
     }
 
+    /// A link that came up and went during setup is told from a connect that
+    /// failed, though both can carry the same error: an L2CAP connect timing
+    /// out, or finding the host down, failed.
+    #[test]
+    fn a_link_gone_during_setup_is_told_from_a_failed_connect() {
+        let reset = io::Error::from(io::ErrorKind::ConnectionReset);
+        let handshake = anyhow::Error::new(reset)
+            .context("failed to read packet")
+            .context("link went before the handshake was answered");
+        assert!(went_during_setup(&handshake));
+        // As attachment gets it, under its own context.
+        assert!(went_during_setup(&handshake.context("setting up")));
+
+        for connect in [
+            io::Error::from(io::ErrorKind::TimedOut),
+            io::Error::from_raw_os_error(EHOSTDOWN),
+        ] {
+            let failed = anyhow::Error::new(connect)
+                .context(ConnectFailed("failed to connect to AirPods".into()));
+            assert!(is_link_gone(&failed));
+            assert!(!went_during_setup(&failed), "{failed:#}");
+        }
+        let unanswered = anyhow::anyhow!("handshake unanswered for 5s");
+        assert!(!went_during_setup(&unanswered));
+    }
+
     #[tokio::test]
     async fn send_and_read_require_connection() {
         let c = Client::new(MAC);
@@ -528,12 +588,13 @@ mod tests {
         async fn an_unanswered_handshake_fails() {
             let (client, _peer, _dir) = connected().await;
             let unanswered = client.handshake_within(Duration::from_millis(50)).await;
-            assert_eq!(
-                unanswered.unwrap_err().to_string(),
-                "handshake unanswered for 50ms"
-            );
+            let unanswered = unanswered.unwrap_err();
+            assert_eq!(unanswered.to_string(), "handshake unanswered for 50ms");
+            assert!(!went_during_setup(&unanswered));
         }
 
+        /// A device that hangs up before it answers has not left the
+        /// handshake unanswered: the link went (#123).
         #[tokio::test]
         async fn hanging_up_before_answering_fails_the_handshake() {
             let (client, peer, _dir) = connected().await;
@@ -541,10 +602,27 @@ mod tests {
             assert_eq!(recv(&peer).await, PACKET_HANDSHAKE);
             drop(peer);
             let failed = timeout(TIMEOUT, handshake).await.unwrap().unwrap();
+            let failed = failed.unwrap_err();
             assert_eq!(
-                format!("{:#}", failed.unwrap_err()),
-                "handshake unanswered: connection closed"
+                format!("{failed:#}"),
+                "link went before the handshake was answered: connection closed"
             );
+            assert!(went_during_setup(&failed));
+        }
+
+        /// A connection gone before the handshake could even be sent never
+        /// came up, as a socket L2CAP reports connected while the link is not
+        /// up: a failed connect, not a link that went.
+        #[tokio::test]
+        async fn a_handshake_that_cannot_be_sent_is_a_failed_connect() {
+            let (client, peer, _dir) = connected().await;
+            drop(peer);
+            let failed = client.handshake().await.unwrap_err();
+            assert!(
+                failed.downcast_ref::<ConnectFailed>().is_some(),
+                "{failed:#}"
+            );
+            assert!(!went_during_setup(&failed), "{failed:#}");
         }
 
         /// What closing a link relies on: its read loop is parked in recv, and
@@ -580,7 +658,11 @@ mod tests {
         async fn connecting_without_a_listener_fails() {
             let dir = tempfile::tempdir().unwrap();
             let mut client = Client::with_unix_socket(MAC, unix_socket_path(dir.path(), MAC));
-            assert!(client.connect().await.is_err());
+            let failed = client.connect().await.unwrap_err();
+            assert!(
+                failed.downcast_ref::<ConnectFailed>().is_some(),
+                "{failed:#}"
+            );
             assert!(!client.is_connected());
         }
     }
