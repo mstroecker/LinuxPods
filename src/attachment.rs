@@ -427,7 +427,8 @@ impl Attachment {
     }
 
     /// Mirrors each attached pair's lowest earbud into GNOME Settings, from
-    /// whichever source has it - AAP, or BLE when the link failed.
+    /// whichever source has it - AAP once the link has reported, BLE
+    /// otherwise.
     async fn sync_batteries(&mut self, updates: &mut watch::Receiver<Snapshot>) {
         // Read out first: the borrow is a read lock every broadcast waits for, so it
         // must not live across the awaits below.
