@@ -81,6 +81,18 @@ const OTHER_LEVELS: [u8; 3] = [36, 84, 22];
 /// How many advertisers a flood brings.
 const FLOOD: usize = 100;
 
+/// The command byte of the key request, as the fake records what it is sent.
+const KEY_REQUEST: u8 = 0x30;
+
+/// How long the app gives a pair to answer the handshake, which a silent pair
+/// never does.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a test watches for what must not happen: a reconnect, an AAP
+/// connection. Longer than the shortest waits between AAP attempts, 1 s and
+/// then 2 s, so that a supervisor still running would show.
+const QUIET: Duration = Duration::from_secs(4);
+
 /// The fake BlueZ's adapters, by name. Most tests have the first alone, as
 /// most machines do.
 const HCI0: &str = "hci0";
@@ -262,6 +274,48 @@ impl Fixture {
                 .unwrap()
                 == mode
         })
+        .await;
+    }
+
+    /// How many AAP connections the app has opened to a pair, those turned
+    /// away included.
+    async fn aap_attempts(&self, mac: Address) -> usize {
+        self.world.aap_attempts(mac).await.unwrap()
+    }
+
+    /// Waits until the app has opened `count` AAP connections to a pair.
+    async fn until_attempts(&self, mac: Address, count: usize) {
+        eventually(
+            &format!("AAP connection {count} to {mac}"),
+            move || async move { self.aap_attempts(mac).await >= count },
+        )
+        .await;
+    }
+
+    /// Whether a pair holds an AAP connection from the app.
+    async fn has_aap(&self, mac: Address) -> bool {
+        self.world
+            .with_pods(mac, |pods| pods.has_aap())
+            .await
+            .unwrap()
+    }
+
+    /// How many times the app has asked a pair for its keys, over all its
+    /// connections.
+    async fn key_requests(&self, mac: Address) -> usize {
+        let received = self.world.received(mac).await.unwrap();
+        received
+            .iter()
+            .filter(|packet| packet.get(4) == Some(&KEY_REQUEST))
+            .count()
+    }
+
+    /// Waits until the app has asked a pair for its keys `count` times.
+    async fn until_key_requests(&self, mac: Address, count: usize) {
+        eventually(
+            &format!("key request {count} to {mac}"),
+            move || async move { self.key_requests(mac).await >= count },
+        )
         .await;
     }
 
@@ -1462,11 +1516,14 @@ async fn two_apps_on_one_bus_each_register_a_provider() {
     .await;
 
     // The second's battery for the pair was turned away while the first's
-    // stood, as bluetoothd turns away a second; its next one is taken.
+    // stood, as bluetoothd turns away a second; its next one is taken. Not
+    // looked at before that: dropped, the first takes its AAP link along, and
+    // the second, trying again, may link the pair and offer its battery
+    // before bluetoothd has forgotten the first's, or after.
     drop(first);
     fixture.until_provider_on(HCI0).await;
-    fixture.until_batteries(&HashMap::new()).await;
     second.detach(PAIR).await;
+    fixture.until_batteries(&HashMap::new()).await;
     second.attach(PAIR).await;
     fixture.until_batteries(&battery).await;
 }
@@ -1536,4 +1593,263 @@ async fn discovery_resumes_after_a_flap_storm() {
         levels(s, PAIR, DataSource::Ble) == Some(changed)
     })
     .await;
+}
+
+/// A pair that hangs up AAP while BlueZ keeps it connected - the pods
+/// dropping the connection on their own - is linked again: its battery comes
+/// from AAP again, in the app and in GNOME Settings, and its keys are asked
+/// for again, as on every connection. Regression (#49): the link stayed down,
+/// and the pair on BLE, until it was disconnected and connected again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_that_hangs_up_aap_while_connected_is_linked_again() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    app.until("the key and an AAP reading", |s| {
+        s.known_keys == [PAIR] && levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
+    fixture.until_key_requests(PAIR, 1).await;
+
+    fixture.world.hang_up(PAIR).await.unwrap();
+    // What only the pair's next connection can bring over AAP.
+    let changed = [PAIR_LEVELS[0] - 5, PAIR_LEVELS[1] - 3, PAIR_LEVELS[2]];
+    fixture.set_levels(PAIR, changed).await;
+    fixture.until_attempts(PAIR, 2).await;
+    app.until("an AAP reading on the new link", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(changed)
+    })
+    .await;
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(changed))]))
+        .await;
+    fixture.until_key_requests(PAIR, 2).await;
+}
+
+/// An AAP connection the pair turns away is tried again, after a wait that
+/// grows with each failure, until one is taken. Regression (#49): a failed
+/// connect was never tried again, and the pair stayed on BLE for as long as
+/// it was connected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_aap_connection_is_tried_again() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.quirks.refuse_aap = 2)
+        .await
+        .unwrap();
+    let mut app = fixture.start_app().await;
+
+    app.attach(PAIR).await;
+    app.until("an AAP reading", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
+    assert_eq!(
+        fixture.aap_attempts(PAIR).await,
+        3,
+        "two refused, one taken"
+    );
+}
+
+/// While one pair's AAP setup hangs - the pods take the connection and never
+/// answer the handshake - a second pair connecting is attached, linked and
+/// given its battery without waiting for the first: attachment never waits
+/// for an AAP setup. The first, once it answers, is linked on a later try.
+/// Regression (#49): attachment waited out each setup in turn, so the second
+/// pair waited for the first one's handshake to time out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hanging_aap_setup_does_not_hold_up_another_pair() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.quirks.silent_handshake = true)
+        .await
+        .unwrap();
+    let mut app = fixture.start_app().await;
+
+    fixture.world.connect(PAIR).await.unwrap();
+    fixture.until_attempts(PAIR, 1).await;
+    app.attach(OTHER).await;
+    app.until("the other pair's AAP reading", |s| {
+        levels(s, OTHER, DataSource::Aap) == Some(OTHER_LEVELS)
+    })
+    .await;
+    fixture
+        .until_batteries(&HashMap::from([(OTHER, lowest(OTHER_LEVELS))]))
+        .await;
+    assert!(
+        fixture.has_aap(PAIR).await && fixture.aap_attempts(PAIR).await == 1,
+        "the other pair waited for the first one's handshake to time out"
+    );
+
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.quirks.silent_handshake = false)
+        .await
+        .unwrap();
+    app.until("the first pair's AAP reading, on a later try", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
+    assert!(fixture.aap_attempts(PAIR).await >= 2);
+}
+
+/// Detaching a pair stops its AAP attempts, whether it goes while a setup
+/// hangs or while waiting to try again: the hanging connection is closed at
+/// once, nothing connects to the pair after, and no link is left. A connect
+/// after detaching would do worse than waste a try: an L2CAP connect brings
+/// the pair's Bluetooth link back up, reconnecting AirPods the user has just
+/// disconnected.
+///
+/// The first detach is BlueZ's alone: the pods keep their silent connection
+/// open, so only the app can close it, ahead of the handshake's timeout. After
+/// the second, BlueZ shows the pair connected again, as a device that is not
+/// AirPods, which attachment leaves alone: a supervisor still running would
+/// find it connected and try it, where a check of BlueZ alone would not
+/// stop it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detaching_a_pair_stops_its_aap_attempts() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    // For a battery, from BLE, that tells when the pair is attached.
+    fixture.seed_keys(&[PAIR]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.quirks.silent_handshake = true)
+        .await
+        .unwrap();
+    let app = fixture.start_app().await;
+    let fixture = &fixture;
+
+    // During a setup that hangs.
+    fixture.world.connect(PAIR).await.unwrap();
+    fixture.until_attempts(PAIR, 1).await;
+    let opened = Instant::now();
+    fixture
+        .world
+        .bluez()
+        .set_connected(PAIR, false)
+        .await
+        .unwrap();
+    eventually("the hanging connection closed", move || async move {
+        !fixture.has_aap(PAIR).await
+    })
+    .await;
+    assert!(
+        opened.elapsed() < HANDSHAKE_TIMEOUT - Duration::from_secs(1),
+        "closed by the handshake's timeout, not by the detach"
+    );
+    // Answered from here on, so that a connection would show as a link.
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.quirks.silent_handshake = false)
+        .await
+        .unwrap();
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(fixture.aap_attempts(PAIR).await, 1, "tried again");
+    assert!(!app.updates.borrow().is_connected(PAIR), "a link left");
+
+    // While waiting to try again.
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.quirks.refuse_aap = u32::MAX)
+        .await
+        .unwrap();
+    fixture.world.connect(PAIR).await.unwrap();
+    let battery = HashMap::from([(PAIR, lowest(PAIR_LEVELS))]);
+    fixture.until_batteries(&battery).await;
+    fixture.until_attempts(PAIR, 3).await;
+    fixture.world.disconnect(PAIR).await.unwrap();
+    // Withdrawn once the pair is detached, its supervisor stopped.
+    fixture.until_batteries(&HashMap::new()).await;
+    let bluez = fixture.world.bluez();
+    bluez.set_airpods_service(PAIR, false).await.unwrap();
+    bluez.set_connected(PAIR, true).await.unwrap();
+    let attempts = fixture.aap_attempts(PAIR).await;
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(fixture.aap_attempts(PAIR).await, attempts, "tried again");
+    assert!(!app.updates.borrow().is_connected(PAIR), "a link left");
+}
+
+/// Across a hang-up and the link coming back, the pair's GNOME Settings
+/// battery stays exported, never withdrawn and exported again: its BLE
+/// reading shows from when the old link goes until the new one's first
+/// battery packet. The pods take half a second over that packet, as one pair
+/// took about a second. Regression (#62, #49): the BLE reading was hidden as
+/// soon as a link was up, ahead of its first packet, and the battery went
+/// missing in GNOME Settings meanwhile, on every reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_keeps_the_battery_exported() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.quirks.report_delay = Duration::from_millis(500);
+        })
+        .await
+        .unwrap();
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    // An AAP reading takes its connection state from the cached
+    // advertisement, so once it has one, an advertisement is cached.
+    app.until("an AAP reading over a cached advertisement", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+            && s.states[&PAIR].connection_state.is_some()
+    })
+    .await;
+    let battery = HashMap::from([(PAIR, lowest(PAIR_LEVELS))]);
+    fixture.until_batteries(&battery).await;
+    let bluez = fixture.world.bluez();
+    assert!(bluez.withdrawn_batteries().is_empty());
+
+    fixture.world.hang_up(PAIR).await.unwrap();
+    // A second connection means the first link has gone.
+    fixture.until_attempts(PAIR, 2).await;
+    app.until("an AAP reading on the new link", |s| {
+        levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
+    })
+    .await;
+    // Signalled after anything the reconnect brought GNOME Settings, so once
+    // it shows, a withdrawal would have too.
+    let changed = [PAIR_LEVELS[0] - 5, PAIR_LEVELS[1] - 3, PAIR_LEVELS[2]];
+    fixture.set_levels(PAIR, changed).await;
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(changed))]))
+        .await;
+    assert!(
+        bluez.withdrawn_batteries().is_empty(),
+        "withdrawn across the reconnect: {:?}",
+        bluez.withdrawn_batteries()
+    );
+}
+
+/// An adapter powering off while a pair is linked takes the link and
+/// detaches the pair, as #121 has it, and nothing tries AAP while the adapter
+/// is off. Powered on, and the pair connected again, it is linked again, with
+/// one attempt: the count catches any more, such as from a supervisor left
+/// over from before the power-off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adapter_powered_off_stops_aap_until_the_pair_connects_again() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    let battery = HashMap::from([(PAIR, lowest(PAIR_LEVELS))]);
+    fixture.until_batteries(&battery).await;
+
+    fixture.world.set_powered(HCI0, false).await.unwrap();
+    app.until("the pair off AAP", |s| !s.is_connected(PAIR))
+        .await;
+    fixture.until_batteries(&HashMap::new()).await;
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(fixture.aap_attempts(PAIR).await, 1, "tried while off");
+
+    fixture.world.set_powered(HCI0, true).await.unwrap();
+    app.attach(PAIR).await;
+    fixture.until_batteries(&battery).await;
+    assert_eq!(fixture.aap_attempts(PAIR).await, 2);
 }

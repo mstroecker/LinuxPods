@@ -36,8 +36,10 @@ Never touch a widget from a tokio task.
 once a stored key decrypts) **per device**, keyed by the **real** MAC.
 
 - `supersedes_ble` is per-device, never global - a global pause blanks out every other
-  pair. It runs *after* decryption, since an advertisement carries only a random MAC
-  until then.
+  pair - and holds only once the link has a reading. Hidden from link-up, the device
+  showed nothing until its first battery packet, and its GNOME Settings battery was
+  withdrawn and exported again on every reconnect (#62). It runs *after* decryption,
+  since an advertisement carries only a random MAC until then.
 - `subscribe()` returns a `watch::Receiver`: one latest-wins value every consumer sees,
   so UI, tray and provider never compete for a snapshot, and a slow one skips stale
   snapshots instead of queueing them (per-consumer unbounded queues grew without limit
@@ -52,13 +54,24 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   guard was dropped, an update in between could send a newer snapshot first, and the
   older one landed last and stayed on show (#88). `send_replace` never awaits, so holding
   `inner` across it is safe.
-- Every connected pair has its own AAP link (`Inner::links`): client, reading, and a
-  read loop `connect_aap` starts with that client. The loop never looks its client up
-  by MAC - a loop outliving its link would read the replacement's socket under the old
-  identity, which once stored one device's key under another's MAC. Commands
-  (`set_noise_control`, `request_encryption_keys`, `disconnect_aap`) name their device,
-  and GNOME Settings gets one `BatteryProvider1` object per attached pair.
-- Both `connect_aap` and `disconnect_aap` broadcast. Disconnect also drops the device's
+- Every attached pair has a supervisor (`attachment::supervise`) that owns its AAP work:
+  it opens a link, runs it, and after `bluez::Backoff` opens another when one fails or
+  goes. Attachment's event loop only starts and stops supervisors - a setup awaited there
+  held every connection, adapter change and battery behind it (#49). `stop` aborts the
+  supervisor and awaits its `JoinHandle` before `disconnect_aap`, so the link is gone,
+  not going, when it returns. An abort drops the supervisor at whatever await it is in,
+  so nothing it awaits may leave work half-done: the keystore save moves its owned lock
+  into `spawn_blocking`, where no abort reaches it - aborted mid-save, the lock went
+  while the write ran on, and a second save raced it on the same temp file.
+- `open_aap` records the link (`Inner::links`: client, reading, mode) as its last step,
+  with nothing awaited after, and returns the `AapLink` that owns it. Dropped anywhere -
+  timed out, aborted, run to its end - it shuts the socket and removes its own record,
+  matched by client, so a newer link stands. Its read loop reads that client only, never
+  one looked up by MAC - a loop outliving its link would read the replacement's socket
+  under the old identity, which once stored one device's key under another's MAC.
+  Commands (`set_noise_control`, `request_encryption_keys`, `disconnect_aap`) name their
+  device, and GNOME Settings gets one `BatteryProvider1` object per attached pair.
+- Both `open_aap` and `disconnect_aap` broadcast. Disconnect also drops the device's
   AAP state, or the UI keeps showing a stale exact-looking reading.
 - BLE is cached, AAP never is. `Inner::ble` keeps the last advertisement per device -
   also the connected one's, underneath AAP - so disconnect falls back to it at once.
@@ -90,6 +103,11 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   `GetManagedObjects` reply's sender), and `NameOwnerChanged` only from
   `org.freedesktop.DBus`. Applied as they came, an old bluetoothd's last `Powered`, or
   any local process's, left a phantom adapter behind (#50).
+- Signals whose order matters come from one match rule, one stream: zbus queues each
+  subscription apart, and `select!` over several picks among ready ones at random.
+  `adapter_changes` reads all of bluetoothd's that way; the fake BlueZ, reading a
+  provider's added, removed and changed from a stream each, took a battery withdrawn and
+  offered again in the wrong order.
 - Adapters are found, never assumed: `bluez::watch_adapters` reads them from
   `GetManagedObjects` and follows them as they power off and on, come and go, and
   bluetoothd restarts (#50). Discovery runs on every powered one, subscribed first, since
@@ -156,6 +174,11 @@ connecting while the app ran showed "Connected • waiting for data" with no bat
 **A zero `cid` immediately after `SeqPacket::connect` means the socket is unusable** -
 connect returns `Ok` without waiting for the BR/EDR ACL link, every send then fails
 `ENOTCONN`, and the socket stays dead even once `cid` becomes nonzero. Discard and retry.
+
+**AAP only to a pair BlueZ reports connected.** An L2CAP connect pages the device and
+brings its ACL link up, so a retry to a pair the user has just disconnected would
+reconnect it. The supervisor asks `Device1.Connected` before every attempt but the first,
+and asks nothing while BlueZ is off the bus: under systemd the call starts it again.
 
 **Never hold the `inner` lock across `read_packet().await`** - clone the link's client out. The read parks until a
 packet arrives; this deadlocked the Request Keys button.

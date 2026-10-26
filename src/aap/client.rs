@@ -68,6 +68,38 @@ const PACKET_ENABLE_FEATURES: [u8; 14] = [
 /// Requests the proximity pairing encryption keys (IRK and ENC_KEY).
 const PACKET_KEY_REQUEST: [u8; 8] = [0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00];
 
+/// What [`Client::read_packet`] fails with once the connection has closed:
+/// the device hung up, or [`Client::shutdown`] closed it here.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("connection closed")]
+pub struct Closed;
+
+/// Whether `e` - from [`Client::read_packet`], say - is the connection going
+/// away rather than something going wrong on it: closed from either end, or
+/// taken down with the Bluetooth link, as an ordinary disconnect does - reset
+/// by the device, aborted here, gone out of range, the adapter gone down.
+pub fn is_link_gone(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause.is::<Closed>()
+            || cause.downcast_ref::<io::Error>().is_some_and(|e| {
+                matches!(
+                    e.kind(),
+                    io::ErrorKind::NotConnected
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::HostUnreachable
+                        | io::ErrorKind::NetworkDown
+                        | io::ErrorKind::NetworkUnreachable
+                ) || e.raw_os_error() == Some(EHOSTDOWN)
+            })
+    })
+}
+
+/// Linux's "host is down", which `std` gives no kind of its own.
+const EHOSTDOWN: i32 = 112;
+
 /// Where a fake listens for the app's AAP link to `addr`: `<dir>/<MAC>.sock`,
 /// the MAC as [`Address`] displays it. One socket per pair keeps two fake pairs
 /// apart, and a fake that binds by this same function cannot drift from it.
@@ -316,7 +348,8 @@ impl Client {
         Ok(())
     }
 
-    /// Reads a single AAP packet.
+    /// Reads a single AAP packet. Fails with [`Closed`] once the connection
+    /// has closed.
     pub async fn read_packet(&self) -> Result<Vec<u8>> {
         let socket = self.socket.as_ref().context("not connected")?;
         let mut buf = vec![0u8; READ_BUF_LEN];
@@ -327,7 +360,9 @@ impl Client {
         // SOCK_SEQPACKET reports a closed channel - the device hanging up, or our
         // own shutdown - as a zero-length read, not an error. An AAP packet is never
         // empty; returning one spun the read loop on a dead socket.
-        anyhow::ensure!(n > 0, "connection closed");
+        if n == 0 {
+            return Err(Closed.into());
+        }
         buf.truncate(n);
         Ok(buf)
     }
@@ -359,6 +394,31 @@ mod tests {
         let c = Client::new(MAC);
         assert_eq!(c.addr, MAC);
         assert!(!c.is_connected());
+    }
+
+    /// The connection going away is told from a fault on it, under whatever
+    /// context the error has gathered (#117).
+    #[test]
+    fn a_link_gone_is_told_from_a_fault() {
+        let read = |e: anyhow::Error| e.context("failed to read packet");
+        assert!(is_link_gone(&read(Closed.into())));
+        for kind in [
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::NetworkDown,
+        ] {
+            assert!(
+                is_link_gone(&read(io::Error::from(kind).into())),
+                "{kind:?}"
+            );
+        }
+        let host_down = io::Error::from_raw_os_error(EHOSTDOWN);
+        assert!(is_link_gone(&read(host_down.into())));
+        assert!(!is_link_gone(&read(
+            io::Error::from(io::ErrorKind::PermissionDenied).into()
+        )));
+        assert!(!is_link_gone(&anyhow::anyhow!("connection closed")));
     }
 
     #[tokio::test]

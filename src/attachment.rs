@@ -39,37 +39,62 @@
 //! # One record
 //!
 //! What attachment knows about a pair is one [`Attached`] entry, by real MAC: its
-//! BlueZ object, its adapter and the level its battery shows. Kept in two
-//! maps - the attached pairs by object path, and the exported levels by MAC
-//! inside the battery provider - the two had to be kept in step by hand.
+//! BlueZ object, its adapter, the level its battery shows and its supervisor.
+//! Kept in two maps - the attached pairs by object path, and the exported
+//! levels by MAC inside the battery provider - the two had to be kept in step
+//! by hand.
 //!
 //! The coordinator's AAP links are not a copy of it. A link can fail to come up,
 //! or die while BlueZ keeps the pair connected, so attached and linked are two
-//! facts: attachment asks for a link, and the snapshot says whether there is one.
+//! facts: each attached pair's supervisor keeps asking for a link, and the
+//! snapshot says whether there is one.
 //!
 //! # Per-device work
 //!
 //! Starts in [`Attachment::start`] and stops in [`Attachment::stop`], and nowhere
-//! else, so whatever runs for a pair has one place to begin and one to end. For
-//! now that is the AAP link, and starting it is awaited: the event loop waits for
-//! each connection to come up or fail.
+//! else, so whatever runs for a pair has one place to begin and one to end. That
+//! is the pair's supervisor (#49), a task of its own - see [`supervise`]: it
+//! links the pair over AAP, runs the link, and links it again when the link
+//! fails to come up, or goes while BlueZ still reports the pair connected,
+//! waiting longer after each failure. The event loop only starts and stops
+//! supervisors and never waits for AAP, so a connection, an adapter change or
+//! a battery never waits behind a slow AAP setup, and pairs connect in
+//! parallel.
+//!
+//! Stopping a supervisor waits until it is gone, then closes any link left,
+//! so that once a pair is detached nothing links it again: an L2CAP connect
+//! brings the pair's Bluetooth link up with it, which would reconnect
+//! AirPods the user had just disconnected. The supervisor is dropped wherever
+//! it was - in a connect, a handshake, a wait - and the connection under way
+//! with it.
+//!
+//! An attachment that stops, as BlueZ's signals on its connection end, takes
+//! its supervisors along, and their links with them; the one that starts over
+//! links the pairs it finds connected afresh.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bluer::Address;
 use futures_util::{Stream, StreamExt};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use zbus::Connection;
 
+use crate::aap::client::is_link_gone;
 use crate::bluez::{
     self, AdapterSet, Backoff, BatteryAction, BatteryProvider, ConnectionEvent, Devices,
 };
-use crate::podstate::{Coordinator, Snapshot};
+use crate::podstate::{Coordinator, LinkEnd, Snapshot};
+
+/// How long one AAP attempt may take, from connecting to the handshake's
+/// answer and the requests after it. The L2CAP connects of
+/// `aap::Client::connect` and the 5 s the handshake gets fit in it with room
+/// to spare; past it the attempt has failed, and is tried again.
+const AAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Runs attachment on the system bus, where BlueZ is, for as long as the app
 /// runs. What `main.rs` spawns. When the bus cannot be reached, or BlueZ's
@@ -145,6 +170,29 @@ struct Attached {
     /// The level its GNOME Settings battery shows, or `None` while it has none -
     /// see [`battery_actions`].
     battery: Option<u8>,
+    /// Its supervisor, which keeps it linked over AAP - see [`supervise`].
+    /// `None` only in the unit tests, which run none.
+    supervisor: Option<Supervisor>,
+}
+
+/// A pair's supervisor task. Aborted when dropped, so that an attachment
+/// dropped never leaves one running - nor the link it holds, which goes with
+/// it.
+struct Supervisor(JoinHandle<()>);
+
+impl Supervisor {
+    /// Aborts the task and waits until it is gone: dropped wherever it was, it
+    /// never reaches its next step, and links the pair no more.
+    async fn stop(mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+
+impl Drop for Supervisor {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Attachment {
@@ -309,8 +357,8 @@ impl Attachment {
             self.detach(mac).await;
         }
         for path in paths {
-            // One attached already keeps its link, or the lack of one: AAP is
-            // not retried here (#49).
+            // One attached already keeps its supervisor, which tries AAP
+            // again itself.
             if self.attached_at(&path).is_none() {
                 tracing::info!("AirPods found connected: {path}");
                 self.attach(&path).await;
@@ -378,51 +426,68 @@ impl Attachment {
             }
         };
         // The sweep and a connection event can both find a pair. Attached
-        // already, it keeps its entry and the battery it shows.
-        if let Entry::Vacant(entry) = self.attached.entry(mac) {
-            // Only the battery needs the adapter: AAP and the keys do not.
-            let adapter = match adapter {
-                Ok(adapter) => Some(adapter),
-                Err(e) => {
-                    tracing::warn!("could not read the adapter of {path}: {e:#}");
-                    tracing::warn!(
-                        "Its battery won't appear in GNOME Settings, but the UI still works"
-                    );
-                    None
-                }
-            };
-            entry.insert(Attached {
+        // already, it keeps its entry, the battery it shows and its
+        // supervisor.
+        if self.attached.contains_key(&mac) {
+            return;
+        }
+        // Only the battery needs the adapter: AAP and the keys do not.
+        let adapter = match adapter {
+            Ok(adapter) => Some(adapter),
+            Err(e) => {
+                tracing::warn!("could not read the adapter of {path}: {e:#}");
+                tracing::warn!(
+                    "Its battery won't appear in GNOME Settings, but the UI still works"
+                );
+                None
+            }
+        };
+        let supervisor = self.start(mac, path);
+        self.attached.insert(
+            mac,
+            Attached {
                 path: path.to_string(),
                 adapter,
                 battery: None,
-            });
-        }
-        self.start(mac).await;
+                supervisor: Some(supervisor),
+            },
+        );
     }
 
     /// Detaches a pair: stops its work and withdraws its battery. Any other pair
     /// keeps its own.
     async fn detach(&mut self, mac: Address) {
-        let Some(pair) = self.attached.remove(&mac) else {
+        let Some(mut pair) = self.attached.remove(&mac) else {
             return;
         };
-        self.stop(mac).await;
+        if let Some(supervisor) = pair.supervisor.take() {
+            self.stop(mac, supervisor).await;
+        }
         if pair.battery.is_some() {
             self.apply(pair.adapter.as_deref(), &BatteryAction::Remove { mac })
                 .await;
         }
     }
 
-    /// Starts a pair's work: its AAP link, and with it the link's read loop.
-    async fn start(&self, mac: Address) {
-        if let Err(e) = self.coordinator.connect_aap(mac).await {
-            tracing::warn!("failed to connect AAP to {mac}: {e:#}");
-            tracing::warn!("Falling back to BLE for battery monitoring (approximate)");
-        }
+    /// Starts a pair's work, at `path`: its supervisor, which links it over
+    /// AAP and keeps it linked - see [`supervise`]. Never waits for AAP.
+    fn start(&self, mac: Address, path: &str) -> Supervisor {
+        Supervisor(tokio::spawn(supervise(
+            self.coordinator.clone(),
+            self.devices.clone(),
+            self.adapters.clone(),
+            mac,
+            path.to_string(),
+        )))
     }
 
-    /// Stops what [`Attachment::start`] started.
-    async fn stop(&self, mac: Address) {
+    /// Stops what [`Attachment::start`] started: the supervisor, and whatever
+    /// connect is under way, then the link. Back from here, the pair has no
+    /// link, and nothing links it again - see the module docs.
+    async fn stop(&self, mac: Address, supervisor: Supervisor) {
+        supervisor.stop().await;
+        // The link goes with the supervisor, but not at once: its record waits
+        // for the lock. Taken down here, it is gone by the time this returns.
         self.coordinator.disconnect_aap(mac).await;
     }
 
@@ -490,6 +555,124 @@ impl Attachment {
             BatteryAction::Update { .. } => {}
         }
         true
+    }
+}
+
+/// Keeps the attached pair at `mac`, BlueZ's object at `path`, linked over
+/// AAP for as long as it runs, which is until [`Attachment::stop`] stops it.
+///
+/// Each attempt opens a link of its own, with an identity of its own, and
+/// runs it to its end: nothing here looks a link up by MAC. An attempt that
+/// fails - refused, the handshake unanswered, past [`AAP_CONNECT_TIMEOUT`] -
+/// is tried again, and so is a link that went, both after a wait from
+/// [`Backoff`]: growing with each failure up to a minute, and from the
+/// shortest again after a link that stayed up a minute or more. Ahead of
+/// every attempt but the first, which attaching has just checked, BlueZ is
+/// asked whether the pair is still connected: while it is not - attachment is
+/// about to detach it, or missed that it went - nothing is tried, as an
+/// L2CAP connect would bring its Bluetooth link back up. While BlueZ is off
+/// the bus, as `adapters` tells, it is not asked but waited for: attachment
+/// asks it nothing then either, and on a bus that activates bluetoothd -
+/// systemd's - a call would start it again, undoing a `systemctl stop`.
+///
+/// A link closed here, by [`Coordinator::disconnect_aap`], ends it: whatever
+/// closed the link wants it closed.
+///
+/// A healthy session logs nothing past the link coming up. A link that goes
+/// away is logged at debug here, beside the coordinator's info line - a
+/// disconnect takes it along, and the detach says so - and a link that fails
+/// otherwise as a warning, both with their cause (#117). Reconnecting while BlueZ still reports the pair connected
+/// is logged at info; failed attempts at warn, the first in a row, and info
+/// after.
+async fn supervise(
+    coordinator: Arc<Coordinator>,
+    devices: Devices,
+    mut adapters: watch::Receiver<AdapterSet>,
+    mac: Address,
+    path: String,
+) {
+    let mut backoff = Backoff::default();
+    // Failed attempts in a row, for the logs.
+    let mut failures = 0u32;
+    let mut first = true;
+    // Whether the last link was lost, rather than failed to come up.
+    let mut lost = false;
+    loop {
+        if !std::mem::take(&mut first) {
+            // Read out: the borrow holds the watch's lock.
+            let on_bus = adapters.borrow().on_bus();
+            if !on_bus {
+                tracing::debug!("AAP to {mac} waits for BlueZ to be back on the bus");
+                // The borrow it returns is dropped with the statement.
+                let back = adapters.wait_for(AdapterSet::on_bus).await.is_ok();
+                if !back {
+                    // The watch ended with BlueZ's signals, and attachment
+                    // stops with them, this along.
+                    tokio::time::sleep(backoff.failed()).await;
+                }
+                continue;
+            }
+            if !devices.device_connected(&path).await {
+                let wait = backoff.failed();
+                tracing::debug!(
+                    "AAP to {mac} waits: BlueZ reports it disconnected; asking again in {}s",
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            if std::mem::take(&mut lost) {
+                tracing::info!("connecting AAP to {mac} again: BlueZ still reports it connected");
+            }
+        }
+
+        tracing::debug!("connecting AAP to {mac}");
+        let opened = tokio::time::timeout(AAP_CONNECT_TIMEOUT, coordinator.open_aap(mac))
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "timed out after {}s",
+                    AAP_CONNECT_TIMEOUT.as_secs()
+                ))
+            });
+        let wait = match opened {
+            Ok(link) => {
+                failures = 0;
+                let began = Instant::now();
+                match link.run().await {
+                    LinkEnd::Closed => {
+                        tracing::debug!("AAP link to {mac} closed; no longer supervised");
+                        return;
+                    }
+                    LinkEnd::Lost(e) if is_link_gone(&e) => {
+                        tracing::debug!("AAP link to {mac} went: {e:#}");
+                    }
+                    LinkEnd::Lost(e) => tracing::warn!("AAP read error from {mac}: {e:#}"),
+                }
+                lost = true;
+                backoff.ended(began.elapsed())
+            }
+            Err(e) => {
+                failures += 1;
+                let wait = backoff.failed();
+                if failures == 1 {
+                    tracing::warn!("failed to connect AAP to {mac}: {e:#}");
+                    tracing::warn!(
+                        "Falling back to BLE for battery monitoring (approximate); \
+                         trying AAP again in {}s",
+                        wait.as_secs()
+                    );
+                } else {
+                    tracing::info!(
+                        "AAP to {mac} failed again ({failures} in a row): {e:#}; \
+                         trying again in {}s",
+                        wait.as_secs()
+                    );
+                }
+                wait
+            }
+        };
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -565,6 +748,7 @@ mod tests {
             path: path.to_string(),
             adapter: Some(adapter.to_string()),
             battery,
+            supervisor: None,
         }
     }
 
