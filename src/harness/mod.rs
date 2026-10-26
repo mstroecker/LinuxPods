@@ -161,6 +161,30 @@ impl PrivateBus {
             .await
             .with_context(|| format!("failed to connect to {}", self.address))
     }
+
+    /// A new connection to the bus to serve battery providers on, as
+    /// [`crate::bluez::connection`] builds one: what attachment runs on.
+    pub async fn connect_for_providers(&self) -> Result<crate::bluez::ProviderConnection> {
+        crate::bluez::connection(zbus::connection::Builder::address(self.address())?)
+            .await
+            .with_context(|| format!("failed to connect to {}", self.address))
+    }
+}
+
+/// A connection of the fake world's to the bus at `bus`, to serve objects
+/// on: the fake BlueZ's, or the world's own control. It serves an
+/// ObjectManager at `/` from the start - the fake BlueZ's, as bluetoothd
+/// serves one there, and on the control connection there only for this - so
+/// that its object server answers from the first message. On a connection
+/// built plain, zbus starts dispatching method calls in a task the first
+/// `object_server()` spawns, and drops a method call that comes before that
+/// task has subscribed, as the app's battery provider did (#125).
+pub(crate) async fn connect_serving(bus: &str) -> Result<zbus::Connection> {
+    zbus::connection::Builder::address(bus)?
+        .serve_at("/", zbus::fdo::ObjectManager)?
+        .build()
+        .await
+        .with_context(|| format!("failed to connect to {bus}"))
 }
 
 impl Drop for PrivateBus {

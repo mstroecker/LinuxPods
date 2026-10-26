@@ -71,6 +71,7 @@ use zbus::zvariant::{OwnedValue, Value};
 use zbus::{Connection, fdo, interface};
 
 use super::bluez::FakeBluez;
+use super::connect_serving;
 use super::pods::{Action, Keys, PRO_3, Part, Pods, Quirks};
 use crate::aap::client::unix_socket_path;
 use crate::ble::decrypt::random_key;
@@ -152,13 +153,6 @@ fn power(powered: bool) -> &'static str {
     if powered { "powered on" } else { "powered off" }
 }
 
-async fn connect(bus: &str) -> Result<Connection> {
-    zbus::connection::Builder::address(bus)?
-        .build()
-        .await
-        .with_context(|| format!("failed to connect to {bus}"))
-}
-
 impl World {
     /// A world on the bus at `bus`, its AAP sockets in `socket_dir`, which is
     /// created if missing, and its fake BlueZ with one adapter,
@@ -178,11 +172,13 @@ impl World {
         socket_dir: &Path,
         adapters: &[(&str, bool)],
     ) -> Result<Self> {
-        let bluez = FakeBluez::serve(connect(bus).await?).await?;
+        let bluez = FakeBluez::serve(bus).await?;
         for &(name, powered) in adapters {
             bluez.add_adapter(name, powered).await?;
         }
-        let control = connect(bus).await?;
+        // Served on from the start, as `FakeWorld1` can be put there only
+        // once the world it holds is made - see `connect_serving`.
+        let control = connect_serving(bus).await?;
         std::fs::create_dir_all(socket_dir)
             .with_context(|| format!("failed to create {}", socket_dir.display()))?;
         let world = Self(Arc::new(Inner {
@@ -344,7 +340,7 @@ impl World {
     /// new unique name - see [`FakeBluez::restart`]. The pairs keep
     /// their links, as the controllers keep them.
     pub async fn restart_bluez(&self) -> Result<()> {
-        self.0.bluez.restart(connect(&self.0.bus).await?).await?;
+        self.0.bluez.restart(&self.0.bus).await?;
         tracing::info!("fake world: BlueZ restarted");
         Ok(())
     }

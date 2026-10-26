@@ -47,7 +47,7 @@ use linuxpods::aap::noise::{allow_off_packet, set_packet};
 use linuxpods::attachment::Attachment;
 use linuxpods::ble::decrypt_for_device;
 use linuxpods::ble::scanner::{Advertisement, Scanner};
-use linuxpods::bluez::BatteryProvider;
+use linuxpods::bluez::{BatteryProvider, ProviderConnection};
 use linuxpods::harness::bluez::device_path;
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3, Part};
 use linuxpods::harness::{PrivateBus, World};
@@ -322,12 +322,14 @@ impl Fixture {
 
     /// Starts the app on this world - see [`App`].
     async fn start_app(&self) -> App {
-        self.start_app_on(self.bus.connect().await.unwrap()).await
+        self.start_app_on(self.bus.connect_for_providers().await.unwrap())
+            .await
     }
 
     /// [`Fixture::start_app`], with attachment on `bluez`, a connection to the
-    /// test's bus that the test may have used first.
-    async fn start_app_on(&self, bluez: Connection) -> App {
+    /// test's bus that the test may have used first - one for providers, as
+    /// attachment's is: see [`PrivateBus::connect_for_providers`].
+    async fn start_app_on(&self, bluez: ProviderConnection) -> App {
         let coordinator = Coordinator::with_aap_socket_dir(
             Some(self.keystore()),
             self.sockets.path().to_path_buf(),
@@ -1090,8 +1092,8 @@ async fn a_battery_provider_refused_on_one_adapter_leaves_attachment_working() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_battery_provider_registered_already_is_registered() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
-    let bluez = fixture.bus.connect().await.unwrap();
-    let _registered = BatteryProvider::register(bluez.clone(), "/org/bluez/hci0")
+    let bluez = fixture.bus.connect_for_providers().await.unwrap();
+    let _registered = BatteryProvider::register(&bluez, "/org/bluez/hci0")
         .await
         .unwrap();
     let mut app = fixture.start_app_on(bluez).await;
@@ -1494,7 +1496,7 @@ async fn a_bluez_restart_read_twice_keeps_the_battery() {
         &[(HCI0, OTHER, PRO_2_USB_C, OTHER_LEVELS)],
     )
     .await;
-    let attachment = fixture.bus.connect().await.unwrap();
+    let attachment = fixture.bus.connect_for_providers().await.unwrap();
     let reads = reads_by(&fixture.bus, &attachment).await;
     let mut app = fixture.start_app_on(attachment).await;
     app.attach(OTHER).await;
@@ -1512,7 +1514,7 @@ async fn a_bluez_restart_read_twice_keeps_the_battery() {
         move || async move { bus.activations() > 0 && reads() > before },
     )
     .await;
-    bluez.start(bus.connect().await.unwrap()).await.unwrap();
+    bluez.start(bus.address()).await.unwrap();
 
     // That read changes the adapters - the provider is registered, the names
     // read and the pairs swept, two reads more - and the second change of
@@ -1903,7 +1905,7 @@ async fn a_services_change_on_a_disconnected_device_costs_one_call() {
     bluez.set_airpods_service(DEVICE, false).await.unwrap();
     bluez.set_airpods_service(PAIR, false).await.unwrap();
     fixture.world.connect(PAIR).await.unwrap();
-    let attachment = fixture.bus.connect().await.unwrap();
+    let attachment = fixture.bus.connect_for_providers().await.unwrap();
     let on_device = calls_by(
         &fixture.bus,
         &attachment,
@@ -1938,7 +1940,7 @@ async fn a_services_change_on_a_disconnected_device_costs_one_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pair_whose_link_goes_while_bluez_is_away_waits_for_it() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
-    let attachment = fixture.bus.connect().await.unwrap();
+    let attachment = fixture.bus.connect_for_providers().await.unwrap();
     let on_pair = calls_by(&fixture.bus, &attachment, on_path(device_path(HCI0, PAIR))).await;
     let mut app = fixture.start_app_on(attachment).await;
     app.attach(PAIR).await;
@@ -1951,10 +1953,7 @@ async fn a_pair_whose_link_goes_while_bluez_is_away_waits_for_it() {
     tokio::time::sleep(QUIET).await;
     assert_eq!(on_pair(), before, "asked BlueZ while it was away");
 
-    bluez
-        .start(fixture.bus.connect().await.unwrap())
-        .await
-        .unwrap();
+    bluez.start(fixture.bus.address()).await.unwrap();
     app.until("the pair linked again", |s| s.is_connected(PAIR))
         .await;
     assert_eq!(fixture.aap_attempts(PAIR).await, 2);

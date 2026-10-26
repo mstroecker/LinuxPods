@@ -91,7 +91,11 @@
 //! registers it. A provider registers the root of its objects, and the fake
 //! reads them from there as bluetoothd does: the ObjectManager's objects at
 //! once, then its `InterfacesAdded`, `InterfacesRemoved` and
-//! `PropertiesChanged`. A battery takes its device from `Device` when it
+//! `PropertiesChanged`. Stricter than bluetoothd, it takes none of those
+//! signals until its `GetManagedObjects` is answered, where bluetoothd takes
+//! `InterfacesAdded` regardless: a provider that leaves the read unanswered
+//! gets no battery here at all, which is how a dropped read showed (#125).
+//! A battery takes its device from `Device` when it
 //! appears. It is ignored, with a warning, if that is no paired device on the
 //! provider's adapter - one on another adapter, an advertiser, or nothing at
 //! all - or if another provider got there first. A client that leaves the bus
@@ -113,6 +117,7 @@ use zbus::{Connection, MatchRule, MessageStream, interface};
 
 use crate::ble::scanner::APPLE_COMPANY_ID;
 use crate::bluez::{AIRPODS_UUID, BLUEZ_SERVICE};
+use crate::harness::connect_serving;
 
 /// How long bluetoothd keeps a device it has only heard advertise once it
 /// stops hearing it: `TemporaryTimeout` in its main.conf, 30 seconds unless
@@ -405,11 +410,12 @@ impl State {
 }
 
 impl FakeBluez {
-    /// Serves the ObjectManager on `conn`, with no adapter yet - see
-    /// [`FakeBluez::add_adapter`]. The name comes later, from
-    /// [`FakeBluez::publish`], so that adapters and devices can be put in
-    /// place before the app can find any of it.
-    pub async fn serve(conn: Connection) -> Result<Self> {
+    /// Serves the ObjectManager on a connection of its own to the bus at
+    /// `bus`, with no adapter yet - see [`FakeBluez::add_adapter`]. The name
+    /// comes later, from [`FakeBluez::publish`], so that adapters and devices
+    /// can be put in place before the app can find any of it.
+    pub async fn serve(bus: &str) -> Result<Self> {
+        let conn = connect_serving(bus).await?;
         let bluez = Self {
             conn: Arc::new(Mutex::new(conn.clone())),
             state: Arc::default(),
@@ -419,13 +425,10 @@ impl FakeBluez {
         Ok(bluez)
     }
 
-    /// What every connection it serves on has: the ObjectManager at `/`,
-    /// and a watch on clients leaving the bus.
+    /// What every connection it serves on has besides the ObjectManager at
+    /// `/`, which [`connect_serving`] serves from the start: a watch on
+    /// clients leaving the bus.
     async fn serve_on(&self, conn: &Connection) -> Result<()> {
-        conn.object_server()
-            .at("/", zbus::fdo::ObjectManager)
-            .await?;
-
         // bluetoothd forgets a client's discovery and providers when it
         // leaves the bus.
         let dbus = zbus::fdo::DBusProxy::new(conn).await?;
@@ -621,11 +624,11 @@ impl FakeBluez {
 
     /// bluetoothd restarting without powering its adapters off, as after a
     /// crash - see the module docs: [`FakeBluez::stop`], then
-    /// [`FakeBluez::start`] on `conn`, a connection of its own. Back from
-    /// here, `org.bluez` is taken again, under a new unique name.
-    pub async fn restart(&self, conn: Connection) -> Result<()> {
+    /// [`FakeBluez::start`] on the bus at `bus`. Back from here, `org.bluez`
+    /// is taken again, under a new unique name.
+    pub async fn restart(&self, bus: &str) -> Result<()> {
         self.stop().await?;
-        self.start(conn).await
+        self.start(bus).await
     }
 
     /// bluetoothd going, as it does when it crashes: every client's
@@ -655,11 +658,13 @@ impl FakeBluez {
         Ok(())
     }
 
-    /// The new bluetoothd, on `conn`, which has a unique name of its own:
-    /// the adapters and paired devices as the old one left them, connections
-    /// and all, none discovering. All of it is in place before the name is
-    /// taken, so nothing is announced to whoever listens to `org.bluez`.
-    pub async fn start(&self, conn: Connection) -> Result<()> {
+    /// The new bluetoothd, on a new connection to the bus at `bus`, which
+    /// has a unique name of its own: the adapters and paired devices as the
+    /// old one left them, connections and all, none discovering. All of it is
+    /// in place before the name is taken, so nothing is announced to whoever
+    /// listens to `org.bluez`.
+    pub async fn start(&self, bus: &str) -> Result<()> {
+        let conn = connect_serving(bus).await?;
         let old = self.conn();
         let (adapters, paired) = {
             let state = self.state();
@@ -1673,9 +1678,7 @@ mod tests {
     /// paired with it, under its name.
     async fn served() -> (PrivateBus, FakeBluez) {
         let bus = PrivateBus::start().unwrap();
-        let bluez = FakeBluez::serve(bus.connect().await.unwrap())
-            .await
-            .unwrap();
+        let bluez = FakeBluez::serve(bus.address()).await.unwrap();
         bluez.add_adapter(ADAPTER, true).await.unwrap();
         bluez.add_device(ADAPTER, PAIR, ALIAS).await.unwrap();
         bluez.publish().await.unwrap();
@@ -1820,9 +1823,7 @@ mod tests {
     #[tokio::test]
     async fn adapters_are_found_powered_or_not() {
         let bus = PrivateBus::start().unwrap();
-        let bluez = FakeBluez::serve(bus.connect().await.unwrap())
-            .await
-            .unwrap();
+        let bluez = FakeBluez::serve(bus.address()).await.unwrap();
         bluez.add_adapter(SECOND, true).await.unwrap();
         bluez.add_adapter(ADAPTER, false).await.unwrap();
         bluez.add_device(SECOND, PAIR, ALIAS).await.unwrap();
@@ -1920,7 +1921,7 @@ mod tests {
         let adapter = proxy(&conn, &path, "org.bluez.Adapter1").await;
 
         bluez.set_discovery_busy(ADAPTER, true);
-        bluez.restart(bus.connect().await.unwrap()).await.unwrap();
+        bluez.restart(bus.address()).await.unwrap();
         assert_eq!(
             error_name(adapter.call_method("StartDiscovery", &()).await),
             "org.bluez.Error.InProgress"
@@ -1986,9 +1987,7 @@ mod tests {
     #[tokio::test]
     async fn the_scanner_fails_with_no_adapter_to_scan_on() {
         let bus = PrivateBus::start().unwrap();
-        let bluez = FakeBluez::serve(bus.connect().await.unwrap())
-            .await
-            .unwrap();
+        let bluez = FakeBluez::serve(bus.address()).await.unwrap();
         bluez.publish().await.unwrap();
         let scanner = Scanner::with_connection(bus.connect().await.unwrap());
         let err = scanner.start_discovery().await.unwrap_err();
@@ -2244,10 +2243,12 @@ mod tests {
     #[tokio::test]
     async fn reads_batteries_from_the_provider() {
         let (bus, bluez) = served().await;
-        let mut provider =
-            BatteryProvider::register(bus.connect().await.unwrap(), &adapter_path(ADAPTER))
-                .await
-                .unwrap();
+        let mut provider = BatteryProvider::register(
+            &bus.connect_for_providers().await.unwrap(),
+            &adapter_path(ADAPTER),
+        )
+        .await
+        .unwrap();
         let reader = bus.connect().await.unwrap();
         let path = device_path(ADAPTER, PAIR).to_string();
         let battery = proxy(&reader, &path, "org.bluez.Battery1").await;
@@ -2296,6 +2297,64 @@ mod tests {
         assert!(battery.get_property::<u8>("Percentage").await.is_err());
     }
 
+    /// BlueZ's read of a provider's root is answered however late the
+    /// runtime gets round to zbus's object server, on a connection from
+    /// `bluez::connection`: its object server dispatches from the start.
+    /// Regression (#125): on a connection built plain, the provider's own
+    /// `object_server()` started the dispatch, in a task that under load
+    /// subscribed only after the fake's `GetManagedObjects` had come. zbus
+    /// dropped the call unanswered, and the fake, waiting for the reply, took
+    /// no battery from the provider. Here the runtime such a task would be
+    /// spawned on runs nothing until the call is in.
+    #[tokio::test]
+    async fn a_providers_root_is_read_however_late_its_object_server_would_start() {
+        let (bus, bluez) = served().await;
+        let conn = bus.connect_for_providers().await.unwrap();
+        // The read as the connection takes it in, whoever else does.
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::MethodCall)
+            .destination(conn.unique_name().unwrap().clone())
+            .unwrap()
+            .member("GetManagedObjects")
+            .unwrap()
+            .build();
+        let mut reads = MessageStream::for_match_rule(rule, &conn, None)
+            .await
+            .unwrap();
+        // The first `object_server()` spawns the dispatch task, if anything
+        // does: on this runtime, whatever calls it.
+        let held = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        {
+            let _held = held.enter();
+            conn.object_server();
+        }
+
+        let mut provider = BatteryProvider::register(&conn, &adapter_path(ADAPTER))
+            .await
+            .unwrap();
+        timeout(TIMEOUT, reads.next())
+            .await
+            .expect("the fake reads the root")
+            .unwrap()
+            .unwrap();
+        // Late, but running from here on.
+        let (_release, released) = tokio::sync::oneshot::channel::<()>();
+        std::thread::spawn(move || {
+            held.block_on(async {
+                let _ = released.await;
+            });
+        });
+        let add = BatteryAction::Add {
+            mac: PAIR,
+            device_path: device_path(ADAPTER, PAIR).to_string(),
+            percentage: 73,
+        };
+        provider.apply(&add).await.unwrap();
+        eventually(|| bluez.batteries() == HashMap::from([(PAIR, 73)])).await;
+    }
+
     /// A provider's changes are taken in the order it made them, however
     /// fast they come: a battery added, withdrawn and added again at once is
     /// there at the end, at its last level. Regression: added, withdrawn and
@@ -2305,10 +2364,12 @@ mod tests {
     #[tokio::test]
     async fn takes_a_providers_changes_in_order() {
         let (bus, bluez) = served().await;
-        let mut provider =
-            BatteryProvider::register(bus.connect().await.unwrap(), &adapter_path(ADAPTER))
-                .await
-                .unwrap();
+        let mut provider = BatteryProvider::register(
+            &bus.connect_for_providers().await.unwrap(),
+            &adapter_path(ADAPTER),
+        )
+        .await
+        .unwrap();
         let add = |percentage| BatteryAction::Add {
             mac: PAIR,
             device_path: device_path(ADAPTER, PAIR).to_string(),
@@ -2348,8 +2409,8 @@ mod tests {
             .unwrap();
         assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
 
-        let conn = bus.connect().await.unwrap();
-        let mut first = BatteryProvider::register(conn.clone(), &adapter_path(ADAPTER))
+        let conn = bus.connect_for_providers().await.unwrap();
+        let mut first = BatteryProvider::register(&conn, &adapter_path(ADAPTER))
             .await
             .unwrap();
         let add = |mac, adapter| BatteryAction::Add {
@@ -2376,7 +2437,7 @@ mod tests {
         })
         .await;
 
-        let mut second = BatteryProvider::register(conn, &adapter_path(SECOND))
+        let mut second = BatteryProvider::register(&conn, &adapter_path(SECOND))
             .await
             .unwrap();
         second.apply(&add(OTHER, SECOND)).await.unwrap();
@@ -2388,10 +2449,12 @@ mod tests {
     #[tokio::test]
     async fn a_provider_leaving_takes_its_batteries() {
         let (bus, bluez) = served().await;
-        let mut provider =
-            BatteryProvider::register(bus.connect().await.unwrap(), &adapter_path(ADAPTER))
-                .await
-                .unwrap();
+        let mut provider = BatteryProvider::register(
+            &bus.connect_for_providers().await.unwrap(),
+            &adapter_path(ADAPTER),
+        )
+        .await
+        .unwrap();
         let add = BatteryAction::Add {
             mac: PAIR,
             device_path: device_path(ADAPTER, PAIR).to_string(),
@@ -2411,8 +2474,8 @@ mod tests {
     #[tokio::test]
     async fn powering_off_stops_the_adapter() {
         let (bus, bluez) = served().await;
-        let conn = bus.connect().await.unwrap();
-        let devices = Devices::new(conn.clone());
+        let conn = bus.connect_for_providers().await.unwrap();
+        let devices = Devices::new(Connection::clone(&conn));
         let events = devices.watch_connections().await.unwrap();
         tokio::pin!(events);
         let path = adapter_path(ADAPTER);
@@ -2438,10 +2501,8 @@ mod tests {
                 bool::try_from(changed.get("Powered")?.clone()).ok()
             });
         tokio::pin!(powered);
-        let _provider = BatteryProvider::register(conn.clone(), &path)
-            .await
-            .unwrap();
-        Scanner::with_connection(conn.clone())
+        let _provider = BatteryProvider::register(&conn, &path).await.unwrap();
+        Scanner::with_connection(Connection::clone(&conn))
             .start_discovery()
             .await
             .unwrap();
@@ -2492,7 +2553,7 @@ mod tests {
     #[tokio::test]
     async fn adapters_are_plugged_in_and_out() {
         let (bus, bluez) = served().await;
-        let conn = bus.connect().await.unwrap();
+        let conn = bus.connect_for_providers().await.unwrap();
         let om = zbus::fdo::ObjectManagerProxy::builder(&conn)
             .destination(BLUEZ_SERVICE)
             .unwrap()
@@ -2529,10 +2590,8 @@ mod tests {
             .unwrap();
         bluez.add_device(SECOND, OTHER, ALIAS).await.unwrap();
         bluez.set_connected(OTHER, true).await.unwrap();
-        let mut provider = BatteryProvider::register(conn.clone(), &second)
-            .await
-            .unwrap();
-        let first = BatteryProvider::register(conn.clone(), &adapter_path(ADAPTER))
+        let mut provider = BatteryProvider::register(&conn, &second).await.unwrap();
+        let first = BatteryProvider::register(&conn, &adapter_path(ADAPTER))
             .await
             .unwrap();
         let add = |mac, adapter| BatteryAction::Add {
@@ -2557,7 +2616,7 @@ mod tests {
             HashMap::from([(PAIR, 40)]),
             "the other's stays"
         );
-        let devices = Devices::new(conn.clone());
+        let devices = Devices::new(Connection::clone(&conn));
         assert!(
             devices
                 .device_address_and_adapter(device_path(SECOND, OTHER).as_str())
@@ -2599,16 +2658,16 @@ mod tests {
     #[tokio::test]
     async fn a_restart_forgets_every_client() {
         let (bus, bluez) = served().await;
-        let conn = bus.connect().await.unwrap();
+        let conn = bus.connect_for_providers().await.unwrap();
         let dbus = zbus::fdo::DBusProxy::new(&conn).await.unwrap();
         let mut owners = dbus
             .receive_name_owner_changed_with_args(&[(0, BLUEZ_SERVICE)])
             .await
             .unwrap();
-        let mut provider = BatteryProvider::register(conn.clone(), &adapter_path(ADAPTER))
+        let mut provider = BatteryProvider::register(&conn, &adapter_path(ADAPTER))
             .await
             .unwrap();
-        Scanner::with_connection(conn.clone())
+        Scanner::with_connection(Connection::clone(&conn))
             .start_discovery()
             .await
             .unwrap();
@@ -2623,7 +2682,7 @@ mod tests {
         eventually(|| !bluez.batteries().is_empty()).await;
 
         let old = bluez.connection().unique_name().unwrap().to_string();
-        bluez.restart(bus.connect().await.unwrap()).await.unwrap();
+        bluez.restart(bus.address()).await.unwrap();
         let new = bluez.connection().unique_name().unwrap().to_string();
         assert_ne!(new, old, "the same bluetoothd");
         for (from, to) in [(Some(&old), None), (None, Some(&new))] {
@@ -2638,7 +2697,7 @@ mod tests {
         assert!(bluez.advertisers_on(ADAPTER).is_empty());
         assert_eq!(bluez.providers_on(ADAPTER), 0);
         assert!(bluez.batteries().is_empty());
-        let devices = Devices::new(conn.clone());
+        let devices = Devices::new(Connection::clone(&conn));
         assert!(
             devices
                 .device_connected(device_path(ADAPTER, PAIR).as_str())
@@ -2657,7 +2716,7 @@ mod tests {
         );
         // Back from `register` either way; only the new one holding it says
         // it registered anew.
-        BatteryProvider::register(conn, &adapter_path(ADAPTER))
+        BatteryProvider::register(&conn, &adapter_path(ADAPTER))
             .await
             .unwrap();
         assert_eq!(
@@ -2673,9 +2732,7 @@ mod tests {
     #[tokio::test]
     async fn a_call_while_away_waits_for_the_new_one_where_bluez_is_activated() {
         let bus = PrivateBus::activating(BLUEZ_SERVICE).unwrap();
-        let bluez = FakeBluez::serve(bus.connect().await.unwrap())
-            .await
-            .unwrap();
+        let bluez = FakeBluez::serve(bus.address()).await.unwrap();
         bluez.add_adapter(ADAPTER, true).await.unwrap();
         bluez.publish().await.unwrap();
         assert_eq!(bus.activations(), 0, "owned already");
@@ -2685,7 +2742,7 @@ mod tests {
         let asked = tokio::spawn(async move { bluez::adapters(&client).await });
         eventually(|| bus.activations() == 1).await;
         assert!(!asked.is_finished(), "answered while away");
-        bluez.start(bus.connect().await.unwrap()).await.unwrap();
+        bluez.start(bus.address()).await.unwrap();
         let adapters = timeout(TIMEOUT, asked).await.unwrap().unwrap().unwrap();
         assert_eq!(adapters.len(), 1);
     }
@@ -2696,8 +2753,8 @@ mod tests {
     async fn an_adapter_can_lack_the_battery_api() {
         let (bus, bluez) = served().await;
         bluez.drop_battery_api(ADAPTER).await.unwrap();
-        let conn = bus.connect().await.unwrap();
-        let refused = BatteryProvider::register(conn.clone(), &adapter_path(ADAPTER)).await;
+        let conn = bus.connect_for_providers().await.unwrap();
+        let refused = BatteryProvider::register(&conn, &adapter_path(ADAPTER)).await;
         assert!(refused.is_err());
         assert_eq!(bluez::adapters(&conn).await.unwrap().len(), 1);
         bluez.remove_adapter(ADAPTER).await.unwrap();
