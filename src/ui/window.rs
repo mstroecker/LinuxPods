@@ -47,7 +47,7 @@ pub fn activate(
     win.set_hide_on_close(true);
 
     let control = create_control_view();
-    let (prefs, devices) = create_preferences_dialog(coordinator.clone(), runtime.clone());
+    let (prefs, devices) = create_preferences_dialog();
     setup_ui(&win, &control);
 
     // The primary menu's entries. Preferences is built once and kept, since the

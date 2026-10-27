@@ -1197,21 +1197,6 @@ impl Coordinator {
         }
     }
 
-    /// Asks one pair of AirPods for their proximity keys. Requires its AAP link.
-    pub async fn request_encryption_keys(&self, mac_addr: Address) -> Result<()> {
-        let client = self
-            .client(mac_addr)
-            .await
-            .with_context(|| format!("no AAP connection to {mac_addr}"))?;
-        client.request_proximity_keys().await?;
-        tracing::info!("Encryption key request sent to {mac_addr}");
-        Ok(())
-    }
-
-    pub async fn has_encryption_keys(&self) -> bool {
-        !self.inner.read().await.encryption_keys.is_empty()
-    }
-
     /// Number of devices we hold a key for.
     pub async fn known_key_count(&self) -> usize {
         self.inner.read().await.encryption_keys.len()
