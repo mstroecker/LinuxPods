@@ -42,7 +42,7 @@
 //! | `SetLid(s mac, b open)` | Opens or closes the case |
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
-//! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, `echo_delay_ms` and `report_delay_ms` in milliseconds |
+//! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, `echo_delay_ms`, `report_delay_ms` and `stale_report_ms` in milliseconds, a `stale_report_ms` of 0 for none |
 //! | `Flood(u count)` | That many advertisers no key decrypts, each from an address of its own |
 //! | `Received(s mac) → aay` | Every AAP packet the app sent the pair, in order |
 //! | `Batteries() → a{sy}` | What GNOME Settings shows: the level a battery provider gave each device, by MAC |
@@ -628,9 +628,10 @@ fn parse_part(part: &str) -> Result<Part, String> {
     }
 }
 
-/// Sets the quirk named by its field in [`Quirks`]. `echo_delay` and
-/// `report_delay` go by `echo_delay_ms` and `report_delay_ms`, in
-/// milliseconds. A number may come as any integer type,
+/// Sets the quirk named by its field in [`Quirks`]. `echo_delay`,
+/// `report_delay` and `stale_report` go by `echo_delay_ms`, `report_delay_ms`
+/// and `stale_report_ms`, in milliseconds, a `stale_report_ms` of 0 turning
+/// the quirk off. A number may come as any integer type,
 /// as `gdbus` sends `<4>` as an `int32`.
 fn set_quirk(quirks: &mut Quirks, name: &str, value: &Value<'_>) -> Result<(), String> {
     let flag = || bool::try_from(value).map_err(|_| format!("{name} takes a boolean"));
@@ -656,6 +657,10 @@ fn set_quirk(quirks: &mut Quirks, name: &str, value: &Value<'_>) -> Result<(), S
         "silent_handshake" => quirks.silent_handshake = flag()?,
         "refuse_aap" => quirks.refuse_aap = count()?,
         "report_delay_ms" => quirks.report_delay = Duration::from_millis(count()?.into()),
+        "stale_report_ms" => {
+            quirks.stale_report =
+                Some(Duration::from_millis(count()?.into())).filter(|delay| !delay.is_zero());
+        }
         _ => return Err(format!("no quirk {name:?}")),
     }
     Ok(())
@@ -854,6 +859,10 @@ mod tests {
         assert_eq!(quirks.refuse_aap, 3);
         assert_eq!(quirks.echo_every, 1);
         assert_eq!(quirks.echo_delay, Duration::from_millis(20));
+        set_quirk(&mut quirks, "stale_report_ms", &Value::from(330u32)).unwrap();
+        assert_eq!(quirks.stale_report, Some(Duration::from_millis(330)));
+        set_quirk(&mut quirks, "stale_report_ms", &Value::from(0u32)).unwrap();
+        assert_eq!(quirks.stale_report, None);
 
         assert!(set_quirk(&mut quirks, "echo_every", &Value::from(-1i32)).is_err());
         assert!(set_quirk(&mut quirks, "echo_every", &Value::from(true)).is_err());

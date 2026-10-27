@@ -179,11 +179,21 @@ Off: it is a persistent device setting that syncs to the user's Apple devices, s
 not something to enable on every connection.
 
 **Noise control is fire-and-forget.** `04 00 04 00 09 00 0D [mode] 00 00 00` sets the
-mode; the only consistent answer is a `0x4B` settings-changed notification naming neither
-the sub-command nor the mode, and the `0x0D` echo arrives for perhaps one mode in four.
-Record the mode optimistically and let a later report confirm it. Validate reports on
-byte 4 **and** byte 6: the `0x09` family carries a dozen other sub-commands, all of them
-in the startup dump.
+mode, and nothing the device answers confirms it reliably: AirPods 4 sent a `0x4B`
+settings-changed notification naming neither sub-command nor mode, and a `0x0D` echo for
+perhaps one mode in four; a Pro 3 sent no `0x4B` and echoed every change about 1 s later
+(#71). Record the mode optimistically and let a later report confirm it. Validate reports
+on the `04 00 04 00` header, byte 4 **and** byte 6: the `0x09` family carries a dozen
+other sub-commands, all of them in the startup dump.
+
+A report of the mode a command replaced is held off until the mode set is reported, or
+`STALE_REPORT_WINDOW` (2 s) has passed since the command was recorded
+(`aap::noise::ModeState`, on the link). After Off a Pro 3 reported the old mode at
++0.33 s and Off at +1.4 s, and taken as it came, the old mode was back on show for a
+second (#113). A held report is dropped, not replayed: AirPods 4 also sent the old mode
+after a change that took effect, with no echo after it, and the next report - an ear
+event's, say - corrects a wrongly dropped one. Past the window any report wins: the mode
+may have been changed on another device.
 
 **Nothing goes out before the handshake is answered.** The AirPods drop what they are
 sent until they have answered it (`01 00 04 00 …`), and a pair that had only just
@@ -207,7 +217,8 @@ packet arrives; this deadlocked the Request Keys button.
 
 - Keep protocol parsing pure and tested. `aap::battery`, `aap::keys`, `aap::noise`,
   `aap::message`, `ble::parser`, `ble::decrypt` take bytes and return values, and carry
-  the bulk of the test suite. `aap::decode` routes every packet by its header and opcode;
+  the bulk of the test suite; `noise::ModeState` takes the time as an argument for the
+  same reason. `aap::decode` routes every packet by its header and opcode;
   each module's `is_*` and `parse_*` still check the header themselves, so they stay safe
   to call on their own.
 - Use synthetic test vectors - never commit a real device key. Encrypt in the test and

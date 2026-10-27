@@ -135,6 +135,14 @@ pub struct Quirks {
     /// comes, not when; the default puts it after the app has recorded the mode
     /// it asked for, so the echo confirms rather than sets it.
     pub echo_delay: Duration,
+    /// Report the mode an Off replaced, this long after the change - before
+    /// the echo, when one comes sooner than that. In the #71 capture, switched
+    /// from Noise Cancelling to Off, the pair reported `0D 02` 0.33 s later and
+    /// the Off itself, `0D 01`, at 1.4 s; the other three modes came with no
+    /// such report. Seen once, so `None` by default. It brings no echo of its
+    /// own: [`Quirks::echo_every`] and [`Quirks::echo_delay`] say when that
+    /// comes.
+    pub stale_report: Option<Duration>,
     /// Zero the MAC suffix in the encrypted payload while connected to a host,
     /// as Pro 3 does.
     pub zero_suffix_when_connected: bool,
@@ -169,6 +177,7 @@ impl Default for Quirks {
             settings_changed: true,
             echo_every: 4,
             echo_delay: Duration::from_millis(500),
+            stale_report: None,
             zero_suffix_when_connected: true,
             silent_handshake: false,
             refuse_aap: 0,
@@ -727,7 +736,7 @@ impl Pods {
             return;
         }
 
-        self.noise_mode = mode;
+        let previous = std::mem::replace(&mut self.noise_mode, mode);
         self.mode_changes += 1;
         let Some(session) = &mut self.session else {
             return;
@@ -739,6 +748,17 @@ impl Pods {
         }
         if self.quirks.settings_changed {
             session.schedule(now, Action::Send(noise::settings_changed_packet().to_vec()));
+        }
+        // Stale, so not what the app was told: `reported` keeps the mode set,
+        // and only the echo corrects the report.
+        if let Some(delay) = self.quirks.stale_report
+            && mode == NoiseMode::Off
+            && previous != NoiseMode::Off
+        {
+            session.schedule(
+                now + delay,
+                Action::Send(noise::set_packet(previous).to_vec()),
+            );
         }
         // Carries the mode this command set, even if another has replaced it
         // by the time it arrives: a stale report, like those in run 1 of
@@ -1088,6 +1108,43 @@ mod tests {
                     [noise::set_packet(mode).to_vec()]
                 );
             }
+        }
+    }
+
+    /// As the #71 capture has it: Off from Noise Cancelling, the 0x4B at
+    /// once, a report of Noise Cancelling at +0.33 s and the echo of Off at
+    /// +1.4 s. No other mode brings such a report, nor does Off from Off.
+    #[test]
+    fn off_can_bring_a_report_of_the_mode_it_replaced() {
+        let mut pods = subscribed();
+        pods.quirks.stale_report = Some(ms(330));
+        pods.quirks.echo_every = 1;
+        pods.quirks.echo_delay = ms(1400);
+        pods.receive(&noise::allow_off_packet(true), ms(1000));
+        pods.receive(&noise::set_packet(NoiseMode::Off), ms(1000));
+        assert_eq!(
+            sent(&pods.poll(ms(1000))),
+            [noise::settings_changed_packet().to_vec()]
+        );
+        assert_eq!(pods.next_due(), Some(ms(1330)));
+        assert_eq!(
+            sent(&pods.poll(ms(1330))),
+            [noise::set_packet(NoiseMode::NoiseCancelling).to_vec()]
+        );
+        assert_eq!(pods.noise_mode(), NoiseMode::Off, "the report is stale");
+        assert_eq!(
+            sent(&pods.poll(ms(2400))),
+            [noise::set_packet(NoiseMode::Off).to_vec()]
+        );
+
+        let modes = [NoiseMode::Off, NoiseMode::Transparency, NoiseMode::Adaptive];
+        for (i, mode) in modes.into_iter().enumerate() {
+            let now = ms(3000 * (i as u64 + 1));
+            pods.receive(&noise::set_packet(mode), now);
+            pods.poll(now);
+            let echo = now + ms(1400);
+            assert_eq!(pods.next_due(), Some(echo), "{mode}: the echo alone");
+            assert_eq!(sent(&pods.poll(echo)), [noise::set_packet(mode).to_vec()]);
         }
     }
 

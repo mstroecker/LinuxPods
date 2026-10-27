@@ -8,6 +8,8 @@
 //! permits it at all. See `docs/aap-noise-control.md` for the verified layout
 //! and why the response cannot be used as an acknowledgement.
 
+use std::time::{Duration, Instant};
+
 use crate::aap::message::{self, HEADER};
 
 /// Command byte position, shared by every AAP packet.
@@ -108,6 +110,93 @@ impl NoiseMode {
 impl std::fmt::Display for NoiseMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
+    }
+}
+
+/// How long after a mode is set a report of the mode it replaced is taken for
+/// a stale one, unless the mode set has been reported first - see
+/// [`ModeState`].
+pub const STALE_REPORT_WINDOW: Duration = Duration::from_secs(2);
+
+/// A device's noise control mode, as the commands sent to it set it and its
+/// reports tell it.
+///
+/// A command's mode is taken at once: the device's answer cannot confirm it -
+/// see the module docs. Its reports are taken as they come, the startup dump
+/// and a mode changed from a phone among them, with one exception. After Off
+/// was set from Noise Cancelling, a pair reported Noise Cancelling 0.33 s
+/// later and Off only at 1.4 s, and taken as it came, that report put the
+/// previous mode back on show for a second (#113). So a report of the mode a
+/// command replaced is held off until the mode set is reported, or
+/// [`STALE_REPORT_WINDOW`] has passed. After that any report wins again: the
+/// mode may since have been changed on another device.
+///
+/// A report held off is dropped, not kept to take once the window is over.
+/// Run 1 in `docs/aap-noise-control.md` has a pair report the old mode after
+/// changes that did take effect, with no echo of the new one after it: taken
+/// late, that report would put the wrong mode on show just the same. If one
+/// dropped was right after all, the next report the device sends corrects
+/// the mode.
+///
+/// Pure: the time comes in with each call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModeState {
+    /// `None` until a report or a command gives one.
+    mode: Option<NoiseMode>,
+    /// The mode the last command replaced, and when that command was
+    /// recorded, while a report of it may be stale.
+    replaced: Option<(NoiseMode, Instant)>,
+}
+
+/// What a report did to a [`ModeState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Report {
+    /// It changed the mode.
+    Changed,
+    /// It was the mode already held.
+    Unchanged,
+    /// It was the mode the last command replaced, too soon after the command
+    /// to be anything but stale, and was not taken.
+    Stale,
+}
+
+impl ModeState {
+    /// The mode on show, `None` until one is known.
+    pub fn mode(&self) -> Option<NoiseMode> {
+        self.mode
+    }
+
+    /// Takes the mode a command set at `now`, returning whether it changed
+    /// anything. From here a report of the mode it replaced is held off.
+    pub fn set(&mut self, mode: NoiseMode, now: Instant) -> bool {
+        match self.mode {
+            Some(previous) if previous != mode => self.replaced = Some((previous, now)),
+            // Set again, it keeps the hold the first command started.
+            Some(_) => {}
+            // Nothing known was replaced, so no report can be stale.
+            None => self.replaced = None,
+        }
+        let changed = self.mode != Some(mode);
+        self.mode = Some(mode);
+        changed
+    }
+
+    /// Takes a mode the device reported at `now`, unless it is a stale
+    /// report of the mode the last command replaced.
+    pub fn report(&mut self, mode: NoiseMode, now: Instant) -> Report {
+        if let Some((replaced, at)) = self.replaced {
+            if mode == replaced && now.saturating_duration_since(at) < STALE_REPORT_WINDOW {
+                return Report::Stale;
+            }
+            // The mode set, reported; another one, changed elsewhere; or the
+            // hold is over. Whichever it is, reports count from here.
+            self.replaced = None;
+        }
+        if self.mode == Some(mode) {
+            return Report::Unchanged;
+        }
+        self.mode = Some(mode);
+        Report::Changed
     }
 }
 
@@ -393,6 +482,122 @@ mod tests {
             parse_noise_mode_packet(&packet),
             Err(NoiseParseError::UnknownMode(0x05))
         );
+    }
+
+    /// A mode reported by the device, at `start`.
+    fn reported(mode: NoiseMode, start: Instant) -> ModeState {
+        let mut state = ModeState::default();
+        assert_eq!(state.report(mode, start), Report::Changed);
+        state
+    }
+
+    fn ms(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
+
+    /// The #71 capture: Off from Noise Cancelling, the old mode reported at
+    /// +0.33 s and Off at +1.4 s. Off stays on show throughout, and from the
+    /// report of Off on, any report counts.
+    #[test]
+    fn a_report_of_the_replaced_mode_is_held_until_the_mode_set_is_reported() {
+        let start = Instant::now();
+        let mut state = reported(NoiseMode::NoiseCancelling, start);
+        let sent = start + ms(1000);
+        assert!(state.set(NoiseMode::Off, sent));
+        assert_eq!(
+            state.report(NoiseMode::NoiseCancelling, sent + ms(330)),
+            Report::Stale
+        );
+        assert_eq!(state.mode(), Some(NoiseMode::Off));
+        assert_eq!(
+            state.report(NoiseMode::Off, sent + ms(1400)),
+            Report::Unchanged
+        );
+
+        // Changed from a phone, straight after.
+        assert_eq!(
+            state.report(NoiseMode::NoiseCancelling, sent + ms(1500)),
+            Report::Changed
+        );
+        assert_eq!(state.mode(), Some(NoiseMode::NoiseCancelling));
+    }
+
+    /// With no report of the mode set, the hold lasts the window and no
+    /// longer: the mode may have been changed back on another device.
+    #[test]
+    fn the_hold_ends_with_its_window() {
+        let start = Instant::now();
+        let mut state = reported(NoiseMode::Transparency, start);
+        assert!(state.set(NoiseMode::Adaptive, start));
+        let last = start + STALE_REPORT_WINDOW - ms(1);
+        assert_eq!(state.report(NoiseMode::Transparency, last), Report::Stale);
+        assert_eq!(
+            state.report(NoiseMode::Transparency, start + STALE_REPORT_WINDOW),
+            Report::Changed
+        );
+        assert_eq!(state.mode(), Some(NoiseMode::Transparency));
+    }
+
+    /// Only the mode the command replaced is held off. A third one is a
+    /// change made elsewhere, and ends the hold.
+    #[test]
+    fn another_mode_is_taken_at_once_and_ends_the_hold() {
+        let start = Instant::now();
+        let mut state = reported(NoiseMode::NoiseCancelling, start);
+        state.set(NoiseMode::Off, start);
+        assert_eq!(
+            state.report(NoiseMode::Transparency, start + ms(100)),
+            Report::Changed
+        );
+        assert_eq!(
+            state.report(NoiseMode::NoiseCancelling, start + ms(200)),
+            Report::Changed
+        );
+    }
+
+    /// The hold is the last command's: what it replaced, from when it was
+    /// set. The same mode set again keeps the hold the first one started.
+    #[test]
+    fn the_hold_follows_the_last_command() {
+        let start = Instant::now();
+        let mut state = reported(NoiseMode::NoiseCancelling, start);
+        state.set(NoiseMode::Off, start);
+        assert!(!state.set(NoiseMode::Off, start + ms(1500)));
+        assert_eq!(
+            state.report(NoiseMode::NoiseCancelling, start + STALE_REPORT_WINDOW),
+            Report::Changed,
+            "held from the first Off"
+        );
+
+        state.set(NoiseMode::Transparency, start + ms(3000));
+        assert_eq!(
+            state.report(NoiseMode::NoiseCancelling, start + ms(3100)),
+            Report::Stale
+        );
+        state.set(NoiseMode::Adaptive, start + ms(3200));
+        assert_eq!(
+            state.report(NoiseMode::Transparency, start + ms(3300)),
+            Report::Stale
+        );
+    }
+
+    /// Before any mode is known, a command replaces nothing a report could
+    /// repeat; and without a command, every report counts.
+    #[test]
+    fn without_a_command_every_report_counts() {
+        let start = Instant::now();
+        let mut state = ModeState::default();
+        assert_eq!(state.mode(), None);
+        assert!(state.set(NoiseMode::Off, start));
+        assert_eq!(
+            state.report(NoiseMode::Adaptive, start + ms(10)),
+            Report::Changed
+        );
+
+        let mut state = reported(NoiseMode::Adaptive, start);
+        assert_eq!(state.report(NoiseMode::Adaptive, start), Report::Unchanged);
+        assert_eq!(state.report(NoiseMode::Off, start), Report::Changed);
+        assert_eq!(state.report(NoiseMode::Adaptive, start), Report::Changed);
     }
 
     #[test]

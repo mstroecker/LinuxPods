@@ -80,7 +80,7 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 | `SetLid(s mac, b open)` | the case lid |
 | `Repair(s mac)` | new keys, sent at the next key request; the old key stops decrypting BLE |
 | `HangUp(s mac)` | closes AAP from the pods' end; the link stays, and the app links the pair again after a second, longer after repeated hang-ups (#49) |
-| `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `settings_changed`, `echo_every`, `echo_delay_ms`, `zero_suffix_when_connected`, `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `report_delay_ms` (hold back the battery and startup dump) |
+| `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `settings_changed`, `echo_every`, `echo_delay_ms`, `zero_suffix_when_connected`, `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `report_delay_ms` (hold back the battery and startup dump), `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none) |
 | `Flood(u count)` | that many advertisers no key decrypts |
 | `Received(s mac) → aay` | every AAP packet the app sent the pair: check `0x34 01` precedes Off |
 | `Batteries() → a{sy}` | what GNOME Settings shows, by MAC |
