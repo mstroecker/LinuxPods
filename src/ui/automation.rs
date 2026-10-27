@@ -69,7 +69,6 @@
 //! | `auto-connect`, `battery-notifications` | its switches, always insensitive |
 //! | `device-<MAC>` | a device's row in the Development group |
 //! | `device-status-<MAC>` | its status: Connected, Advertising, ... |
-//! | `request-keys-<MAC>` | its Request Keys button, sensitive while connected |
 //! | `about` | the About dialog, while open |
 //!
 //! ## The tree
@@ -1150,16 +1149,16 @@ mod tests {
     /// greyed out.
     #[test]
     fn presses_refuse_what_a_user_could_not_press() {
-        let shown = widget("GtkButton", Some("request-keys"), vec![]);
-        assert_eq!(pressable(&shown, "request-keys"), Ok(()));
+        let shown = widget("GtkCheckButton", Some("noise-off"), vec![]);
+        assert_eq!(pressable(&shown, "noise-off"), Ok(()));
 
         let insensitive = Node {
             sensitive: false,
             ..shown.clone()
         };
         assert_eq!(
-            pressable(&insensitive, "request-keys"),
-            Err(Error::Insensitive("request-keys".into()))
+            pressable(&insensitive, "noise-off"),
+            Err(Error::Insensitive("noise-off".into()))
         );
 
         let hidden = Node {
@@ -1167,8 +1166,8 @@ mod tests {
             ..insensitive
         };
         assert_eq!(
-            pressable(&hidden, "request-keys"),
-            Err(Error::Hidden("request-keys".into()))
+            pressable(&hidden, "noise-off"),
+            Err(Error::Hidden("noise-off".into()))
         );
     }
 
@@ -1230,8 +1229,8 @@ mod tests {
         assert_eq!(screenshot_name("/0/2/1", 42, 2), "_0_2_1-42-2.png");
         assert_eq!(screenshot_name("../../etc", 42, 3), "______etc-42-3.png");
         assert_eq!(
-            screenshot_name("request-keys-AA:BB:CC:DD:EE:FF", 42, 4),
-            "request-keys-AA_BB_CC_DD_EE_FF-42-4.png"
+            screenshot_name("device-status-AA:BB:CC:DD:EE:FF", 42, 4),
+            "device-status-AA_BB_CC_DD_EE_FF-42-4.png"
         );
         assert!(screenshot_name(&"x".repeat(1000), 42, 5).len() < 100);
     }

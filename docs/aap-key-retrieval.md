@@ -256,22 +256,29 @@ Common failure modes:
 
 ## Reference Implementation
 
-See the `key_request` example in this repository:
-```bash
-cargo run --example key_request <MAC_ADDRESS>
+The app itself asks for the keys on every AAP connection: `Coordinator::open_aap`
+sends the request once the session is up, and the link's read loop hands each key
+packet to `aap::find_encryption_key`, storing a 16-byte key that differs from the one
+held. A re-paired pair's new key therefore arrives with the next connection, and a
+request that went unanswered is sent again by reconnecting. Run the app with the
+AirPods connected; a key it had not saved yet is logged as it is written:
+```
+Stored encryption key for <MAC> (16 bytes)
 ```
 
-It connects through the coordinator, so the read loop stores the key as the app
-would. Example output, with the debug log left out:
+To debug a request that fails - on a new model, say - the `key_request` example
+opens the same session, sends the request, and lists every packet that arrives,
+laying a key packet out key by key:
+```bash
+cargo run --example key_request -- <MAC_ADDRESS> [SECONDS]
 ```
-connecting AAP to 90:62:3F:59:00:2F...
-connected
-requesting encryption keys (read loop is parked in recv)...
-  request returned OK
-waiting for key response...
-  keys present after 500ms
-device_count=1
-```
+
+It prints each packet's opcode, length and kind; for a key packet, its header, its
+total length and each key's type and length, and whether the app would take its
+ENC_KEY (the 16-byte rule of `find_encryption_key`). Key bytes are never printed,
+so the output can go into an issue, and nothing is stored: a debugging run must not
+replace a key that works. If no key packet arrives within the window, 5 s by
+default, it says so and lists what did arrive.
 
 ## Testing
 

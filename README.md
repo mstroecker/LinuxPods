@@ -188,7 +188,7 @@ Setup is connecting the AirPods to this machine once. On every connection LinuxP
 them for their encryption keys and writes them to `~/.local/share/linuxpods/keys.json`,
 which is what unlocks 1% accuracy over BLE. From then on the app reads exact levels even
 when the AirPods are connected elsewhere. Asking again on each connection picks up the new
-keys after a re-pair; **Preferences → Development → Request Keys** does the same by hand.
+keys after a re-pair: reconnecting the AirPods is all it takes.
 
 ## How it works
 
@@ -245,8 +245,9 @@ AAP connected to AA:BB:CC:DD:EE:FF (cid 2822, attempt 1)
 
 Add `linuxpods=trace` to also see Apple manufacturer data that is not proximity pairing.
 
-Examples exercise the protocol layers without the interface. `key_request <MAC>`
-connects over L2CAP and retrieves the proximity pairing keys; `noise_probe <MAC>` cycles
+Examples exercise the protocol layers without the interface. `key_request <MAC>` asks a
+pair for its proximity pairing keys and lays out what comes back, key bytes redacted and
+nothing stored, to debug a request that fails; `noise_probe <MAC>` cycles
 the noise control modes and classifies every packet that comes back; `apple_sniff` logs
 Apple manufacturer data as it arrives; `decrypt_probe` decrypts captured payloads
 offline, bypassing validation, which is how the payload layouts were worked out.

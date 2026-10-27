@@ -251,7 +251,7 @@ treat it as unknown.
 - **Key Source**: Retrieved via AAP connection (PSM 4097) (See [AAP Key Retrieval](aap-key-retrieval.md))
 - **Key Type**: ENC_KEY from proximity pairing keys
 - **Tools**:
-  - `cargo run --example key_request <MAC>` - retrieve the encryption key over AAP
+  - `cargo run --example key_request <MAC>` - request the keys over AAP and lay out the key packet, key bytes redacted, without storing anything; the app itself retrieves and stores the key on every connection
   - `cargo run --example decrypt_probe` - decrypt captured payloads offline
   - `RUST_LOG=linuxpods=debug cargo run` - live parse/decrypt logging
 

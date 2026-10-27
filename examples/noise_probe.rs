@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
-use linuxpods::aap::message::opcode;
 use linuxpods::aap::noise::{NoiseMode, set_packet};
 use linuxpods::aap::{Client, Message, decode, keys};
 
@@ -35,16 +34,11 @@ fn hex(packet: &[u8]) -> String {
 }
 
 /// A received packet as it is printed: whole, except a key packet, of which
-/// only the header, opcode and key count go out. Probe output gets pasted into
-/// issues, and the keys are the pair's IRK and ENC_KEY. The probe asks for no
-/// keys, but a key packet is held back whether asked for or not, parsable or
-/// not.
+/// only the header, opcode and key count go out - see [`keys::redacted_hex`].
+/// Probe output gets pasted into issues. The probe asks for no keys, but a key
+/// packet is held back whether asked for or not, parsable or not.
 fn shown(packet: &[u8]) -> String {
-    if opcode(packet) == Some(keys::OPCODE) {
-        format!("{} (keys redacted)", hex(&packet[..packet.len().min(7)]))
-    } else {
-        hex(packet)
-    }
+    keys::redacted_hex(packet)
 }
 
 /// Says what a packet is, as far as we can tell. Anything unrecognized is worth

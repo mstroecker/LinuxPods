@@ -2,21 +2,16 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use adw::prelude::*;
 use bluer::Address;
-use gtk::glib;
 
 use super::{RECENT, last_seen_text};
-use crate::podstate::{Coordinator, PodState, Snapshot};
+use crate::podstate::{PodState, Snapshot};
 
 /// The Preferences dialog, and its Development group for the update loop to
-/// fill. The group's Request Keys buttons send to `coordinator`, on `runtime`.
-pub(super) fn create_preferences_dialog(
-    coordinator: Arc<Coordinator>,
-    runtime: tokio::runtime::Handle,
-) -> (adw::PreferencesDialog, DeviceRows) {
+/// fill.
+pub(super) fn create_preferences_dialog() -> (adw::PreferencesDialog, DeviceRows) {
     let page = adw::PreferencesPage::new();
 
     // Neither setting exists yet: the app always connects, and nothing watches
@@ -45,8 +40,6 @@ pub(super) fn create_preferences_dialog(
         group: dev_group,
         rows: RefCell::default(),
         shown: RefCell::default(),
-        coordinator,
-        runtime,
     };
     (dialog, devices)
 }
@@ -80,8 +73,6 @@ pub(super) struct DeviceRows {
     rows: RefCell<HashMap<Address, DeviceRow>>,
     /// The devices whose rows the group holds, top to bottom.
     shown: RefCell<Vec<Address>>,
-    coordinator: Arc<Coordinator>,
-    runtime: tokio::runtime::Handle,
 }
 
 impl DeviceRows {
@@ -91,9 +82,7 @@ impl DeviceRows {
         let listed = row_order(snapshot);
         let mut rows = self.rows.borrow_mut();
         for &(mac, known) in &listed {
-            let row = rows
-                .entry(mac)
-                .or_insert_with(|| DeviceRow::new(mac, &self.coordinator, &self.runtime));
+            let row = rows.entry(mac).or_insert_with(|| DeviceRow::new(mac));
             row.show(
                 mac,
                 snapshot.states.get(&mac),
@@ -103,8 +92,7 @@ impl DeviceRows {
         }
 
         // The group can only append, so a device listed above others takes
-        // their rows off and puts them back after its own. They are the same
-        // widgets, so a Request Keys button keeps its state. Every device in
+        // their rows off and puts them back after its own. Every device in
         // either list has a row: the listed ones got theirs above, and a shown
         // one's is dropped only below.
         let wanted: Vec<Address> = listed.iter().map(|&(mac, _)| mac).collect();
@@ -165,12 +153,10 @@ struct DeviceRow {
     row: adw::ActionRow,
     /// Connection state for this device: Connected / Advertising / Idle.
     status_label: gtk::Label,
-    request_button: gtk::Button,
 }
 
 impl DeviceRow {
-    /// Builds the row, with its Request Keys button wired to the coordinator.
-    fn new(mac: Address, coordinator: &Arc<Coordinator>, runtime: &tokio::runtime::Handle) -> Self {
+    fn new(mac: Address) -> Self {
         // Title and subtitle carry device data, which must never be read as
         // Pango markup - libadwaita's default. The IDs end in the MAC: there is
         // a row per device.
@@ -189,63 +175,7 @@ impl DeviceRow {
         status_label.set_margin_end(8);
         row.add_suffix(&status_label);
 
-        let request_button = gtk::Button::builder()
-            .name(format!("request-keys-{mac}"))
-            .label("Request Keys")
-            .valign(gtk::Align::Center)
-            .sensitive(false)
-            .build();
-        request_button.add_css_class("flat");
-        row.add_suffix(&request_button);
-
-        // The request runs on the tokio runtime because it does L2CAP I/O; the
-        // result comes back over a channel and is applied with
-        // spawn_future_local, which never leaves the main context and so keeps
-        // the !Send widgets legal.
-        let coord = coordinator.clone();
-        let rt = runtime.clone();
-        request_button.connect_clicked(glib::clone!(
-            #[weak]
-            request_button,
-            move |_| {
-                request_button.set_sensitive(false);
-                request_button.set_label("Requesting…");
-
-                let (tx, rx) = async_channel::bounded(1);
-                let coord = coord.clone();
-                rt.spawn(async move {
-                    let _ = tx.send(coord.request_encryption_keys(mac).await).await;
-                });
-
-                glib::spawn_future_local(async move {
-                    let failure = match rx.recv().await {
-                        Ok(Ok(())) => None,
-                        Ok(Err(e)) => Some(format!("{e:#}")),
-                        Err(_) => Some("the request task ended without replying".into()),
-                    };
-                    // A failure is an event, not a state of the button: it goes
-                    // to a toast, and the button is ready to try again as is.
-                    // The dialog it sits in carries its own toast overlay.
-                    if let Some(reason) = failure {
-                        tracing::warn!("key request failed: {reason}");
-                        if let Some(dialog) = request_button
-                            .ancestor(adw::PreferencesDialog::static_type())
-                            .and_downcast::<adw::PreferencesDialog>()
-                        {
-                            dialog.add_toast(adw::Toast::new("Couldn’t request keys"));
-                        }
-                    }
-                    request_button.set_label("Request Keys");
-                    request_button.set_sensitive(true);
-                });
-            }
-        ));
-
-        DeviceRow {
-            row,
-            status_label,
-            request_button,
-        }
+        DeviceRow { row, status_label }
     }
 
     /// Draws the device's address, model and connection state. `known` is
@@ -260,9 +190,6 @@ impl DeviceRow {
             self.status_label.remove_css_class(class);
         }
         self.status_label.add_css_class(css);
-
-        // Keys can only be requested over an active AAP connection.
-        self.request_button.set_sensitive(connected);
     }
 }
 
