@@ -1,8 +1,10 @@
 //! LinuxPods - AirPods management for GNOME.
 //!
 //! GTK owns the main thread; a multi-threaded tokio runtime carries the BLE, AAP
-//! and D-Bus work, and the two meet over async channels consumed on the GTK main
-//! context.
+//! and D-Bus work, and the two meet over channels: snapshots come to the UI on a
+//! watch channel, commands go to the AirPods on their link's queue - see
+//! `Coordinator::command` - and the tray's window commands to the GTK main
+//! context on an async channel.
 
 use linuxpods::{attachment, ble, indicator, podstate, ui};
 
@@ -17,16 +19,17 @@ use gtk::{gio, glib};
 use indicator::{Indicator, TrayActions};
 use linuxpods::aap::NoiseMode;
 use linuxpods::bluez::Backoff;
-use podstate::Coordinator;
+use podstate::{Command, Coordinator};
 
 const APP_ID: &str = "io.github.mstroecker.LinuxPods";
 
-/// Bridges tray clicks onto the GTK main context, and noise control onto tokio.
+/// Bridges tray clicks onto the GTK main context, and noise control to the
+/// AirPods.
 struct AppActions {
     window: async_channel::Sender<WindowCommand>,
     coordinator: Arc<Coordinator>,
-    /// Needed because ksni calls back from its own thread, which is not
-    /// necessarily inside the runtime.
+    /// Where a command's result is waited for. Needed because ksni calls back
+    /// from its own thread, which is not necessarily inside the runtime.
     runtime: tokio::runtime::Handle,
 }
 
@@ -45,10 +48,12 @@ impl TrayActions for AppActions {
     }
 
     fn set_noise_mode(&self, mac: Address, mode: NoiseMode) {
-        let coordinator = self.coordinator.clone();
+        // Queued here, in the order of the clicks; only the result is waited
+        // for on the runtime. The tray has nowhere to show a failure.
+        let done = self.coordinator.command(mac, Command::NoiseControl(mode));
         self.runtime.spawn(async move {
-            if let Err(e) = coordinator.set_noise_control(mac, mode).await {
-                tracing::warn!("failed to set noise control from tray: {e:#}");
+            if let Err(e) = done.await {
+                tracing::warn!("failed to switch {mac} to {mode} from the tray: {e:#}");
             }
         });
     }
@@ -83,7 +88,6 @@ fn shows_window(options: &glib::VariantDict) -> bool {
 /// the primary, hands it its command line and exits.
 struct Primary {
     coordinator: Arc<Coordinator>,
-    runtime: tokio::runtime::Handle,
     /// Tray commands, for the window once it is built.
     window_rx: async_channel::Receiver<WindowCommand>,
     /// Built by the first launch and kept: every later one lands in this
@@ -113,7 +117,6 @@ impl Primary {
 
         Self {
             coordinator,
-            runtime,
             window_rx,
             window: RefCell::default(),
         }
@@ -126,7 +129,7 @@ impl Primary {
             return win.clone();
         }
 
-        let win = ui::activate(app, self.coordinator.clone(), self.runtime.clone());
+        let win = ui::activate(app, self.coordinator.clone());
         *self.window.borrow_mut() = Some(win.clone());
 
         // Tray commands arrive here, on the main context, where touching the

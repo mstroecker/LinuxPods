@@ -15,7 +15,8 @@ use super::control::{
     sync_device_list,
 };
 use super::preferences::{DeviceRows, create_preferences_dialog};
-use crate::podstate::{Coordinator, Snapshot};
+use crate::aap::NoiseMode;
+use crate::podstate::{Command, ConnectionLost, Coordinator, Snapshot};
 
 /// Shortest gap between two renders. Readings change over minutes, while a
 /// replayed advertisement can arrive every few milliseconds.
@@ -28,11 +29,7 @@ const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
 
 /// Builds the window and wires it to the coordinator. The caller presents it,
 /// so that `--minimized` can leave it built but hidden.
-pub fn activate(
-    app: &adw::Application,
-    coordinator: Arc<Coordinator>,
-    runtime: tokio::runtime::Handle,
-) -> adw::ApplicationWindow {
+pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::ApplicationWindow {
     let updates = Rc::new(RefCell::new(coordinator.subscribe()));
     let win = adw::ApplicationWindow::new(app);
     win.set_widget_name("main-window");
@@ -48,7 +45,7 @@ pub fn activate(
 
     let control = create_control_view();
     let (prefs, devices) = create_preferences_dialog();
-    setup_ui(&win, &control);
+    let toasts = setup_ui(&win, &control);
 
     // The primary menu's entries. Preferences is built once and kept, since the
     // update loop fills its Development group whether it is open or not.
@@ -70,19 +67,20 @@ pub fn activate(
         syncing: Cell::default(),
     });
 
-    // Switching mode is a command: it goes out over the tokio runtime, and the
+    // Switching mode is a command: it goes to the device's link, and the
     // action's state follows the coordinator's snapshot rather than the click. A
     // failed command therefore leaves the previous mode selected instead of
-    // claiming one the AirPods never switched to.
+    // claiming one the AirPods never switched to, and a toast says so.
     //
     // Handling `activate` keeps GIO from changing the state on its own, and a
     // state set from a snapshot is never an activation, so nothing needs guarding
     // against a snapshot echoing back out as a command.
     let coord = coordinator.clone();
-    let rt = runtime.clone();
     ui.control.noise_action.connect_activate(glib::clone!(
         #[strong]
         ui,
+        #[weak]
+        toasts,
         move |_, target| {
             let Some(mode) = target
                 .and_then(|t| t.str())
@@ -94,10 +92,13 @@ pub fn activate(
             let Some(mac) = *ui.selected.borrow() else {
                 return;
             };
-            let coord = coord.clone();
-            rt.spawn(async move {
-                if let Err(e) = coord.set_noise_control(mac, mode).await {
-                    tracing::warn!("failed to set noise control: {e:#}");
+            // Queued here, in the order of the clicks; the result comes back
+            // to the main context, where the toast can go up.
+            let done = coord.command(mac, Command::NoiseControl(mode));
+            glib::spawn_future_local(async move {
+                if let Err(e) = done.await {
+                    tracing::warn!("failed to switch {mac} to {mode}: {e:#}");
+                    toasts.add_toast(adw::Toast::new(&switch_failed(mode, &e)));
                 }
             });
         }
@@ -252,8 +253,9 @@ impl Ui {
 }
 
 /// The window holds the Control page alone. Preferences and About open from the
-/// primary menu, as dialogs, rather than sitting beside it as tabs.
-fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) {
+/// primary menu, as dialogs, rather than sitting beside it as tabs. Returns
+/// the overlay that shows the window's toasts.
+fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) -> adw::ToastOverlay {
     let menu = gio::Menu::new();
     menu.append(Some("_Preferences"), Some("win.preferences"));
     menu.append(Some("_About LinuxPods"), Some("win.about"));
@@ -293,7 +295,14 @@ fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) {
     toolbar_view.add_top_bar(&header_bar);
     toolbar_view.set_content(Some(&control.content));
 
-    win.set_content(Some(&toolbar_view));
+    // A command that fails is an event, not a state of any control: it is
+    // told in a toast.
+    let toasts = adw::ToastOverlay::new();
+    toasts.set_widget_name("toasts");
+    toasts.set_child(Some(&toolbar_view));
+
+    win.set_content(Some(&toasts));
+    toasts
 }
 
 /// Built on demand: nothing in it changes while it is open.
@@ -310,4 +319,38 @@ fn show_about(win: &adw::ApplicationWindow) {
         .license_type(gtk::License::Gpl30)
         .build()
         .present(Some(win));
+}
+
+/// The toast for a switch to `mode` that failed with `error`. A switch the
+/// connection was lost in the middle of may have reached the AirPods, so it
+/// is not said to have failed; one that was never sent, or whose send failed,
+/// is.
+fn switch_failed(mode: NoiseMode, error: &anyhow::Error) -> String {
+    if error.downcast_ref::<ConnectionLost>().is_some() {
+        format!("Lost the connection while switching to {mode}")
+    } else {
+        format!("Couldn’t switch to {mode}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lost_connection_is_not_a_failed_switch() {
+        let lost = anyhow::Error::new(ConnectionLost {
+            mac: Address::any(),
+            command: Command::NoiseControl(NoiseMode::Off),
+        });
+        assert_eq!(
+            switch_failed(NoiseMode::Off, &lost),
+            "Lost the connection while switching to Off"
+        );
+        let unsent = anyhow::anyhow!("no AAP connection").context("switch to Off not sent");
+        assert_eq!(
+            switch_failed(NoiseMode::Off, &unsent),
+            "Couldn’t switch to Off"
+        );
+    }
 }

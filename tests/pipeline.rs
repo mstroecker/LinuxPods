@@ -52,7 +52,7 @@ use linuxpods::harness::bluez::device_path;
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3, Part};
 use linuxpods::harness::{PrivateBus, World};
 use linuxpods::keystore::Keystore;
-use linuxpods::podstate::{Coordinator, DataSource, Snapshot};
+use linuxpods::podstate::{Command, Coordinator, DataSource, Snapshot};
 
 /// The longest any one wait may take, so that a regression fails the test
 /// instead of hanging CI. The slowest wait is for a pair's first BLE reading:
@@ -768,7 +768,7 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
     ];
     for mode in modes {
         app.coordinator
-            .set_noise_control(PAIR, mode)
+            .command(PAIR, Command::NoiseControl(mode))
             .await
             .unwrap_or_else(|e| panic!("setting {mode} failed: {e:#}"));
         fixture.until_mode(PAIR, mode).await;
@@ -862,7 +862,7 @@ async fn a_stale_report_after_off_does_not_bring_the_old_mode_back() {
     });
 
     app.coordinator
-        .set_noise_control(PAIR, NoiseMode::Off)
+        .command(PAIR, Command::NoiseControl(NoiseMode::Off))
         .await
         .unwrap();
     // The pair has the command, and with it the stale report and the echo
@@ -890,6 +890,126 @@ async fn a_stale_report_after_off_does_not_bring_the_old_mode_back() {
         shown,
         [Some(NoiseMode::NoiseCancelling), Some(NoiseMode::Off)],
         "Off, and nothing after it"
+    );
+}
+
+/// Two quick commands to a pair go out in the order they were issued, however
+/// their results are waited for, and the mode on show is the one sent last
+/// (#54). Here each is spawned apart, as two clicks were, and the second's
+/// result waited for first. Each used to send, then record its mode, in a task
+/// of its own: the two went out in either order, and the mode recorded last
+/// could be the one sent first, while the pair was in the other. Off goes
+/// first, two packets to the other's one, so that it would be the one
+/// overtaken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quick_commands_go_out_in_the_order_issued_and_the_last_stays_on_show() {
+    two_quick_switches(true).await;
+}
+
+/// [`quick_commands_go_out_in_the_order_issued_and_the_last_stays_on_show`],
+/// with neither spawned: both issued, then the second's result awaited
+/// before the first's. Issued when first polled, as the commands were, the
+/// second went out whole before the first had started, every time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_goes_out_in_its_place_though_awaited_later() {
+    two_quick_switches(false).await;
+}
+
+/// Issues Off then Transparency to a fresh pair, spawned apart or not, waits
+/// for Transparency's result first, and checks the pair got allow-Off, Off
+/// and Transparency in that order, and the snapshot shows Transparency.
+///
+/// The pair echoes no mode here, so that nothing but the commands sets it.
+async fn two_quick_switches(spawned: bool) {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.quirks.echo_every = 0)
+        .await
+        .unwrap();
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    app.until("the mode from the startup dump", |s| {
+        s.states
+            .get(&PAIR)
+            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancelling))
+    })
+    .await;
+
+    let first = app
+        .coordinator
+        .command(PAIR, Command::NoiseControl(NoiseMode::Off));
+    let second = app
+        .coordinator
+        .command(PAIR, Command::NoiseControl(NoiseMode::Transparency));
+    type Done = std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+    let (first, second): (Done, Done) = if spawned {
+        let (first, second) = (tokio::spawn(first), tokio::spawn(second));
+        (
+            Box::pin(async { first.await.unwrap() }),
+            Box::pin(async { second.await.unwrap() }),
+        )
+    } else {
+        (Box::pin(first), Box::pin(second))
+    };
+    for (mode, done) in [(NoiseMode::Transparency, second), (NoiseMode::Off, first)] {
+        timeout(TIMEOUT, done)
+            .await
+            .expect("timed out waiting for a command")
+            .unwrap_or_else(|e| panic!("switching to {mode} failed: {e:#}"));
+    }
+
+    // Each recorded its mode before it was done, so the snapshot has the
+    // last one already.
+    let shown = app.updates.borrow().states[&PAIR].noise_mode;
+    assert_eq!(shown, Some(NoiseMode::Transparency));
+    fixture.until_mode(PAIR, NoiseMode::Transparency).await;
+    let settings: Vec<Vec<u8>> = fixture
+        .world
+        .received(PAIR)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|packet| packet.get(4) == Some(&0x09))
+        .collect();
+    let expected = [
+        allow_off_packet(true).to_vec(),
+        set_packet(NoiseMode::Off).to_vec(),
+        set_packet(NoiseMode::Transparency).to_vec(),
+    ];
+    assert_eq!(settings, expected);
+}
+
+/// A command's caller hears how it went: a switch for a pair on AAP goes
+/// out, and one for a pair gone off AAP fails, rather than being dropped
+/// without a word (#54).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_to_a_pair_off_aap_fails_to_its_caller() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+
+    let transparency = Command::NoiseControl(NoiseMode::Transparency);
+    timeout(TIMEOUT, app.coordinator.command(PAIR, transparency))
+        .await
+        .expect("timed out waiting for the switch")
+        .unwrap();
+    fixture.until_mode(PAIR, NoiseMode::Transparency).await;
+
+    app.detach(PAIR).await;
+    let adaptive = Command::NoiseControl(NoiseMode::Adaptive);
+    let failed = timeout(TIMEOUT, app.coordinator.command(PAIR, adaptive))
+        .await
+        .expect("timed out waiting for the switch")
+        .unwrap_err();
+    assert_eq!(
+        format!("{failed:#}"),
+        format!("switch to Adaptive not sent: no AAP connection to {PAIR}")
+    );
+    let sent = fixture.world.received(PAIR).await.unwrap();
+    assert!(
+        !sent.contains(&set_packet(NoiseMode::Adaptive).to_vec()),
+        "sent after all"
     );
 }
 

@@ -122,7 +122,8 @@ pub fn unix_socket_path(dir: &Path, addr: Address) -> PathBuf {
 }
 
 /// The socket a connected client talks over. Both kinds take `&self` for send
-/// and recv, so a read parked in one task never blocks a send from another.
+/// and recv, so a read parked in recv never blocks a send - `AapLink::run`
+/// polls the read loop and the link's commands side by side in one task.
 enum Transport {
     L2cap(SeqPacket),
     #[cfg(feature = "harness")]

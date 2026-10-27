@@ -42,8 +42,8 @@ reviewed revision, and the callers of anything whose behaviour changed.
 dies: a temporary in a `let` statement dies at the semicolon, one in a `match` scrutinee
 lives through every arm, a `let`-bound guard lives to the end of its block. Flag any
 `.await` while an `inner` guard is live - `read_packet` above all, but also sends, sleeps
-and the keystore. The accepted shapes are cloning the client out (`Coordinator::client`)
-and `broadcast(&inner)` while the write guard is live - `send_replace` never awaits, and
+and the keystore. The accepted shapes are a client handed in by `AapLink::run`, never
+looked up under the guard, and `broadcast(&inner)` while the write guard is live - `send_replace` never awaits, and
 sending under the guard keeps snapshots in order (#88). Flag a snapshot built under the
 guard and sent after it is dropped. The `keystore` mutex is the one exception: it is held
 across its save on purpose, to serialise writers, and taken *before* `inner`. Taking
@@ -63,10 +63,13 @@ carries a GTK object toward tokio.
 - any global flag or pause where one device's state should be - the `supersedes_ble` bug;
 - new per-device state on the coordinator outside `Link` (goes with the link) or
   `Inner::ble` (cached). A separate map outlives the link: that is how a reconnect once
-  showed the previous session's noise mode (1fa1632);
+  showed the previous session's noise mode (1fa1632). The exception is
+  `Coordinator::queues`, changed only together with `Inner::links` under its write lock
+  and removed only past the client check in `drop_link`;
 - a read loop or command that finds its link by MAC alone. Writes from a loop or a
   command go through `live_link` or an `Arc::ptr_eq` check on the client, or a stale
-  session writes into its replacement;
+  session writes into its replacement. `Coordinator::command` routes by MAC on purpose;
+  what a command writes still goes through `live_link`;
 - an `Inner` change that alters what `snapshot()` shows but returns without broadcasting;
 - BLE data stored or broadcast before a key has identified it.
 

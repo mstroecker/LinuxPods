@@ -266,7 +266,10 @@ src/
 ```
 
 GTK owns the main thread; tokio carries BLE, AAP and D-Bus work. The two meet over
-`async-channel`, since GTK types are `!Send`.
+channels, since GTK types are `!Send`: snapshots reach the window and tray on a `watch`
+channel, and a command to the AirPods - a noise control mode - goes on the queue of that
+pair's AAP link, which carries its commands out in the order they were sent and hands
+each result back to its caller.
 
 ## Contributing
 

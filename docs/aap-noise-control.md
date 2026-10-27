@@ -76,9 +76,11 @@ settings in this family.
 Apple gates Off because loud sound reduction does not apply while noise control
 is off, and the setting is the same switch the user sees on an iPhone: it
 persists on the device and syncs back to their other Apple devices. So
-`Coordinator::set_noise_control` sends it only when Off is the mode being asked
-for, immediately before the mode command, rather than enabling it on every
-connection. The two go out back to back with no delay, which is enough.
+`Coordinator::set_noise_control`, which carries out a `Command::NoiseControl`,
+sends it only when Off is the mode being asked for, immediately before the mode
+command, rather than enabling it on every connection. The two go out back to
+back with no delay, which is enough; and as a link carries out its commands one
+at a time, no other command goes out between them.
 
 Identifier and values from [LibrePods' control command
 table](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.md).
@@ -89,7 +91,7 @@ table](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.
 
 The AirPods do **not** reliably echo a noise control confirmation packet (`0x0D`) after a mode change. Instead, every mode change consistently produces a `0x4B` settings-changed notification. Occasionally a `0x0D` echo also arrives, but it cannot be relied upon.
 
-**Integration note:** Treat noise control commands as fire-and-forget. Update local state optimistically after sending — do not wait for a `0x0D` confirmation packet. `Coordinator::set_noise_control` does exactly that: it records the mode as soon as the packet is away and broadcasts, and a later `0x0D` report merely confirms it - unless it is a stale one, below.
+**Integration note:** Treat noise control commands as fire-and-forget. Update local state optimistically after sending — do not wait for a `0x0D` confirmation packet. `Coordinator::set_noise_control` does exactly that: it records the mode as soon as the packet is away and broadcasts, and the command is done - its caller, waiting on `Coordinator::command`, hears so then. A later `0x0D` report merely confirms the mode - unless it is a stale one, below.
 
 **Stale reports.** A `0x0D` report can carry the mode a change replaced. Switched from Noise Cancelling to Off, a pair reported `0D 02` 0.33 s later and `0D 01` only at 1.4 s (#71); taken as it came, the first put Noise Cancelling back on show for a second (#113). So a report of the replaced mode is held off until the mode set is reported, or 2 s pass - `aap::noise::ModeState`. After that any report wins again, since the mode may have been changed on another device.
 
