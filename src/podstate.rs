@@ -40,8 +40,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use bluer::Address;
 use tokio::sync::{Mutex, RwLock, watch};
+use tracing::Instrument;
 
-use crate::aap;
+use crate::aap::{self, Message};
 use crate::ble::decode_model_name;
 use crate::ble::decrypt::decrypt_for_device;
 use crate::ble::parser::{PodSide, ProximityData};
@@ -472,7 +473,12 @@ impl AapLink {
     /// how it ended. Logs nothing of it: what is worth saying is the caller's
     /// to judge.
     pub async fn run(mut self) -> LinkEnd {
-        let error = self.coordinator.aap_read_loop(self.mac, &self.client).await;
+        // Under the device's MAC, as every line the session's setup logged.
+        let error = self
+            .coordinator
+            .aap_read_loop(self.mac, &self.client)
+            .instrument(aap::client::link_span(self.mac))
+            .await;
         // Gone already when it was closed on purpose.
         let lost = self
             .coordinator
@@ -853,10 +859,10 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Opens an AAP connection to one device and performs the handshake
-    /// sequence, which makes it the device's link, for [`AapLink::run`] to
-    /// read. Other devices' links are untouched. Fails when the device has a
-    /// link already, or gets one meanwhile: that one stands.
+    /// Opens an AAP session to one device - see [`aap::Client::open`] - which
+    /// makes it the device's link, for [`AapLink::run`] to read. Other
+    /// devices' links are untouched. Fails when the device has a link already,
+    /// or gets one meanwhile: that one stands.
     ///
     /// Dropped before it is done - timed out, or the pair detached - it leaves
     /// nothing behind: the connection closes with it, and the link is recorded
@@ -867,20 +873,7 @@ impl Coordinator {
             "AAP to {mac_addr} is up already"
         );
 
-        let mut client = self.aap_client(mac_addr);
-        client.connect().await?;
-        // Back once the device has answered: anything sent sooner is dropped.
-        client.handshake().await?;
-
-        client
-            .request_battery_status()
-            .await
-            .context("failed to request battery")?;
-        client
-            .enable_special_features()
-            .await
-            .context("failed to enable features")?;
-
+        let client = Arc::new(self.aap_client(mac_addr).open().await?);
         // Ask for the proximity keys on every connection, not only when none is
         // stored: re-pairing regenerates them, and a stale key would silently drop
         // BLE to 10% steps. The reply is stored by `aap_read_loop` like any key
@@ -889,8 +882,6 @@ impl Coordinator {
         if let Err(e) = client.request_proximity_keys().await {
             tracing::warn!("failed to request encryption keys: {e:#}");
         }
-
-        let client = Arc::new(client);
         let link = {
             let mut inner = self.inner.write().await;
             // Connecting takes a while, and another attempt may have got there
@@ -1003,29 +994,21 @@ impl Coordinator {
                     .join(" ")
             );
 
-            if aap::is_battery_packet(&packet) {
-                match aap::parse_battery_packet(&packet) {
-                    Ok(info) => self.handle_battery_info(info, mac_addr, client).await,
-                    Err(e) => tracing::warn!("AAP battery parse error: {e}"),
+            match aap::decode(&packet) {
+                Ok(Message::Battery(info)) => {
+                    self.handle_battery_info(info, mac_addr, client).await;
                 }
-            }
-
-            // The device's own report: its startup dump, or a mode changed from
-            // another device such as an iPhone.
-            if aap::is_noise_mode_packet(&packet) {
-                match aap::parse_noise_mode_packet(&packet) {
-                    Ok(mode) => self.handle_noise_mode(mode, mac_addr, client).await,
-                    Err(e) => tracing::warn!("AAP noise control parse error: {e}"),
+                // The device's own report: its startup dump, or a mode changed
+                // from another device such as an iPhone.
+                Ok(Message::NoiseMode(mode)) => {
+                    self.handle_noise_mode(mode, mac_addr, client).await;
                 }
-            }
-
-            if aap::is_key_packet(&packet) {
-                match aap::parse_proximity_keys(&packet)
-                    .and_then(|keys| aap::find_encryption_key(&keys))
-                {
+                Ok(Message::Keys(keys)) => match aap::find_encryption_key(&keys) {
                     Ok(key) => self.store_encryption_key(mac_addr, &key).await,
                     Err(e) => tracing::warn!("AAP key packet rejected: {e}"),
-                }
+                },
+                Ok(Message::Unknown { .. }) => {}
+                Err(e) => tracing::warn!("AAP {e}"),
             }
         }
     }

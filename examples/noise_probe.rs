@@ -14,8 +14,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
-use linuxpods::aap::noise::{NoiseMode, is_noise_mode_packet, parse_noise_mode_packet, set_packet};
-use linuxpods::aap::{Client, is_battery_packet, parse_battery_packet};
+use linuxpods::aap::message::opcode;
+use linuxpods::aap::noise::{NoiseMode, set_packet};
+use linuxpods::aap::{Client, Message, decode, keys};
 
 /// How long to listen after each command. The 0x0D echo, when it comes at all,
 /// took seconds to arrive on the hardware this was verified against.
@@ -33,29 +34,40 @@ fn hex(packet: &[u8]) -> String {
         .join("")
 }
 
+/// A received packet as it is printed: whole, except a key packet, of which
+/// only the header, opcode and key count go out. Probe output gets pasted into
+/// issues, and the keys are the pair's IRK and ENC_KEY. The probe asks for no
+/// keys, but a key packet is held back whether asked for or not, parsable or
+/// not.
+fn shown(packet: &[u8]) -> String {
+    if opcode(packet) == Some(keys::OPCODE) {
+        format!("{} (keys redacted)", hex(&packet[..packet.len().min(7)]))
+    } else {
+        hex(packet)
+    }
+}
+
 /// Says what a packet is, as far as we can tell. Anything unrecognized is worth
 /// seeing in full - that is how the 0x4B notification was found.
 fn describe(packet: &[u8]) -> String {
-    let cmd = packet.get(4).copied().unwrap_or(0);
-    match packet {
-        p if is_noise_mode_packet(p) => match parse_noise_mode_packet(p) {
-            Ok(mode) => format!("noise control mode report: {mode}"),
-            Err(e) => format!("noise control mode report: {e}"),
-        },
-        p if is_battery_packet(p) => match parse_battery_packet(p) {
-            Ok(info) => format!("battery: {info:?}"),
-            Err(e) => format!("battery, unparsable: {e}"),
-        },
+    match decode(packet) {
+        Ok(Message::NoiseMode(mode)) => format!("noise control mode report: {mode}"),
+        Ok(Message::Battery(info)) => format!("battery: {info:?}"),
+        Ok(Message::Keys(keys)) => format!("proximity keys: {} of them", keys.len()),
         // The only consistent answer to a mode change, and no use as one: it is
         // byte-identical whichever mode was set.
-        _ if cmd == 0x4B => "settings-changed notification (names no mode)".to_string(),
+        Ok(Message::Unknown { opcode: Some(0x4B) }) => {
+            "settings-changed notification (names no mode)".to_string()
+        }
         // Same family as noise control, different sub-command. The startup dump is
         // full of these.
-        _ if cmd == 0x09 => format!(
+        Ok(Message::Unknown { opcode: Some(0x09) }) => format!(
             "settings packet, sub-command 0x{:02X}",
             packet.get(6).copied().unwrap_or(0)
         ),
-        _ => format!("unknown, command byte 0x{cmd:02X}"),
+        Ok(Message::Unknown { opcode: Some(cmd) }) => format!("unknown, command byte 0x{cmd:02X}"),
+        Ok(Message::Unknown { opcode: None }) => "unknown, no AAP header".to_string(),
+        Err(e) => format!("unparsable: {e}"),
     }
 }
 
@@ -70,7 +82,7 @@ async fn listen(client: &Client, window: Duration, prefix: &str) -> usize {
                 count += 1;
                 println!(
                     "  {prefix} {} ({} bytes) - {}",
-                    hex(&packet),
+                    shown(&packet),
                     packet.len(),
                     describe(&packet)
                 );
@@ -98,13 +110,10 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .with_context(|| format!("not a MAC address: {arg}"))?;
 
-    let mut client = Client::new(mac);
     println!("connecting AAP to {mac}...");
-    client.connect().await?;
-    client.handshake().await?;
-    client.request_battery_status().await?;
-    // Without this, Adaptive is unavailable.
-    client.enable_special_features().await?;
+    // The session the app opens, the features included - without them,
+    // Adaptive is unavailable - but not the key request the app makes after.
+    let client = Client::new(mac).open().await?;
     println!("connected");
 
     // The startup dump reports the mode the device is actually in - the one

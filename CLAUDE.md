@@ -18,7 +18,7 @@ src/
 ├── main.rs        # GTK main loop on the main thread; tokio runtime alongside it
 ├── lib.rs         # Library target so layers can be driven from tests and examples
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
-├── aap/           # Apple Accessory Protocol over L2CAP (PSM 4097)
+├── aap/           # Apple Accessory Protocol over L2CAP (PSM 4097): session, decode
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
 ├── bluez.rs       # Adapters, devices, connection watch; a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
@@ -63,7 +63,9 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   so nothing it awaits may leave work half-done: the keystore save moves its owned lock
   into `spawn_blocking`, where no abort reaches it - aborted mid-save, the lock went
   while the write ran on, and a second save raced it on the same temp file.
-- `open_aap` records the link (`Inner::links`: client, reading, mode) as its last step,
+- The session itself - connect, handshake, battery and feature requests - is
+  `aap::Client::open`. `open_aap` refuses a device that has a link, before and after it,
+  requests the keys, and records the link (`Inner::links`: client, reading, mode) as its last step,
   with nothing awaited after, and returns the `AapLink` that owns it. Dropped anywhere -
   timed out, aborted, run to its end - it shuts the socket and removes its own record,
   matched by client, so a newer link stands. Its read loop reads that client only, never
@@ -149,7 +151,9 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
 
 **Keys are requested on every AAP connection**, not only when none is stored. Re-pairing
 regenerates them, and a stale key fails suffix validation without a word, dropping BLE
-to 10% steps. The request is one packet; `aap_read_loop` stores the key that comes back if it is
+to 10% steps. The request is one packet, which `open_aap` sends right after
+`aap::Client::open`: `open` leaves it out, so a probe never receives keys it did not ask
+for and prints them. `aap_read_loop` stores the key that comes back if it is
 16 bytes and differs from the one held - the length check keeps a malformed key from
 replacing a working one on disk, and skipping an unchanged key avoids a keystore
 write per connection.
@@ -201,8 +205,11 @@ packet arrives; this deadlocked the Request Keys button.
 
 ## Patterns
 
-- Keep protocol parsing pure and tested. `aap::battery`, `aap::keys`, `ble::parser`,
-  `ble::decrypt` take bytes and return values, and carry the bulk of the test suite.
+- Keep protocol parsing pure and tested. `aap::battery`, `aap::keys`, `aap::noise`,
+  `aap::message`, `ble::parser`, `ble::decrypt` take bytes and return values, and carry
+  the bulk of the test suite. `aap::decode` routes every packet by its header and opcode;
+  each module's `is_*` and `parse_*` still check the header themselves, so they stay safe
+  to call on their own.
 - Use synthetic test vectors - never commit a real device key. Encrypt in the test and
   assert the round trip.
 - `Option<u8>` for unknown battery, never a sentinel. Levels above 100 mean unavailable,

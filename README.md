@@ -256,7 +256,7 @@ src/
 ├── main.rs        # GTK main loop on the main thread, tokio runtime alongside it
 ├── lib.rs         # Library target, so the layers can be driven from tests
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
-├── aap/           # Apple Accessory Protocol: client, battery, keys, noise control
+├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
 ├── bluez.rs       # Adapters, the device watch, a BatteryProvider1 per adapter
 ├── keystore.rs    # Key storage under XDG data dir

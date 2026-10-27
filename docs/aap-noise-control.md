@@ -165,12 +165,14 @@ When parsing `0x09` packets, always check byte 6 to identify the specific sub-co
 To identify a noise control mode packet:
 
 ```
-packet.len() > 7 && packet[4] == 0x09 && packet[6] == 0x0D
+packet.len() > 7 && packet[0..4] == [04 00 04 00] && packet[4] == 0x09 && packet[6] == 0x0D
 ```
 
 The mode value is at `packet[7]`. This is `aap::noise::is_noise_mode_packet`, and
 byte 6 is not optional: validating on the command byte alone accepts every other
-sub-command in the table above and reads its value as a mode.
+sub-command in the table above and reads its value as a mode. The header is the
+one every packet after the handshake carries; `aap::decode` checks it once for
+every kind of packet, then picks the parser by byte 4.
 
 ## Test Results
 

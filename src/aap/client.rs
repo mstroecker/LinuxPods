@@ -8,11 +8,12 @@
 //! reports a closed peer as a zero-length read, as L2CAP does, so nothing past
 //! [`Client::connect`] tells the two apart.
 //!
-//! Protocol flow:
+//! Protocol flow, which [`Client::open`] runs:
 //!   1. Open L2CAP connection to AirPods (PSM 4097)
 //!   2. Send handshake, and wait for the device to answer it
-//!   3. Request battery notifications
-//!   4. Parse incoming packets
+//!   3. Request battery notifications, enable the special features, and
+//!      request the proximity keys
+//!   4. Read incoming packets - `aap::decode` reads each one
 //!
 //! Based on reverse engineering from LibrePods and OpenPods.
 
@@ -26,8 +27,9 @@ use bluer::l2cap::{SeqPacket, Socket, SocketAddr};
 use bluer::{Address, AddressType};
 #[cfg(feature = "harness")]
 use tokio_seqpacket::UnixSeqpacket;
+use tracing::Instrument;
 
-use crate::aap::noise;
+use crate::aap::{battery, keys, noise};
 
 /// L2CAP Protocol/Service Multiplexer for AAP.
 pub const AAP_PSM: u16 = 0x1001; // 4097
@@ -56,17 +58,11 @@ const HANDSHAKE_REPLY: [u8; 4] = [0x01, 0x00, 0x04, 0x00];
 /// connected took 1.2 s.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Subscribes to battery status notifications.
-const PACKET_BATTERY_REQUEST: [u8; 10] =
-    [0x04, 0x00, 0x04, 0x00, 0x0F, 0x00, 0xFF, 0xFF, 0xFF, 0xFF];
-
-/// Enables conversational awareness and adaptive transparency.
-const PACKET_ENABLE_FEATURES: [u8; 14] = [
-    0x04, 0x00, 0x04, 0x00, 0x4D, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
-/// Requests the proximity pairing encryption keys (IRK and ENC_KEY).
-const PACKET_KEY_REQUEST: [u8; 8] = [0x04, 0x00, 0x04, 0x00, 0x30, 0x00, 0x05, 0x00];
+/// The span a link's log lines go under, naming the device: several links
+/// can be up at once.
+pub fn link_span(addr: Address) -> tracing::Span {
+    tracing::info_span!("aap", mac = %addr)
+}
 
 /// What [`Client::read_packet`] fails with once the connection has closed:
 /// the device hung up, or [`Client::shutdown`] closed it here.
@@ -191,6 +187,39 @@ impl Client {
 
     pub fn is_connected(&self) -> bool {
         self.socket.is_some()
+    }
+
+    /// Brings a session up on a client not yet connected, and returns it for
+    /// its packets to be read: connects, sends the handshake and waits for
+    /// the answer, then subscribes to battery notifications and enables the
+    /// special features. What the device sends waits in the socket until the
+    /// caller reads it.
+    ///
+    /// Nothing goes out before the handshake is answered - see
+    /// [`Client::handshake`]. The proximity keys are not asked for here: the
+    /// caller that stores them asks, with [`Client::request_proximity_keys`],
+    /// so that a probe printing what comes back never receives them unasked.
+    ///
+    /// Fails as [`Client::connect`] and [`Client::handshake`] do, a link that
+    /// came up and went told from one that never came up by
+    /// [`went_during_setup`]. Dropped before it is done - timed out, say - it
+    /// closes the connection along with the client.
+    pub async fn open(mut self) -> Result<Self> {
+        let span = link_span(self.addr);
+        async move {
+            self.connect().await?;
+            // Back once the device has answered: anything sent sooner is dropped.
+            self.handshake().await?;
+            self.request_battery_status()
+                .await
+                .context("failed to request battery")?;
+            self.enable_special_features()
+                .await
+                .context("failed to enable features")?;
+            Ok(self)
+        }
+        .instrument(span)
+        .await
     }
 
     /// Opens the L2CAP connection on PSM 4097 - or, for a client made with
@@ -326,19 +355,18 @@ impl Client {
     }
 
     pub async fn request_battery_status(&self) -> Result<()> {
-        self.send_packet(&PACKET_BATTERY_REQUEST, "battery request")
-            .await
+        self.send_packet(&battery::REQUEST, "battery request").await
     }
 
     pub async fn enable_special_features(&self) -> Result<()> {
-        self.send_packet(&PACKET_ENABLE_FEATURES, "feature enable")
+        self.send_packet(&noise::ENABLE_FEATURES, "feature enable")
             .await
     }
 
     /// Requests the keys used to decrypt BLE proximity advertisements. The
     /// response arrives asynchronously and is handled by the read loop.
     pub async fn request_proximity_keys(&self) -> Result<()> {
-        self.send_packet(&PACKET_KEY_REQUEST, "key request").await
+        self.send_packet(&keys::REQUEST, "key request").await
     }
 
     /// Switches the noise control mode.
@@ -544,8 +572,8 @@ mod tests {
 
             client.request_battery_status().await.unwrap();
             client.enable_special_features().await.unwrap();
-            assert_eq!(recv(&peer).await, PACKET_BATTERY_REQUEST);
-            assert_eq!(recv(&peer).await, PACKET_ENABLE_FEATURES);
+            assert_eq!(recv(&peer).await, battery::REQUEST);
+            assert_eq!(recv(&peer).await, noise::ENABLE_FEATURES);
 
             // Left at 83%, discharging.
             let battery = [
@@ -580,6 +608,47 @@ mod tests {
                 .await
                 .unwrap();
             timeout(TIMEOUT, handshake).await.unwrap().unwrap().unwrap();
+        }
+
+        /// A session is the handshake, then - once it is answered, and not
+        /// before - the battery subscription and the features, in that
+        /// order. Not the key request: that is for the caller storing keys.
+        #[tokio::test]
+        async fn open_requests_once_the_handshake_is_answered() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = unix_socket_path(dir.path(), MAC);
+            let mut listener = UnixSeqpacketListener::bind(&path).unwrap();
+            let open = tokio::spawn(Client::with_unix_socket(MAC, path).open());
+            let peer = timeout(TIMEOUT, listener.accept()).await.unwrap().unwrap();
+
+            assert_eq!(recv(&peer).await, PACKET_HANDSHAKE);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!open.is_finished(), "not answered yet");
+            peer.send(&HANDSHAKE_REPLY).await.unwrap();
+
+            assert_eq!(recv(&peer).await, battery::REQUEST);
+            assert_eq!(recv(&peer).await, noise::ENABLE_FEATURES);
+            let client = timeout(TIMEOUT, open).await.unwrap().unwrap().unwrap();
+            assert!(client.is_connected());
+            let mut buf = [0u8; READ_BUF_LEN];
+            let more = timeout(Duration::from_millis(50), peer.recv(&mut buf)).await;
+            assert!(more.is_err(), "sent more: {more:?}");
+        }
+
+        /// A device that hangs up before answering fails the session as the
+        /// handshake does: a link that went during setup.
+        #[tokio::test]
+        async fn open_fails_when_the_device_hangs_up_first() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = unix_socket_path(dir.path(), MAC);
+            let mut listener = UnixSeqpacketListener::bind(&path).unwrap();
+            let open = tokio::spawn(Client::with_unix_socket(MAC, path).open());
+            let peer = timeout(TIMEOUT, listener.accept()).await.unwrap().unwrap();
+            assert_eq!(recv(&peer).await, PACKET_HANDSHAKE);
+            drop(peer);
+            let failed = timeout(TIMEOUT, open).await.unwrap().unwrap();
+            let failed = failed.err().expect("the session fails");
+            assert!(went_during_setup(&failed), "{failed:#}");
         }
 
         /// A device that never answers fails the handshake rather than hold up

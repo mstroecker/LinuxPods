@@ -1,6 +1,9 @@
-//! AAP battery status packet parsing.
+//! AAP battery status: the request that subscribes to it, and the packet
+//! that reports it.
 //!
 //! Format: 04 00 04 00 04 00 [count] ([component] 01 [level] [status] 01)...
+
+use crate::aap::message::{self, HEADER};
 
 /// Which physical component a battery reading belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +123,19 @@ pub enum BatteryParseError {
     Incomplete(usize),
 }
 
-/// Everything before the count byte.
-const HEADER: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x04, 0x00];
+/// The battery report's opcode.
+pub const OPCODE: u8 = 0x04;
+
+/// The zero byte after the opcode, which a battery report is known by too.
+const OPCODE_PAD: usize = message::OPCODE + 1;
+
+/// Where the count byte sits, after [`HEADER`], the opcode and its zero byte.
+const COUNT: usize = 6;
+
+/// Subscribes to battery status notifications.
+pub const REQUEST: [u8; 10] = [
+    HEADER[0], HEADER[1], HEADER[2], HEADER[3], 0x0F, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+];
 
 /// What [`battery_packet`] writes for a level of `None`. Anything above 100
 /// reads as unavailable. A part the device reports as disconnected comes with
@@ -131,17 +145,22 @@ const LEVEL_UNAVAILABLE: u8 = 0xFF;
 
 /// Header check: 04 00 04 00 04 00 followed by a count byte.
 pub fn is_battery_packet(packet: &[u8]) -> bool {
-    packet.len() >= 7 && packet[..6] == HEADER
+    packet.len() > COUNT && message::opcode(packet) == Some(OPCODE) && packet[OPCODE_PAD] == 0x00
 }
 
 pub fn parse_battery_packet(packet: &[u8]) -> Result<BatteryInfo, BatteryParseError> {
     if !is_battery_packet(packet) {
         return Err(BatteryParseError::NotBatteryPacket);
     }
+    read(packet)
+}
 
-    let count = packet[6] as usize;
+/// [`parse_battery_packet`] past its header check, for a packet
+/// [`is_battery_packet`] has accepted.
+pub(super) fn read(packet: &[u8]) -> Result<BatteryInfo, BatteryParseError> {
+    let count = packet[COUNT] as usize;
     let mut info = BatteryInfo::default();
-    let mut offset = 7;
+    let mut offset = COUNT + 1;
 
     for _ in 0..count {
         // Each entry is 5 bytes: [component] 01 [level] [status] 01
@@ -186,7 +205,7 @@ pub fn parse_battery_packet(packet: &[u8]) -> Result<BatteryInfo, BatteryParseEr
 pub fn battery_packet(batteries: &[Battery]) -> Vec<u8> {
     let count = u8::try_from(batteries.len()).expect("at most 255 batteries in a packet");
     let mut packet = HEADER.to_vec();
-    packet.push(count);
+    packet.extend_from_slice(&[OPCODE, 0x00, count]);
     for battery in batteries {
         packet.extend_from_slice(&[
             battery.component.into(),
