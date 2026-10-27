@@ -42,6 +42,7 @@ use bluer::Address;
 use tokio::sync::{Mutex, RwLock, watch};
 use tracing::Instrument;
 
+use crate::aap::noise::{ModeState, Report};
 use crate::aap::{self, Message};
 use crate::ble::decode_model_name;
 use crate::ble::decrypt::decrypt_for_device;
@@ -278,12 +279,12 @@ struct Link {
     client: Arc<aap::Client>,
     /// `None` until the first battery packet.
     reading: Option<PodState>,
-    /// `None` until the device reports one or a command sets it. Kept apart
+    /// Unknown until the device reports one or a command sets it. Kept apart
     /// from the reading, which every battery packet replaces, and merged in by
     /// [`Inner::snapshot`]. It goes with the link: a mode from an earlier
     /// session would show as selected after a reconnect, though it may have
     /// been changed from a phone meanwhile.
-    noise_mode: Option<aap::NoiseMode>,
+    noise_mode: ModeState,
     /// Which device the link is to, as last advertised; AAP never says.
     /// Kept apart from the reading like the mode. Taken from the cached
     /// advertisement when the link comes up and refreshed by every one after,
@@ -354,21 +355,28 @@ impl Inner {
             .filter(|l| Arc::ptr_eq(&l.client, client))
     }
 
-    /// Records a mode on the link `client` belongs to, returning whether that
-    /// changed anything.
+    /// Records a mode a command set on the link `client` belongs to,
+    /// returning whether that changed anything.
     fn record_noise_mode(
         &mut self,
         mac_addr: Address,
         client: &Arc<aap::Client>,
         mode: aap::NoiseMode,
     ) -> bool {
-        match self.live_link(mac_addr, client) {
-            Some(link) if link.noise_mode != Some(mode) => {
-                link.noise_mode = Some(mode);
-                true
-            }
-            _ => false,
-        }
+        self.live_link(mac_addr, client)
+            .is_some_and(|link| link.noise_mode.set(mode, Instant::now()))
+    }
+
+    /// Takes a mode the device reported on the link `client` belongs to -
+    /// unless it is stale, see [`ModeState`]. `None` once the link is gone.
+    fn report_noise_mode(
+        &mut self,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+        mode: aap::NoiseMode,
+    ) -> Option<Report> {
+        self.live_link(mac_addr, client)
+            .map(|link| link.noise_mode.report(mode, Instant::now()))
     }
 
     /// Drops BLE readings older than [`BLE_CACHE_TTL`], returning whether any went.
@@ -402,7 +410,7 @@ impl Inner {
                 continue;
             };
             let mut state = reading.clone();
-            state.noise_mode = link.noise_mode;
+            state.noise_mode = link.noise_mode.mode();
             // Merged here rather than copied into each battery packet: a
             // reading that arrived before the first advertisement kept a blank
             // model until the next packet, which over AAP comes only when a
@@ -898,7 +906,7 @@ impl Coordinator {
                     client: client.clone(),
                     reading: None,
                     // Reported by the startup dump, once the read loop is up.
-                    noise_mode: None,
+                    noise_mode: ModeState::default(),
                     identity,
                     since: Instant::now(),
                 },
@@ -1066,7 +1074,8 @@ impl Coordinator {
     /// it changed.
     ///
     /// The startup dump repeats, and an unchanged mode is not worth waking the
-    /// window, tray and battery provider for.
+    /// window, tray and battery provider for. A stale report of the mode a
+    /// command just replaced is not taken - see [`ModeState`].
     async fn handle_noise_mode(
         &self,
         mode: aap::NoiseMode,
@@ -1075,10 +1084,17 @@ impl Coordinator {
     ) {
         {
             let mut inner = self.inner.write().await;
-            if !inner.record_noise_mode(mac_addr, client, mode) {
-                return;
+            match inner.report_noise_mode(mac_addr, client, mode) {
+                Some(Report::Changed) => self.broadcast(&inner),
+                Some(Report::Stale) => {
+                    tracing::info!(
+                        "Noise control mode reported by {mac_addr}: {mode}, the one just \
+                         replaced; dropped as stale"
+                    );
+                    return;
+                }
+                Some(Report::Unchanged) | None => return,
             }
-            self.broadcast(&inner);
         }
         tracing::info!("Noise control mode reported by {mac_addr}: {mode}");
     }
@@ -1089,7 +1105,10 @@ impl Coordinator {
     /// settings-changed notification that names neither the sub-command nor the
     /// mode, and the 0x0D echo carrying it back arrives only sometimes, so
     /// waiting for confirmation would leave the interface on the old mode for
-    /// three modes out of four. A later report simply confirms what we set.
+    /// three modes out of four. A later report confirms what we set - or,
+    /// when it is of the mode replaced and comes within
+    /// [`aap::noise::STALE_REPORT_WINDOW`] before the mode set is reported, is
+    /// dropped as stale (#113).
     pub async fn set_noise_control(&self, mac_addr: Address, mode: aap::NoiseMode) -> Result<()> {
         let client = self
             .client(mac_addr)
@@ -1228,7 +1247,7 @@ mod tests {
         Link {
             client: Arc::new(aap::Client::new(Address::any())),
             reading,
-            noise_mode: None,
+            noise_mode: ModeState::default(),
             identity: None,
             since: Instant::now(),
         }
@@ -1653,7 +1672,8 @@ mod tests {
     fn snapshot_attaches_the_mode_to_the_connected_device_only() {
         let mut inner = inner_with(vec![(BB, Duration::from_secs(1))]);
         let mut aa = link(Some(aap_state(80)));
-        aa.noise_mode = Some(aap::NoiseMode::Adaptive);
+        aa.noise_mode
+            .report(aap::NoiseMode::Adaptive, Instant::now());
         inner.links.insert(AA, aa);
 
         let snap = inner.snapshot();
@@ -1713,6 +1733,44 @@ mod tests {
         );
     }
 
+    /// A report of the mode a command just replaced neither puts it back on
+    /// show nor is broadcast; the report of the mode set ends that, and a
+    /// change made elsewhere is taken again (#113). The command is recorded
+    /// where `set_noise_control` records it, since sending needs a socket.
+    #[tokio::test]
+    async fn a_stale_report_does_not_undo_a_command() {
+        use aap::NoiseMode::{NoiseCancelling, Off};
+
+        let mut inner = inner_with(vec![]);
+        inner.links.insert(AA, link(Some(aap_state(80))));
+        let (coordinator, _dir) = coordinator_with(inner);
+        let client = coordinator.client(AA).await.unwrap();
+        let mode =
+            |coordinator: &Coordinator| coordinator.subscribe().borrow().states[&AA].noise_mode;
+        coordinator
+            .handle_noise_mode(NoiseCancelling, AA, &client)
+            .await;
+        {
+            let mut inner = coordinator.inner.write().await;
+            assert!(inner.record_noise_mode(AA, &client, Off));
+            coordinator.broadcast(&inner);
+        }
+        let mut rx = coordinator.subscribe();
+        let _ = rx.borrow_and_update();
+
+        coordinator
+            .handle_noise_mode(NoiseCancelling, AA, &client)
+            .await;
+        assert_eq!(mode(&coordinator), Some(Off));
+        assert!(!rx.has_changed().unwrap(), "nothing to broadcast");
+
+        coordinator.handle_noise_mode(Off, AA, &client).await;
+        coordinator
+            .handle_noise_mode(NoiseCancelling, AA, &client)
+            .await;
+        assert_eq!(mode(&coordinator), Some(NoiseCancelling));
+    }
+
     /// A read loop outliving its link reports the old session's mode, which
     /// must not land on the newer link.
     #[tokio::test]
@@ -1728,7 +1786,10 @@ mod tests {
             .handle_noise_mode(aap::NoiseMode::Adaptive, AA, &stale)
             .await;
 
-        assert_eq!(coordinator.inner.read().await.links[&AA].noise_mode, None);
+        assert_eq!(
+            coordinator.inner.read().await.links[&AA].noise_mode.mode(),
+            None
+        );
         assert!(!rx.has_changed().unwrap(), "nothing to broadcast");
     }
 

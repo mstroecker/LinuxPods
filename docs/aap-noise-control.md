@@ -89,7 +89,11 @@ table](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.
 
 The AirPods do **not** reliably echo a noise control confirmation packet (`0x0D`) after a mode change. Instead, every mode change consistently produces a `0x4B` settings-changed notification. Occasionally a `0x0D` echo also arrives, but it cannot be relied upon.
 
-**Integration note:** Treat noise control commands as fire-and-forget. Update local state optimistically after sending — do not wait for a `0x0D` confirmation packet. `Coordinator::set_noise_control` does exactly that: it records the mode as soon as the packet is away and broadcasts, and a later `0x0D` report merely confirms it.
+**Integration note:** Treat noise control commands as fire-and-forget. Update local state optimistically after sending — do not wait for a `0x0D` confirmation packet. `Coordinator::set_noise_control` does exactly that: it records the mode as soon as the packet is away and broadcasts, and a later `0x0D` report merely confirms it - unless it is a stale one, below.
+
+**Stale reports.** A `0x0D` report can carry the mode a change replaced. Switched from Noise Cancelling to Off, a pair reported `0D 02` 0.33 s later and `0D 01` only at 1.4 s (#71); taken as it came, the first put Noise Cancelling back on show for a second (#113). So a report of the replaced mode is held off until the mode set is reported, or 2 s pass - `aap::noise::ModeState`. After that any report wins again, since the mode may have been changed on another device.
+
+A report held off is dropped, not deferred to the end of the 2 s. In run 1 below, Transparency and Adaptive each took effect and were followed by a report of the old mode, `0x02`, with no echo of the new one after it: applied at expiry, that report would show the wrong mode just the same. If a dropped report was right after all, the next report corrects the mode.
 
 ### 0x4B Settings-Changed Notification
 
@@ -134,7 +138,7 @@ This startup report is reliable and should be parsed to initialize the local noi
 
 ### Unsolicited Mode Changes
 
-When the noise control mode is changed from another device (e.g., iPhone, Apple Watch), the AirPods send an unsolicited `0x0D` packet with the new mode. Parse these to keep local state synchronized.
+When the noise control mode is changed from another device (e.g., iPhone, Apple Watch), the AirPods send an unsolicited `0x0D` packet with the new mode. Parse these to keep local state synchronized - except a report of the mode a command here replaced, within 2 s of it: see Stale reports.
 
 ## Settings Command Family (0x09)
 

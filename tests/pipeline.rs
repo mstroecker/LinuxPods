@@ -800,6 +800,99 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
     assert_eq!(settings, expected);
 }
 
+/// After Off, a report of the mode it replaced does not bring that mode back:
+/// in the #71 capture the pair reported Noise Cancelling 0.33 s after Off
+/// was set from it, and Off itself only at 1.4 s, and the window showed Noise
+/// Cancelling for the second in between (#113). The fake pair does the same.
+///
+/// Every snapshot from the command on is watched, until a battery change made
+/// once the echo is out has arrived: it comes over the same connection, after
+/// the stale report and the echo, so by then both have been read. The stale
+/// report comes well inside the 2 s the app holds it off for, and the pair
+/// reports Noise Cancelling for a whole second before the echo: a snapshot
+/// showing it would be seen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_report_after_off_does_not_bring_the_old_mode_back() {
+    /// A left pod level the pair has not had yet, none of the startup dump's.
+    const LATER: u8 = 29;
+
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    app.until("the mode from the startup dump", |s| {
+        s.states
+            .get(&PAIR)
+            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancelling))
+    })
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.quirks.stale_report = Some(Duration::from_millis(330));
+            pods.quirks.echo_every = 1;
+            pods.quirks.echo_delay = Duration::from_millis(1400);
+        })
+        .await
+        .unwrap();
+
+    // Every mode on show for the pair, each change once, until the battery
+    // change. Cloned out of the borrow, which every broadcast waits for.
+    fn read(updates: &mut watch::Receiver<Snapshot>) -> (Option<NoiseMode>, Option<u8>) {
+        let snapshot = updates.borrow_and_update();
+        let state = snapshot.states.get(&PAIR);
+        (
+            state.and_then(|s| s.noise_mode),
+            state.and_then(|s| s.left_battery),
+        )
+    }
+    let mut updates = app.coordinator.subscribe();
+    // Read here, not in the task, which may first run after the command.
+    let mut shown = vec![read(&mut updates).0];
+    let watching = tokio::spawn(async move {
+        while updates.changed().await.is_ok() {
+            let (mode, left) = read(&mut updates);
+            if shown.last() != Some(&mode) {
+                shown.push(mode);
+            }
+            if left == Some(LATER) {
+                break;
+            }
+        }
+        shown
+    });
+
+    app.coordinator
+        .set_noise_control(PAIR, NoiseMode::Off)
+        .await
+        .unwrap();
+    // The pair has the command, and with it the stale report and the echo
+    // queued; then both are out.
+    fixture.until_mode(PAIR, NoiseMode::Off).await;
+    let world = &fixture.world;
+    eventually("the echo of Off", move || async move {
+        world
+            .with_pods(PAIR, |pods| pods.next_due().is_none())
+            .await
+            .unwrap()
+    })
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_battery(Part::Left, Some(LATER)))
+        .await
+        .unwrap();
+
+    let shown = timeout(TIMEOUT, watching)
+        .await
+        .expect("timed out waiting for the battery change")
+        .unwrap();
+    assert_eq!(
+        shown,
+        [Some(NoiseMode::NoiseCancelling), Some(NoiseMode::Off)],
+        "Off, and nothing after it"
+    );
+}
+
 /// A flood of advertisements no stored key decrypts, as BLE spam brings, is
 /// dropped on arrival: no entry and no broadcast. Kept, each would be an entry
 /// under an address that never comes back, and a snapshot for every consumer:
