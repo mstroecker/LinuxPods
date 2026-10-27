@@ -52,6 +52,7 @@
 //! | ID | Widget |
 //! |---|---|
 //! | `main-window` | the window |
+//! | `toasts` | the window's toast overlay; a failed command's toast is in it while shown |
 //! | `main-menu` | the primary menu's button |
 //! | `window-title` | the title, shown while the switcher is not |
 //! | `device-dropdown` | the device switcher, shown with more than one device |
@@ -105,7 +106,8 @@
 //! `SetActive` clicks the widget only when its state differs, so a check
 //! button bound to an action - a noise radio - activates the action, and the
 //! action's state decides. Whatever a press sets off - a command to the
-//! AirPods - comes back as a snapshot, when it comes back at all.
+//! AirPods - comes back as a snapshot, when it comes back at all, and as a
+//! toast when it fails.
 //!
 //! ## Settling
 //!

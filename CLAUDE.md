@@ -28,9 +28,11 @@ src/
 ```
 
 **Threading.** GTK owns the main thread, tokio carries BLE/AAP/D-Bus. GTK types are
-`!Send`, so the two meet over channels - a `tokio::sync::watch` for snapshots,
-`async-channel` for commands - consumed with `glib::spawn_future_local`.
-Never touch a widget from a tokio task.
+`!Send`, so the two meet over channels: snapshots reach the UI on a `tokio::sync::watch`,
+and the tray's window commands on an `async-channel`, both consumed with
+`glib::spawn_future_local`. Commands to the AirPods go the other way, onto their link's
+queue (`Coordinator::command`), and each result comes back on a oneshot. Never touch a
+widget from a tokio task.
 
 **State.** `Coordinator` merges AAP (exact, needs L2CAP) and BLE (10% steps, or exact
 once a stored key decrypts) **per device**, keyed by the **real** MAC.
@@ -65,14 +67,27 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   while the write ran on, and a second save raced it on the same temp file.
 - The session itself - connect, handshake, battery and feature requests - is
   `aap::Client::open`. `open_aap` refuses a device that has a link, before and after it,
-  requests the keys, and records the link (`Inner::links`: client, reading, mode) as its last step,
-  with nothing awaited after, and returns the `AapLink` that owns it. Dropped anywhere -
-  timed out, aborted, run to its end - it shuts the socket and removes its own record,
-  matched by client, so a newer link stands. Its read loop reads that client only, never
+  requests the keys, and records the link (`Inner::links`: client, reading, mode) and its
+  command queue (`Coordinator::queues`) as its last step, with nothing awaited after, and
+  returns the `AapLink` that owns it. Dropped anywhere - timed out, aborted, run to its
+  end - it shuts the socket and removes its own record and queue, matched by client, so a
+  newer link stands. Its read loop reads that client only, never
   one looked up by MAC - a loop outliving its link would read the replacement's socket
   under the old identity, which once stored one device's key under another's MAC.
-  Commands (`set_noise_control`, `request_encryption_keys`, `disconnect_aap`) name their
-  device, and GNOME Settings gets one `BatteryProvider1` object per attached pair.
+  `Coordinator::command` and `disconnect_aap` name their device, and GNOME Settings gets
+  one `BatteryProvider1` object per attached pair.
+- Commands to the AirPods take one path: `Coordinator::command(mac, Command)`. It queues
+  the command on the link's queue in the call itself, not at the first poll, so commands
+  go out in the order of the calls however their futures are spawned. Spawned apart, two
+  quick switches went out in either order, and the mode recorded last could be the one
+  sent first (#54). The queues are a std mutex beside `inner`: taken only under `inner`'s
+  write lock or alone, never held across an await, changed only together with
+  `Inner::links`, and removed only past `drop_link`'s client check. `AapLink::run`
+  carries the commands out one at a time beside the read loop, so they go with the link.
+  Each caller gets a `Result`: an error without a link, from the send, or when the link
+  goes first - `ConnectionLost` when it went mid-command, as the packet may have gone out.
+  Dropping the future does not withdraw the command. The window toasts a failure; the
+  tray logs it.
 - Both `open_aap` and `disconnect_aap` broadcast. Disconnect also drops the device's
   AAP state, or the UI keeps showing a stale exact-looking reading.
 - BLE is cached, AAP never is. `Inner::ble` keeps the last advertisement per device -
@@ -176,7 +191,8 @@ from the reading every battery packet replaces, and goes with the link.
 error chime - confirmed on Pro 3 and Pro Gen 2, while the other three modes work
 unconditionally. `set_noise_control` sends `0x34 01` immediately before Off, and only for
 Off: it is a persistent device setting that syncs to the user's Apple devices, so it is
-not something to enable on every connection.
+not something to enable on every connection. A link that goes between the two leaves
+Off allowed but not set, which is harmless: Off was asked for.
 
 **Noise control is fire-and-forget.** `04 00 04 00 09 00 0D [mode] 00 00 00` sets the
 mode, and nothing the device answers confirms it reliably: AirPods 4 sent a `0x4B`
@@ -210,8 +226,10 @@ brings its ACL link up, so a retry to a pair the user has just disconnected woul
 reconnect it. The supervisor asks `Device1.Connected` before every attempt but the first,
 and asks nothing while BlueZ is off the bus: under systemd the call starts it again.
 
-**Never hold the `inner` lock across `read_packet().await`** - clone the link's client out. The read parks until a
-packet arrives; this deadlocked the Request Keys button.
+**Never hold the `inner` lock across a read or a send on the socket.** `AapLink::run`
+hands the link's client to the read loop and the command loop, and neither looks it up
+under the lock. A read parks until a packet arrives; holding the lock there once
+deadlocked every command sent meanwhile.
 
 ## Patterns
 
@@ -241,14 +259,17 @@ packet arrives; this deadlocked the Request Keys button.
   `target/debug/linuxpods`, where it meets real AirPods and the user's session. Nothing in
   the harness writes to the app's real data directory.
 
-**UI.** Widget updates arrive only from the snapshot stream. Read a selection *before*
-mutating the widget - splicing a `StringList` makes `GtkDropDown` emit `selected-notify`,
-clobbering the user's choice. Noise Control and Features are commands, so they stay
-insensitive unless the device is on AAP; BLE is receive-only. Artwork and the app icon
-are compiled into a GResource by `build.rs` (`assets/resources.gresource.xml`); a missing
-resource fails silently, so a test asserts every name the UI loads is in the bundle. The
-tray still points the shell at `assets/icons` in the checkout: the shell draws it and
-cannot read resources inside the binary.
+**UI.** Widget updates arrive only from the snapshot stream. The one exception is a
+command that fails: its result comes back to the main context and goes up as a toast, an
+event, never a control's state, so the noise radios keep showing the recorded mode. Read
+a selection *before* mutating the widget - splicing a `StringList` makes `GtkDropDown`
+emit `selected-notify`, clobbering the user's choice. Noise Control and Features are
+commands, so they stay insensitive unless the device is on AAP; BLE is receive-only.
+Artwork and the app icon are compiled into a GResource by `build.rs`
+(`assets/resources.gresource.xml`); a missing resource fails silently, so a test asserts
+every name the UI loads is in the bundle. The tray still points the shell at
+`assets/icons` in the checkout: the shell draws it and cannot read resources inside the
+binary.
 
 ## Commits and pull requests
 

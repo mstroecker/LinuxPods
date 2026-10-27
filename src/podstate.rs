@@ -32,14 +32,16 @@
 //! broadcast each - is exactly what a BLE spam flood feeds on.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::future::Future;
 #[cfg(feature = "harness")]
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bluer::Address;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tracing::Instrument;
 
 use crate::aap::noise::{ModeState, Report};
@@ -74,6 +76,74 @@ impl std::fmt::Display for DataSource {
             Self::Aap => write!(f, "AAP"),
         }
     }
+}
+
+/// What a pair of AirPods can be told to do over its AAP link - see
+/// [`Coordinator::command`]. The key request is not among them: the link
+/// sends it as it comes up, on every connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Switches the noise control mode, and records it.
+    NoiseControl(aap::NoiseMode),
+}
+
+impl std::fmt::Display for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoiseControl(mode) => write!(f, "switch to {mode}"),
+        }
+    }
+}
+
+/// A command in a link's queue, and where its result goes.
+struct Queued {
+    command: Command,
+    done: oneshot::Sender<Result<()>>,
+}
+
+/// A link's command queue, as `Coordinator::queues` holds it: with the
+/// link's client, so that it goes only with its own link, as `Inner::links`
+/// records do.
+struct LinkQueue {
+    client: Arc<aap::Client>,
+    commands: mpsc::UnboundedSender<Queued>,
+}
+
+/// A command being carried out, until its caller has been told how it went.
+/// Dropped before that - the link's run ended, or was aborted, in the middle
+/// of the command - it tells the caller the connection was lost meanwhile.
+struct Underway {
+    mac: Address,
+    command: Command,
+    done: Option<oneshot::Sender<Result<()>>>,
+}
+
+impl Underway {
+    fn finish(&mut self, result: Result<()>) {
+        if let Some(done) = self.done.take() {
+            // The caller may have stopped waiting; the command is done anyway.
+            let _ = done.send(result);
+        }
+    }
+}
+
+impl Drop for Underway {
+    fn drop(&mut self) {
+        let lost = ConnectionLost {
+            mac: self.mac,
+            command: self.command,
+        };
+        self.finish(Err(lost.into()));
+    }
+}
+
+/// What a command's caller hears when the link went while the command was
+/// being carried out: it may or may not have reached the device.
+#[derive(Debug, thiserror::Error)]
+#[error("lost the connection to {mac} during the {command}")]
+pub struct ConnectionLost {
+    pub mac: Address,
+    pub command: Command,
 }
 
 /// Which device a reading is from, as its advertisements say. AAP never does.
@@ -450,16 +520,21 @@ struct Persistence {
 }
 
 /// A device's AAP link as [`Coordinator::open_aap`] opens it, for
-/// [`AapLink::run`] to read.
+/// [`AapLink::run`] to read, and to carry out the commands sent to it.
 ///
 /// Dropped, it closes the link - the connection at once, the coordinator's
 /// record of it soon after - whether it was run or not, and wherever its run
 /// stopped: the link lasts no longer than whatever holds it. Its own record
 /// only, never a newer link's to the device, as the record goes by client.
+/// The commands still in its queue go with it, and each one's caller is told
+/// it was not done.
 pub struct AapLink {
     coordinator: Arc<Coordinator>,
     mac: Address,
     client: Arc<aap::Client>,
+    /// The commands [`Coordinator::command`] queued for the link, in the
+    /// order they were sent.
+    queue: mpsc::UnboundedReceiver<Queued>,
     /// Set once [`AapLink::run`] has seen the record go, leaving nothing for
     /// the drop to do.
     ended: bool,
@@ -477,16 +552,27 @@ pub enum LinkEnd {
 }
 
 impl AapLink {
-    /// Reads the link's packets until it ends, then takes it down, and says
-    /// how it ended. Logs nothing of it: what is worth saying is the caller's
-    /// to judge.
+    /// Reads the link's packets until it ends, carrying out its commands
+    /// meanwhile, then takes it down, and says how it ended. Logs nothing of
+    /// it: what is worth saying is the caller's to judge.
+    ///
+    /// The commands are carried out here, in the run, rather than in a task
+    /// of their own: they go with the link wherever the run stops, and none
+    /// can outlive it to send on a newer link's behalf.
     pub async fn run(mut self) -> LinkEnd {
-        // Under the device's MAC, as every line the session's setup logged.
-        let error = self
+        let reading = self.coordinator.aap_read_loop(self.mac, &self.client);
+        let commanding = self
             .coordinator
-            .aap_read_loop(self.mac, &self.client)
-            .instrument(aap::client::link_span(self.mac))
-            .await;
+            .command_loop(self.mac, &self.client, &mut self.queue);
+        // Under the device's MAC, as every line the session's setup logged.
+        let error = async {
+            tokio::select! {
+                error = reading => error,
+                never = commanding => match never {},
+            }
+        }
+        .instrument(aap::client::link_span(self.mac))
+        .await;
         // Gone already when it was closed on purpose.
         let lost = self
             .coordinator
@@ -523,6 +609,13 @@ impl Drop for AapLink {
 /// Coordinates sources and broadcasts snapshots.
 pub struct Coordinator {
     inner: RwLock<Inner>,
+    /// Each live link's command queue, by MAC - see [`Coordinator::command`].
+    /// Apart from `inner`, so that a command takes its place in the queue
+    /// when it is sent, with nothing to wait for. Changed only together with
+    /// `Inner::links`, under its write lock, and an entry removed only by its
+    /// own link, matched by client, so a MAC has a queue exactly while it has
+    /// a link and it is that link's. Never held across an await.
+    queues: std::sync::Mutex<HashMap<Address, LinkQueue>>,
     /// Held across a save, so saves never overlap - they share a temporary
     /// file. Owned by the save while it runs - see
     /// `Coordinator::store_encryption_key`.
@@ -632,6 +725,7 @@ impl Coordinator {
 
         Self {
             inner: RwLock::new(inner),
+            queues: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(persistence)),
             updates,
             #[cfg(feature = "harness")]
@@ -859,8 +953,8 @@ impl Coordinator {
 
     /// Opens a device's AAP link and reads it in a task of its own until it
     /// ends, and nothing opens it again. For a caller that has no supervisor,
-    /// as the examples have none; the app's links are each opened and run by
-    /// their pair's supervisor, in `attachment`.
+    /// as this module's tests have none; the app's links are each opened and
+    /// run by their pair's supervisor, in `attachment`.
     pub async fn connect_aap(self: &Arc<Self>, mac_addr: Address) -> Result<()> {
         let link = self.open_aap(mac_addr).await?;
         tokio::spawn(link.run());
@@ -911,11 +1005,20 @@ impl Coordinator {
                     since: Instant::now(),
                 },
             );
+            let (commands, queue) = mpsc::unbounded_channel();
+            self.queues().insert(
+                mac_addr,
+                LinkQueue {
+                    client: client.clone(),
+                    commands,
+                },
+            );
             self.broadcast(&inner);
             AapLink {
                 coordinator: self.clone(),
                 mac: mac_addr,
                 client,
+                queue,
                 ended: false,
             }
         };
@@ -938,16 +1041,10 @@ impl Coordinator {
         aap::Client::new(mac_addr)
     }
 
-    /// Clones a link's client out so callers never hold the lock across an
-    /// await. Holding it across `read_packet` deadlocked every other user of the
-    /// connection.
-    async fn client(&self, mac_addr: Address) -> Option<Arc<aap::Client>> {
-        self.inner
-            .read()
-            .await
-            .links
-            .get(&mac_addr)
-            .map(|l| l.client.clone())
+    /// The links' command queues - see `Coordinator::queues`.
+    fn queues(&self) -> std::sync::MutexGuard<'_, HashMap<Address, LinkQueue>> {
+        // Nothing panics while holding it, but a poisoned map is as good as any.
+        self.queues.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Closes one device's AAP link. Any other device's link is untouched.
@@ -971,6 +1068,17 @@ impl Coordinator {
             if let Some(link) = inner.links.remove(&mac_addr) {
                 // Wakes the read loop parked in recv so it can exit and drop its Arc.
                 link.client.shutdown();
+                // The link's own queue, as the two go together, matched by
+                // client as the record was. A command sent from here on fails
+                // at once, and one still queued fails as the run ends, its
+                // client shut.
+                let mut queues = self.queues();
+                if queues
+                    .get(&mac_addr)
+                    .is_some_and(|queue| Arc::ptr_eq(&queue.client, &link.client))
+                {
+                    queues.remove(&mac_addr);
+                }
             }
             // Without this the UI, tray and battery provider never hear that the
             // connection ended and keep showing the last AAP reading.
@@ -1099,6 +1207,85 @@ impl Coordinator {
         tracing::info!("Noise control mode reported by {mac_addr}: {mode}");
     }
 
+    /// Sends a command to one device, over its AAP link, and resolves to how
+    /// it went: every command goes this way, the window's and the tray's, and
+    /// every caller hears whether it was done (#54).
+    ///
+    /// The command takes its place in the link's queue here, in the call,
+    /// not when the future is first polled: the link carries out its
+    /// commands one at a time, in the order of the calls, however their
+    /// futures are awaited or spawned. Spawned apart, two quick switches went
+    /// out in either order, and each recorded its mode after its own send,
+    /// so the mode on show could be the one sent first. Nor does sending
+    /// wait for anything: it can be called from the GTK main context, whose
+    /// thread no tokio runtime runs on, and the future awaited there.
+    ///
+    /// Fails at once without a link, or with a link going; and once queued,
+    /// when the send fails, or the link goes before the command is sent. All
+    /// of those are a command not carried out. One the link went in the
+    /// middle of, which may or may not have reached the device, fails with
+    /// [`ConnectionLost`] instead.
+    pub fn command(
+        &self,
+        mac_addr: Address,
+        command: Command,
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        let (done, result) = oneshot::channel();
+        let queued = match self.queues().get(&mac_addr) {
+            Some(queue) => queue
+                .commands
+                .send(Queued { command, done })
+                .map_err(|_| anyhow::anyhow!("AAP to {mac_addr} is closing")),
+            None => Err(anyhow::anyhow!("no AAP connection to {mac_addr}")),
+        };
+        async move {
+            queued.with_context(|| format!("{command} not sent"))?;
+            // Dropped unanswered when the link went with the command still
+            // in its queue; one under way answers for itself.
+            result.await.unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "AAP to {mac_addr} went before the {command} was sent"
+                ))
+            })
+        }
+    }
+
+    /// Carries out the commands queued for one link, each in turn, and tells
+    /// each one's caller how it went. Never ends of itself: the queue closes
+    /// with the link's record, whose client is shut then, and the read loop
+    /// ends the run.
+    async fn command_loop(
+        &self,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+        queue: &mut mpsc::UnboundedReceiver<Queued>,
+    ) -> Infallible {
+        while let Some(Queued { command, done }) = queue.recv().await {
+            // Answers for the command if the run is dropped while it is
+            // under way.
+            let mut underway = Underway {
+                mac: mac_addr,
+                command,
+                done: Some(done),
+            };
+            let result = self.carry_out(mac_addr, client, command).await;
+            underway.finish(result);
+        }
+        std::future::pending().await
+    }
+
+    /// Sends one command on `client`'s link.
+    async fn carry_out(
+        &self,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+        command: Command,
+    ) -> Result<()> {
+        match command {
+            Command::NoiseControl(mode) => self.set_noise_control(mac_addr, client, mode).await,
+        }
+    }
+
     /// Switches one connected device's noise control mode.
     ///
     /// The new mode is recorded optimistically. The device answers with a
@@ -1109,11 +1296,15 @@ impl Coordinator {
     /// when it is of the mode replaced and comes within
     /// [`aap::noise::STALE_REPORT_WINDOW`] before the mode set is reported, is
     /// dropped as stale (#113).
-    pub async fn set_noise_control(&self, mac_addr: Address, mode: aap::NoiseMode) -> Result<()> {
-        let client = self
-            .client(mac_addr)
-            .await
-            .with_context(|| format!("no AAP connection to {mac_addr}"))?;
+    ///
+    /// The link's commands go one at a time, so the mode recorded last is the
+    /// one sent last.
+    async fn set_noise_control(
+        &self,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+        mode: aap::NoiseMode,
+    ) -> Result<()> {
         // Recent firmware treats Off as opt-in: a bare Off command gets an error
         // chime and no mode change. Enabling the setting is a change to the
         // device that outlives this session, so it is sent only when Off is what
@@ -1132,7 +1323,7 @@ impl Coordinator {
         // On the link the command went out on, and only while it lasts. One
         // that dropped and came back meanwhile is a new session, and the
         // device reports its mode there itself.
-        if inner.record_noise_mode(mac_addr, &client, mode) {
+        if inner.record_noise_mode(mac_addr, client, mode) {
             self.broadcast(&inner);
         }
         Ok(())
@@ -1238,11 +1429,17 @@ mod tests {
         }
     }
 
+    /// The client of the device's link.
+    async fn client_of(coordinator: &Coordinator, mac: Address) -> Arc<aap::Client> {
+        coordinator.inner.read().await.links[&mac].client.clone()
+    }
+
     fn coordinator_with(inner: Inner) -> (Arc<Coordinator>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let (updates, _) = watch::channel(inner.snapshot());
         let coordinator = Arc::new(Coordinator {
             inner: RwLock::new(inner),
+            queues: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(Persistence {
                 keystore: Some(keystore_in(&dir)),
                 saved: HashMap::new(),
@@ -1694,7 +1891,7 @@ mod tests {
         let mut inner = inner_with(vec![]);
         inner.links.insert(AA, link(Some(aap_state(80))));
         let (coordinator, _dir) = coordinator_with(inner);
-        let client = coordinator.client(AA).await.unwrap();
+        let client = client_of(&coordinator, AA).await;
         coordinator
             .handle_noise_mode(aap::NoiseMode::Adaptive, AA, &client)
             .await;
@@ -1729,7 +1926,7 @@ mod tests {
         let mut inner = inner_with(vec![]);
         inner.links.insert(AA, link(Some(aap_state(80))));
         let (coordinator, _dir) = coordinator_with(inner);
-        let client = coordinator.client(AA).await.unwrap();
+        let client = client_of(&coordinator, AA).await;
         let mode =
             |coordinator: &Coordinator| coordinator.subscribe().borrow().states[&AA].noise_mode;
         coordinator
@@ -2076,6 +2273,18 @@ mod tests {
         assert_eq!(coordinator.subscribe().borrow().devices(), [reported]);
     }
 
+    /// A command to a device with no link fails, and says so to its caller.
+    #[tokio::test]
+    async fn a_command_without_a_link_fails() {
+        let (coordinator, _dir) = coordinator_with(inner_with(vec![]));
+        let off = Command::NoiseControl(aap::NoiseMode::Off);
+        let failed = coordinator.command(AA, off).await;
+        assert_eq!(
+            format!("{:#}", failed.unwrap_err()),
+            "switch to Off not sent: no AAP connection to AA:AA:AA:AA:AA:AA"
+        );
+    }
+
     #[test]
     fn aap_supersedes_ble_only_for_the_connected_device() {
         let mut inner = inner_with(vec![]);
@@ -2312,6 +2521,148 @@ mod tests {
             let (coordinator, _listener, _dir) = harnessed();
             assert!(coordinator.connect_aap(BB).await.is_err());
             assert!(coordinator.subscribe().borrow().connected_macs.is_empty());
+        }
+
+        /// MAC's link to a fake, opened as `open_aap` opens it and not yet
+        /// run, and the fake's end of it.
+        async fn opened() -> (Arc<Coordinator>, AapLink, UnixSeqpacket, tempfile::TempDir) {
+            let (coordinator, mut listener, dir) = harnessed();
+            let (link, fake) = open(&coordinator, &mut listener).await;
+            (coordinator, link, fake, dir)
+        }
+
+        /// MAC's link opened by `coordinator`, the fake answering on
+        /// `listener`, and the fake's end of it.
+        async fn open(
+            coordinator: &Arc<Coordinator>,
+            listener: &mut UnixSeqpacketListener,
+        ) -> (AapLink, UnixSeqpacket) {
+            let opening = tokio::spawn({
+                let coordinator = coordinator.clone();
+                async move { coordinator.open_aap(MAC).await }
+            });
+            let fake = timeout(TIMEOUT, listener.accept()).await.unwrap().unwrap();
+            assert_eq!(recv(&fake).await, SEQUENCE[0], "the handshake");
+            fake.send(&HANDSHAKE_REPLY).await.unwrap();
+            for packet in &SEQUENCE[1..] {
+                assert_eq!(recv(&fake).await, *packet);
+            }
+            let link = timeout(TIMEOUT, opening).await.unwrap().unwrap().unwrap();
+            (link, fake)
+        }
+
+        /// A link's queue goes only with its own link. Here the old link's
+        /// record is dropped late, as its run or its drop does once a newer
+        /// link is up, and commands still reach the newer one - as a read
+        /// loop outliving its link cannot touch a newer link's record.
+        #[tokio::test]
+        async fn a_stale_link_cannot_take_a_newer_links_queue() {
+            let (coordinator, mut listener, _dir) = harnessed();
+            let (old, _old_fake) = open(&coordinator, &mut listener).await;
+            let old_client = old.client.clone();
+            coordinator.disconnect_aap(MAC).await;
+            let (new, new_fake) = open(&coordinator, &mut listener).await;
+
+            assert!(!coordinator.drop_link(MAC, Some(&old_client)).await);
+            let run = tokio::spawn(new.run());
+            let transparency = Command::NoiseControl(aap::NoiseMode::Transparency);
+            timeout(TIMEOUT, coordinator.command(MAC, transparency))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                recv(&new_fake).await,
+                aap::noise::set_packet(aap::NoiseMode::Transparency)
+            );
+            drop((old, new_fake));
+            timeout(TIMEOUT, run).await.unwrap().unwrap();
+        }
+
+        /// A command sent while a dropped link's record is still on its way
+        /// out - the drop has to leave that to a task - fails at once.
+        #[tokio::test]
+        async fn a_command_to_a_link_dropped_but_not_yet_removed_fails() {
+            let (coordinator, link, _fake, _dir) = opened().await;
+            drop(link);
+            // On this one thread, the removal the drop spawned has not run.
+            assert!(coordinator.inner.read().await.links.contains_key(&MAC));
+            let off = Command::NoiseControl(aap::NoiseMode::Off);
+            let failed = coordinator.command(MAC, off).await.unwrap_err();
+            assert_eq!(
+                format!("{failed:#}"),
+                "switch to Off not sent: AAP to AA:BB:CC:DD:EE:FF is closing"
+            );
+        }
+
+        /// A command its link went in the middle of tells its caller the
+        /// connection was lost, as it may have reached the device; not that
+        /// it failed.
+        #[test]
+        fn a_command_cut_short_says_the_connection_was_lost() {
+            let (done, result) = oneshot::channel();
+            let command = Command::NoiseControl(aap::NoiseMode::Off);
+            drop(Underway {
+                mac: MAC,
+                command,
+                done: Some(done),
+            });
+            let lost = result.blocking_recv().unwrap().unwrap_err();
+            assert!(lost.downcast_ref::<ConnectionLost>().is_some(), "{lost:#}");
+            assert_eq!(
+                lost.to_string(),
+                "lost the connection to AA:BB:CC:DD:EE:FF during the switch to Off"
+            );
+        }
+
+        /// A command queued on a link that goes before carrying it out is
+        /// not lost without a word: its caller hears that it was not done,
+        /// and nothing goes out (#54).
+        #[tokio::test]
+        async fn a_command_its_link_drops_unsent_fails() {
+            let (coordinator, link, fake, _dir) = opened().await;
+            let sent = coordinator.command(MAC, Command::NoiseControl(aap::NoiseMode::Off));
+            drop(link);
+
+            let failed = timeout(TIMEOUT, sent).await.unwrap();
+            assert_eq!(
+                failed.unwrap_err().to_string(),
+                "AAP to AA:BB:CC:DD:EE:FF went before the switch to Off was sent"
+            );
+            let mut buf = [0u8; 64];
+            let read = timeout(TIMEOUT, fake.recv(&mut buf)).await.unwrap();
+            assert_eq!(read.unwrap().bytes_read(), 0, "closed, with nothing sent");
+        }
+
+        /// A send that fails reaches its caller, records no mode, and leaves
+        /// the link up: what the device sends is still read.
+        #[tokio::test]
+        async fn a_command_that_cannot_be_sent_fails() {
+            let (coordinator, link, fake, _dir) = opened().await;
+            // The app's sends fail from here; the fake's still arrive.
+            fake.shutdown(std::net::Shutdown::Read).unwrap();
+            let run = tokio::spawn(link.run());
+
+            let transparency = Command::NoiseControl(aap::NoiseMode::Transparency);
+            let failed = timeout(TIMEOUT, coordinator.command(MAC, transparency))
+                .await
+                .unwrap();
+            let failed = format!("{:#}", failed.unwrap_err());
+            assert!(
+                failed.starts_with("failed to send noise control"),
+                "{failed}"
+            );
+
+            fake.send(&BATTERY).await.unwrap();
+            let mut rx = coordinator.subscribe();
+            let state = timeout(TIMEOUT, rx.wait_for(|s| s.states.contains_key(&MAC)))
+                .await
+                .unwrap()
+                .unwrap()
+                .states[&MAC]
+                .clone();
+            assert_eq!(state.noise_mode, None, "the mode of a command not sent");
+            drop(fake);
+            timeout(TIMEOUT, run).await.unwrap().unwrap();
         }
     }
 }

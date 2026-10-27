@@ -1,8 +1,10 @@
 //! GTK4/libadwaita interface.
 //!
 //! Updates arrive from the coordinator over a watch channel consumed on the GTK
-//! main context. That is the only path into the UI: GTK types are !Send, so a
-//! background task can never touch a widget directly.
+//! main context. That is the only path into the UI's state: GTK types are
+//! !Send, so a background task can never touch a widget directly. Commands go
+//! out with `Coordinator::command`, and each one's result comes back to the main
+//! context too, where a failure goes to a toast.
 //!
 //! The controls, and the labels a test reads, carry an ID set with
 //! `set_widget_name`, for the test harness (#74) to find them by; `automation`
