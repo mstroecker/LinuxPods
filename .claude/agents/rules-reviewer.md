@@ -83,7 +83,7 @@ carries a GTK object toward tokio.
 - uses a sentinel (0, 255, -1) for an unknown battery instead of `None`, or lets a level
   above 100, or the level beside an AAP status Disconnected (`0x04`), through as a reading.
 
-**Parsing and tests.** `aap::battery`, `aap::keys`, `aap::noise`, `ble::parser` and
+**Parsing and tests.** `aap::battery`, `aap::keys`, `aap::noise`, `aap::message`, `ble::parser` and
 `ble::decrypt` take bytes and return values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
 literals; flag what it cannot: a test reading the real keystore (`~/.local/share/linuxpods`,

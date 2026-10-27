@@ -8,15 +8,25 @@
 //! permits it at all. See `docs/aap-noise-control.md` for the verified layout
 //! and why the response cannot be used as an acknowledgement.
 
+use crate::aap::message::{self, HEADER};
+
 /// Command byte position, shared by every AAP packet.
-const CMD: usize = 4;
+const CMD: usize = message::OPCODE;
 /// Sub-command position within the settings family.
 const SUB_CMD: usize = 6;
 /// Mode byte position.
 const MODE: usize = 7;
 
-/// The settings command family.
+/// The settings command family, the opcode a mode report comes under.
+pub const OPCODE: u8 = CMD_SETTINGS;
 const CMD_SETTINGS: u8 = 0x09;
+
+/// Enables conversational awareness and adaptive transparency. Without it,
+/// Adaptive is unavailable - see [`set_packet`].
+pub const ENABLE_FEATURES: [u8; 14] = [
+    HEADER[0], HEADER[1], HEADER[2], HEADER[3], 0x4D, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00,
+];
 /// Noise control within that family. The family carries a dozen other
 /// sub-commands, so this has to be checked too - see [`is_noise_mode_packet`].
 const SUB_NOISE_CONTROL: u8 = 0x0D;
@@ -114,10 +124,10 @@ pub enum NoiseParseError {
 /// see `settings_report`.
 fn settings_packet(sub_cmd: u8, value: u8) -> [u8; 11] {
     [
-        0x04,
-        0x00,
-        0x04,
-        0x00,
+        HEADER[0],
+        HEADER[1],
+        HEADER[2],
+        HEADER[3],
         CMD_SETTINGS,
         0x00,
         sub_cmd,
@@ -174,10 +184,10 @@ pub fn settings_report(sub_cmd: u8, value: &[u8]) -> [u8; 11] {
 #[cfg(any(test, feature = "harness"))]
 pub fn settings_changed_packet() -> [u8; 10] {
     [
-        0x04,
-        0x00,
-        0x04,
-        0x00,
+        HEADER[0],
+        HEADER[1],
+        HEADER[2],
+        HEADER[3],
         CMD_SETTINGS_CHANGED,
         0x00,
         0x02,
@@ -202,14 +212,17 @@ pub fn parse_allow_off_packet(packet: &[u8]) -> Option<bool> {
     }
 }
 
-/// True for a mode report.
+/// True for a mode report: the AAP header, then 0x09 at byte 4 and 0x0D at
+/// byte 6.
 ///
 /// Byte 6 matters as much as byte 4: the 0x09 family also carries 0x17, 0x1B,
 /// 0x24 and a dozen more sub-commands, all of which arrive in the startup dump.
 /// Treating any 0x09 packet as noise control reads an unrelated setting's value
 /// as a mode.
 pub fn is_noise_mode_packet(packet: &[u8]) -> bool {
-    packet.len() > MODE && packet[CMD] == CMD_SETTINGS && packet[SUB_CMD] == SUB_NOISE_CONTROL
+    packet.len() > MODE
+        && message::opcode(packet) == Some(CMD_SETTINGS)
+        && packet[SUB_CMD] == SUB_NOISE_CONTROL
 }
 
 /// Reads the mode out of a report.
@@ -217,6 +230,12 @@ pub fn parse_noise_mode_packet(packet: &[u8]) -> Result<NoiseMode, NoiseParseErr
     if !is_noise_mode_packet(packet) {
         return Err(NoiseParseError::NotNoiseControlPacket);
     }
+    read(packet)
+}
+
+/// [`parse_noise_mode_packet`] past its header check, for a packet
+/// [`is_noise_mode_packet`] has accepted.
+pub(super) fn read(packet: &[u8]) -> Result<NoiseMode, NoiseParseError> {
     NoiseMode::from_byte(packet[MODE]).ok_or(NoiseParseError::UnknownMode(packet[MODE]))
 }
 

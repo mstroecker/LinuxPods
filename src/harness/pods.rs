@@ -48,8 +48,9 @@ pub const SILENT_HANG_UP: Duration = Duration::from_secs(9);
 /// Where an AAP packet carries its command.
 const OPCODE: usize = 4;
 
-// The requests `aap::client` sends, known by their command byte. The packets
-// themselves are private to the client.
+// The requests `aap::Client::open` sends, known by their command byte, as a
+// device would know them - not by the packets beside the app's parsers, which
+// a change on the wire would change here along with them.
 const OP_HANDSHAKE: u8 = 0x01;
 const OP_NOTIFICATIONS: u8 = 0x0F;
 const OP_FEATURES: u8 = 0x4D;

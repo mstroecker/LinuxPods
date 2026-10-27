@@ -12,6 +12,11 @@
 #[cfg(all(feature = "harness", not(debug_assertions)))]
 compile_error!("the `harness` feature is for debug builds only - build without --release");
 
+/// The length of a proximity key, AES-128: the ENC_KEY that AAP hands over
+/// (`aap::keys`) and BLE decrypts advertisements with (`ble::decrypt`). Here
+/// rather than in either, so neither layer depends on the other for it.
+pub const KEY_LEN: usize = 16;
+
 pub mod aap;
 pub mod attachment;
 pub mod ble;

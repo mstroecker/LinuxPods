@@ -1,11 +1,12 @@
-//! AAP proximity key packet parsing.
+//! AAP proximity keys: the request for them, and the packet that carries them.
 //!
 //! Packet layout:
 //!   0-1: header (04 00)   2-3: command (04 00)
 //!   4:   key marker 0x31  5: unknown   6: key count
 //! Then per key: [type] [unknown] [len] [unknown] [data...]
 
-use crate::ble::decrypt::KEY_LEN;
+use crate::KEY_LEN;
+use crate::aap::message::{self, HEADER};
 
 /// Identity-Resolving Key / Encryption Key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,12 +72,18 @@ pub enum KeyParseError {
     BadEncryptionKeyLen(usize),
 }
 
-const HEADER: [u8; 4] = [0x04, 0x00, 0x04, 0x00];
-const KEY_MARKER: u8 = 0x31;
+/// The key packet's opcode, the key marker.
+pub const OPCODE: u8 = 0x31;
+const KEY_MARKER: u8 = OPCODE;
 const MAX_KEYS: usize = 10;
 
+/// Requests the proximity pairing encryption keys (IRK and ENC_KEY).
+pub const REQUEST: [u8; 8] = [
+    HEADER[0], HEADER[1], HEADER[2], HEADER[3], 0x30, 0x00, 0x05, 0x00,
+];
+
 pub fn is_key_packet(packet: &[u8]) -> bool {
-    packet.len() >= 7 && packet[..4] == HEADER && packet[4] == KEY_MARKER
+    packet.len() >= 7 && message::opcode(packet) == Some(KEY_MARKER)
 }
 
 pub fn parse_proximity_keys(packet: &[u8]) -> Result<Vec<ProximityKey>, KeyParseError> {
@@ -86,7 +93,12 @@ pub fn parse_proximity_keys(packet: &[u8]) -> Result<Vec<ProximityKey>, KeyParse
     if !is_key_packet(packet) {
         return Err(KeyParseError::NotKeyPacket);
     }
+    read(packet)
+}
 
+/// [`parse_proximity_keys`] past its header check, for a packet
+/// [`is_key_packet`] has accepted.
+pub(super) fn read(packet: &[u8]) -> Result<Vec<ProximityKey>, KeyParseError> {
     let key_count = packet[6] as usize;
     if key_count == 0 {
         return Err(KeyParseError::NoKeys);

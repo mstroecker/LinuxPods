@@ -9,7 +9,7 @@ use bluer::Address;
 
 /// Bytes 9..25 of the advertisement payload.
 pub const ENCRYPTED_LEN: usize = 16;
-pub const KEY_LEN: usize = 16;
+pub use crate::KEY_LEN;
 
 /// Where the device's MAC suffix sits inside the decrypted payload.
 const MAC_SUFFIX_RANGE: std::ops::Range<usize> = 7..10;
