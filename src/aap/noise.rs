@@ -6,7 +6,7 @@
 //! device sends it in its startup dump and whenever the mode is changed from
 //! another device. Off additionally needs sub-command 0x34, the setting that
 //! permits it at all. See `docs/aap-noise-control.md` for the verified layout
-//! and why the response cannot be used as an acknowledgement.
+//! and why the response cannot be used as an acknowledgment.
 
 use std::time::{Duration, Instant};
 

@@ -190,7 +190,7 @@ mod tests {
     }
 
     /// The header is checked once, for every kind. A noise control report
-    /// used to be recognised by bytes 4 and 6 alone, whatever came before
+    /// used to be recognized by bytes 4 and 6 alone, whatever came before
     /// them, while battery and key packets needed the header: a packet of
     /// another kind - shaped as the handshake's answer, say - that carried
     /// 0x09 and 0x0D there would have read as a mode.

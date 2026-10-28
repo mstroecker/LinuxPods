@@ -227,7 +227,7 @@ when a key is stored. Both protocols are documented in full:
   decryption, and how a device is identified behind a randomized address
 - [`docs/aap-key-retrieval.md`](docs/aap-key-retrieval.md) - retrieving the IRK and ENC_KEY
 - [`docs/aap-noise-control.md`](docs/aap-noise-control.md) - switching noise control mode,
-  and why the device's answer is no acknowledgement
+  and why the device's answer is no acknowledgment
 
 ## Development
 

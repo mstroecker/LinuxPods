@@ -26,9 +26,9 @@
 //! What bluetoothd does to its clients when an adapter or bluetoothd itself
 //! goes, which the app has to recover from (#50):
 //!
-//! - [`FakeBluez::set_powered`] switches an adapter on or off, signalling
+//! - [`FakeBluez::set_powered`] switches an adapter on or off, signaling
 //!   `Powered`. Off, it does what bluetoothd's `adapter_stop` does: every
-//!   client's discovery there ends, with `Discovering` signalled; the devices
+//!   client's discovery there ends, with `Discovering` signaled; the devices
 //!   it only heard advertising go; and its connected devices disconnect. Its
 //!   paired devices and the providers registered with it stay, as they do in
 //!   bluetoothd. Nothing connects to a device on an adapter that is off.
@@ -63,7 +63,7 @@
 //!
 //! # Advertisements
 //!
-//! Signalled as bluetoothd's source has it, until the captures of #71 confirm
+//! Signaled as bluetoothd's source has it, until the captures of #71 confirm
 //! or correct that:
 //!
 //! - An address an adapter hears for the first time becomes a device object
@@ -493,7 +493,7 @@ impl FakeBluez {
     /// `BatteryProviderManager1` of its own. bluetoothd names them `hci0`,
     /// `hci1` and on; any name that makes one path element will do.
     ///
-    /// Signalled with `InterfacesAdded` once the name is taken, as a USB
+    /// Signaled with `InterfacesAdded` once the name is taken, as a USB
     /// dongle plugged in is. One that was here before is the same controller,
     /// and has the devices paired with it back, disconnected.
     pub async fn add_adapter(&self, name: &str, powered: bool) -> Result<()> {
@@ -564,7 +564,7 @@ impl FakeBluez {
         Ok(())
     }
 
-    /// Powers the adapter called `name` on or off, signalling `Powered`;
+    /// Powers the adapter called `name` on or off, signaling `Powered`;
     /// setting what is already set signals nothing. Off, it stops as
     /// bluetoothd's `adapter_stop` does - see the module docs.
     pub async fn set_powered(&self, name: &str, powered: bool) -> Result<()> {
@@ -599,7 +599,7 @@ impl FakeBluez {
 
     /// What bluetoothd's `adapter_stop` does to an adapter's clients: their
     /// discovery there ends, the devices it only heard advertising go, and its
-    /// connected devices disconnect, each signalled.
+    /// connected devices disconnect, each signaled.
     async fn stop_adapter(&self, name: &str) {
         let (ended, heard, paired) = {
             let mut state = self.state();
@@ -795,7 +795,7 @@ impl FakeBluez {
         Ok(())
     }
 
-    /// Connects or disconnects a paired device. A change is signalled, as
+    /// Connects or disconnects a paired device. A change is signaled, as
     /// bluetoothd signals it; setting what is already set signals nothing.
     /// Nothing connects on an adapter that is off.
     pub async fn set_connected(&self, address: Address, connected: bool) -> Result<()> {
@@ -817,7 +817,7 @@ impl FakeBluez {
     }
 
     /// Sets a paired device's `Connected` on the adapter called `adapter`,
-    /// signalling a change.
+    /// signaling a change.
     async fn signal_connected(
         &self,
         adapter: &str,
@@ -839,7 +839,7 @@ impl FakeBluez {
     }
 
     /// Lists the AirPods service among a paired device's services, or takes it
-    /// out, signalling the change as bluetoothd signals services found. Without
+    /// out, signaling the change as bluetoothd signals services found. Without
     /// it, the device is ordinary headphones to the app; and a pair that
     /// connects before it is listed is one being paired for the first time,
     /// connected before service discovery is done.
@@ -893,7 +893,7 @@ impl FakeBluez {
 
     /// An advertisement from `address`, `apple_data` the value of its Apple
     /// entry in `ManufacturerData`, heard by every adapter that discovers.
-    /// Signalled as the module docs describe: returns whether any adapter
+    /// Signaled as the module docs describe: returns whether any adapter
     /// heard it.
     pub async fn advertise(&self, address: Address, apple_data: &[u8]) -> Result<bool> {
         let hearing: Vec<(String, bool)> = {
@@ -1998,7 +1998,7 @@ mod tests {
         assert_eq!(err.to_string(), "no Bluetooth adapter is scanning");
     }
 
-    /// A connection changing is signalled; setting it as it was is not.
+    /// A connection changing is signaled; setting it as it was is not.
     #[tokio::test]
     async fn connections_reach_the_watch() {
         let (bus, bluez) = served().await;
@@ -2017,7 +2017,7 @@ mod tests {
     }
 
     /// Without the AirPods service a pair is not AirPods to the app, connected
-    /// or not; listing it is signalled, and reaches the watch as a change of
+    /// or not; listing it is signaled, and reaches the watch as a change of
     /// services rather than of the connection.
     #[tokio::test]
     async fn services_reach_the_watch() {
@@ -2045,7 +2045,7 @@ mod tests {
     /// it, and an address gone quiet goes - and nothing is heard while no one
     /// discovers.
     #[tokio::test]
-    async fn advertisements_are_signalled_as_bluetoothd_does() {
+    async fn advertisements_are_signaled_as_bluetoothd_does() {
         let (bus, bluez) = served().await;
         let client = bus.connect().await.unwrap();
         let rule = MatchRule::builder()
@@ -2470,7 +2470,7 @@ mod tests {
     /// Powered off, an adapter stops as bluetoothd's does: discovery there
     /// ends, what it only heard advertising goes, its connected devices
     /// disconnect, and nothing connects until it is on again. Its pairings and
-    /// providers stay. Each change is signalled.
+    /// providers stay. Each change is signaled.
     #[tokio::test]
     async fn powering_off_stops_the_adapter() {
         let (bus, bluez) = served().await;
@@ -2546,7 +2546,7 @@ mod tests {
         assert!(bluez.set_powered("hci9", true).await.is_err(), "no adapter");
     }
 
-    /// An adapter is plugged in and out at any time, each signalled. Out, it
+    /// An adapter is plugged in and out at any time, each signaled. Out, it
     /// takes its devices, providers and batteries along and leaves the other
     /// adapter alone; in again, it is the same controller, with its pairs back,
     /// disconnected.

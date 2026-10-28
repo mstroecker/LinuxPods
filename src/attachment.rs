@@ -312,7 +312,7 @@ impl Attachment {
             }
         }
         // Names for the device switcher. Read up front so paired devices are
-        // labelled before any of them connects, then again on every connection
+        // labeled before any of them connects, then again on every connection
         // event, and on a services change of a connected device that is not
         // attached yet - a rename made while the app was running takes effect at
         // the next one, and a newly paired pair shows up with its services, which

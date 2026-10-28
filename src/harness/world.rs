@@ -14,7 +14,7 @@
 //!   random address the model rotates, so a new device object every ten
 //!   seconds. Every adapter that discovers hears it, whichever the pair is
 //!   paired with, as radios in one room do, so with two adapters each
-//!   advertisement is signalled twice, from a device under each.
+//!   advertisement is signaled twice, from a device under each.
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
@@ -420,7 +420,7 @@ impl World {
     /// `count` advertisers no key decrypts, as a BLE spam flood brings: each a
     /// pair with keys nobody holds, so its advertisement parses but stays
     /// closed, advertising once, from an address of its own. A new address is
-    /// signalled only as it appears, with `InterfacesAdded`: the scanner reads
+    /// signaled only as it appears, with `InterfacesAdded`: the scanner reads
     /// it, attachment's connection watch does not. Gone after the fake
     /// BlueZ's timeout.
     pub async fn flood(&self, count: u32) -> Result<()> {
@@ -429,7 +429,7 @@ impl World {
 
     /// `count` advertisers no key decrypts, as [`World::flood`] brings, each
     /// advertising `times` times from one address. Every advertisement after
-    /// an advertiser's first is signalled as a change, with
+    /// an advertiser's first is signaled as a change, with
     /// `PropertiesChanged`, which attachment's connection watch subscribes to
     /// as well as the scanner.
     pub async fn flood_repeating(&self, count: u32, times: u32) -> Result<()> {
@@ -1062,12 +1062,12 @@ mod tests {
         .expect("heard the flood, from three addresses");
     }
 
-    /// A flood is signalled only as its addresses appear, and a repeating
+    /// A flood is signaled only as its addresses appear, and a repeating
     /// flood as changes after that: what attachment's connection watch
     /// subscribes to, and the #90 test relies on. A world with no pair in it,
-    /// so that every device signalled is an advertiser's.
+    /// so that every device signaled is an advertiser's.
     #[tokio::test]
-    async fn only_a_repeating_flood_is_signalled_as_changes() {
+    async fn only_a_repeating_flood_is_signaled_as_changes() {
         let bus = PrivateBus::start().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let world = World::new(bus.address(), dir.path()).await.unwrap();
@@ -1101,7 +1101,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Signalled in order, so a change from the plain flood would come
+        // Signaled in order, so a change from the plain flood would come
         // among the first four.
         world.flood(3).await.unwrap();
         world.flood_repeating(2, 3).await.unwrap();

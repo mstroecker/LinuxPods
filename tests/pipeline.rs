@@ -1189,7 +1189,7 @@ async fn a_device_that_isnt_airpods_is_never_attached() {
 }
 
 /// A pair being paired for the first time connects before service discovery
-/// lists the AirPods service, so it is not recognised as it connects. It is
+/// lists the AirPods service, so it is not recognized as it connects. It is
 /// attached when its services change to list it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pair_is_attached_once_its_services_mark_it_as_airpods() {
@@ -1209,7 +1209,7 @@ async fn a_pair_is_attached_once_its_services_mark_it_as_airpods() {
     app.attach(OTHER).await;
     assert!(
         !app.updates.borrow().is_connected(PAIR),
-        "attached before it could be recognised"
+        "attached before it could be recognized"
     );
 
     bluez.set_airpods_service(PAIR, true).await.unwrap();
@@ -1345,7 +1345,7 @@ async fn a_pair_on_an_adapter_other_than_hci0_is_heard_attached_and_given_its_ba
 }
 
 /// Two adapters with a pair on each. Both adapters hear both pairs, so each
-/// advertisement is signalled twice, from a device of its address under each:
+/// advertisement is signaled twice, from a device of its address under each:
 /// the two make one reading per pair, to the percent. Each pair attaches
 /// through its own paired device, and its battery goes to its own adapter's
 /// manager - never through the device the other adapter made of its address,
@@ -1478,19 +1478,19 @@ async fn a_flood_while_a_pair_attaches_does_not_stall_attachment() {
     .await;
 }
 
-/// A device signalling its services over and over never holds up a pair's
+/// A device signaling its services over and over never holds up a pair's
 /// attachment. An advertiser can list the AirPods service and a new one in
 /// every advertisement, and bluetoothd signals the device's whole list each
 /// time, AirPods service and all. Regression: each signal was queued for
 /// attachment, which asks BlueZ about the device three times for each. Ten
-/// thousand, signalled in a couple of seconds, took it nearly a minute, and a
+/// thousand, signaled in a couple of seconds, took it nearly a minute, and a
 /// pair connecting after them waited behind them all.
 ///
 /// The fake BlueZ lists services only on paired devices, so the advertiser is
 /// one paired with it that never connects. To attachment that is the same:
 /// whether the device is connected is all it asks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_resignalling_its_services_does_not_delay_attachment() {
+async fn a_device_resignaling_its_services_does_not_delay_attachment() {
     const ADVERTISER: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x04]);
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
     let bluez = fixture.world.bluez();
@@ -2085,7 +2085,7 @@ async fn a_reconnect_keeps_the_battery_exported() {
         levels(s, PAIR, DataSource::Aap) == Some(PAIR_LEVELS)
     })
     .await;
-    // Signalled after anything the reconnect brought GNOME Settings, so once
+    // Signaled after anything the reconnect brought GNOME Settings, so once
     // it shows, a withdrawal would have too.
     let changed = [PAIR_LEVELS[0] - 5, PAIR_LEVELS[1] - 3, PAIR_LEVELS[2]];
     fixture.set_levels(PAIR, changed).await;
@@ -2106,7 +2106,7 @@ async fn a_reconnect_keeps_the_battery_exported() {
 /// services changed at every address it rotated to cost three calls each.
 ///
 /// The pair, connected before the app starts but not yet listing the AirPods
-/// service, is attached by a services change of its own, signalled after the
+/// service, is attached by a services change of its own, signaled after the
 /// device's: services changes are handled in the order they came, so once
 /// attachment calls on the pair, its calls on the device are all in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

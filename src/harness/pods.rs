@@ -3,7 +3,7 @@
 //! Pure - state in, bytes out. There are no sockets, no D-Bus and no clock
 //! here: time comes in as an argument, an offset from an epoch the caller
 //! picks - the fake world's start, say - and must not run backwards. That
-//! keeps every behaviour testable without waiting, the timed ones included,
+//! keeps every behavior testable without waiting, the timed ones included,
 //! and leaves the I/O to the fake BlueZ and the world around it (#72).
 //!
 //! Everything sent goes through the builders beside the app's parsers -
@@ -18,7 +18,7 @@
 //!   ([`Pods::receive`]) and carries out whatever [`Pods::poll`] returns.
 //!   Replies, notifications and the timed quirks all come out of `poll`.
 //!
-//! Where the hardware's behaviour is not recorded, the fake makes a choice and
+//! Where the hardware's behavior is not recorded, the fake makes a choice and
 //! its documentation says so; the reference captures of #71 are what can
 //! correct it.
 

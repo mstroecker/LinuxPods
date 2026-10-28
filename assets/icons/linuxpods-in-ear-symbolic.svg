@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   An ear, for "this pod is in an ear". Symbolic: drawn with fills only, since GTK
-  recolours a symbolic icon by forcing the fill of every path - a stroked outline
+  recolors a symbolic icon by forcing the fill of every path - a stroked outline
   would come out as a solid blob. 16px grid, gaps of at least a pixel.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
