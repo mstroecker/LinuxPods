@@ -44,7 +44,7 @@ where the logs are. Only one world runs at a time.
 | `empty` | nothing; add pairs with `AddPods` |
 
 Each new pair starts with both pods in the open case: left 80%, right 70%, case 50%,
-Noise Cancelling. A scenario's pairs have their keys saved in the app's keystore before
+Noise Cancellation. A scenario's pairs have their keys saved in the app's keystore before
 it starts, as though each had connected once before. A pair added later with `AddPods`
 has no key until it connects, so until then the app shows nothing of it.
 

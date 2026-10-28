@@ -50,7 +50,7 @@ const CMD_SETTINGS_CHANGED: u8 = 0x4B;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoiseMode {
     Off,
-    NoiseCancelling,
+    NoiseCancellation,
     Transparency,
     Adaptive,
 }
@@ -61,7 +61,7 @@ impl NoiseMode {
     pub const ALL: [NoiseMode; 4] = [
         Self::Transparency,
         Self::Adaptive,
-        Self::NoiseCancelling,
+        Self::NoiseCancellation,
         Self::Off,
     ];
 
@@ -69,7 +69,7 @@ impl NoiseMode {
     pub fn from_byte(value: u8) -> Option<Self> {
         match value {
             0x01 => Some(Self::Off),
-            0x02 => Some(Self::NoiseCancelling),
+            0x02 => Some(Self::NoiseCancellation),
             0x03 => Some(Self::Transparency),
             0x04 => Some(Self::Adaptive),
             _ => None,
@@ -79,7 +79,7 @@ impl NoiseMode {
     pub fn as_byte(self) -> u8 {
         match self {
             Self::Off => 0x01,
-            Self::NoiseCancelling => 0x02,
+            Self::NoiseCancellation => 0x02,
             Self::Transparency => 0x03,
             Self::Adaptive => 0x04,
         }
@@ -88,7 +88,7 @@ impl NoiseMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "Off",
-            Self::NoiseCancelling => "Noise Cancelling",
+            Self::NoiseCancellation => "Noise Cancellation",
             Self::Transparency => "Transparency",
             Self::Adaptive => "Adaptive",
         }
@@ -98,7 +98,7 @@ impl NoiseMode {
     pub fn description(self) -> &'static str {
         match self {
             Self::Off => "Noise control disabled",
-            Self::NoiseCancelling => "Block out background noise",
+            Self::NoiseCancellation => "Block out background noise",
             Self::Transparency => "Hear the world around you",
             Self::Adaptive => "Automatically adjusts to your environment",
         }
@@ -122,7 +122,7 @@ pub const STALE_REPORT_WINDOW: Duration = Duration::from_secs(2);
 /// A command's mode is taken at once: the device's answer cannot confirm it -
 /// see the module docs. Its reports are taken as they come, the startup dump
 /// and a mode changed from a phone among them, with one exception. After Off
-/// was set from Noise Cancelling, a pair reported Noise Cancelling 0.33 s
+/// was set from Noise Cancellation, a pair reported Noise Cancellation 0.33 s
 /// later and Off only at 1.4 s, and taken as it came, that report put the
 /// previous mode back on show for a second (#113). So a report of the mode a
 /// command replaced is held off until the mode set is reported, or
@@ -340,7 +340,7 @@ mod tests {
         let hex = |mode| crate::hex(&set_packet(mode));
         assert_eq!(hex(NoiseMode::Off), "04 00 04 00 09 00 0d 01 00 00 00");
         assert_eq!(
-            hex(NoiseMode::NoiseCancelling),
+            hex(NoiseMode::NoiseCancellation),
             "04 00 04 00 09 00 0d 02 00 00 00"
         );
         assert_eq!(
@@ -488,17 +488,17 @@ mod tests {
         Duration::from_millis(ms)
     }
 
-    /// The #71 capture: Off from Noise Cancelling, the old mode reported at
+    /// The #71 capture: Off from Noise Cancellation, the old mode reported at
     /// +0.33 s and Off at +1.4 s. Off stays on show throughout, and from the
     /// report of Off on, any report counts.
     #[test]
     fn a_report_of_the_replaced_mode_is_held_until_the_mode_set_is_reported() {
         let start = Instant::now();
-        let mut state = reported(NoiseMode::NoiseCancelling, start);
+        let mut state = reported(NoiseMode::NoiseCancellation, start);
         let sent = start + ms(1000);
         assert!(state.set(NoiseMode::Off, sent));
         assert_eq!(
-            state.report(NoiseMode::NoiseCancelling, sent + ms(330)),
+            state.report(NoiseMode::NoiseCancellation, sent + ms(330)),
             Report::Stale
         );
         assert_eq!(state.mode(), Some(NoiseMode::Off));
@@ -509,10 +509,10 @@ mod tests {
 
         // Changed from a phone, straight after.
         assert_eq!(
-            state.report(NoiseMode::NoiseCancelling, sent + ms(1500)),
+            state.report(NoiseMode::NoiseCancellation, sent + ms(1500)),
             Report::Changed
         );
-        assert_eq!(state.mode(), Some(NoiseMode::NoiseCancelling));
+        assert_eq!(state.mode(), Some(NoiseMode::NoiseCancellation));
     }
 
     /// With no report of the mode set, the hold lasts the window and no
@@ -536,14 +536,14 @@ mod tests {
     #[test]
     fn another_mode_is_taken_at_once_and_ends_the_hold() {
         let start = Instant::now();
-        let mut state = reported(NoiseMode::NoiseCancelling, start);
+        let mut state = reported(NoiseMode::NoiseCancellation, start);
         state.set(NoiseMode::Off, start);
         assert_eq!(
             state.report(NoiseMode::Transparency, start + ms(100)),
             Report::Changed
         );
         assert_eq!(
-            state.report(NoiseMode::NoiseCancelling, start + ms(200)),
+            state.report(NoiseMode::NoiseCancellation, start + ms(200)),
             Report::Changed
         );
     }
@@ -553,18 +553,18 @@ mod tests {
     #[test]
     fn the_hold_follows_the_last_command() {
         let start = Instant::now();
-        let mut state = reported(NoiseMode::NoiseCancelling, start);
+        let mut state = reported(NoiseMode::NoiseCancellation, start);
         state.set(NoiseMode::Off, start);
         assert!(!state.set(NoiseMode::Off, start + ms(1500)));
         assert_eq!(
-            state.report(NoiseMode::NoiseCancelling, start + STALE_REPORT_WINDOW),
+            state.report(NoiseMode::NoiseCancellation, start + STALE_REPORT_WINDOW),
             Report::Changed,
             "held from the first Off"
         );
 
         state.set(NoiseMode::Transparency, start + ms(3000));
         assert_eq!(
-            state.report(NoiseMode::NoiseCancelling, start + ms(3100)),
+            state.report(NoiseMode::NoiseCancellation, start + ms(3100)),
             Report::Stale
         );
         state.set(NoiseMode::Adaptive, start + ms(3200));

@@ -97,13 +97,13 @@ What answers a mode change depends on the model, and nothing answers it reliably
 | Mode | Sent | `0x0D` echo | `0x4B` |
 |---|---|---|---|
 | Adaptive | `0D 04` | +1.1 s | none |
-| Noise Cancelling | `0D 02` | +1.0 s | none |
+| Noise Cancellation | `0D 02` | +1.0 s | none |
 | Off | `34 01` then `0D 01`, same ms | stale `0D 02` at +0.33 s, then `0D 01` at +1.4 s | none |
 | Transparency | `0D 03` | +1.0 s | none |
 
 **Integration note:** Treat noise control commands as fire-and-forget. Update local state optimistically after sending — do not wait for a `0x0D` confirmation packet. `Coordinator::set_noise_control` does exactly that: it records the mode as soon as the packet is away and broadcasts, and the command is done - its caller, waiting on `Coordinator::command`, hears so then. A later `0x0D` report merely confirms the mode - unless it is a stale one, below.
 
-**Stale reports.** A `0x0D` report can carry the mode a change replaced. Switched from Noise Cancelling to Off, a pair reported `0D 02` 0.33 s later and `0D 01` only at 1.4 s (#71); taken as it came, the first put Noise Cancelling back on show for a second (#113). So a report of the replaced mode is held off until the mode set is reported, or 2 s pass - `aap::noise::ModeState`. After that any report wins again, since the mode may have been changed on another device.
+**Stale reports.** A `0x0D` report can carry the mode a change replaced. Switched from Noise Cancellation to Off, a pair reported `0D 02` 0.33 s later and `0D 01` only at 1.4 s (#71); taken as it came, the first put Noise Cancellation back on show for a second (#113). So a report of the replaced mode is held off until the mode set is reported, or 2 s pass - `aap::noise::ModeState`. After that any report wins again, since the mode may have been changed on another device.
 
 A report held off is dropped, not deferred to the end of the 2 s. In run 1 below, Transparency and Adaptive each took effect and were followed by a report of the old mode, `0x02`, with no echo of the new one after it: applied at expiry, that report would show the wrong mode just the same. If a dropped report was right after all, the next report corrects the mode.
 

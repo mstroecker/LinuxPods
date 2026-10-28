@@ -1908,7 +1908,7 @@ mod tests {
     /// where `set_noise_control` records it, since sending needs a socket.
     #[tokio::test]
     async fn a_stale_report_does_not_undo_a_command() {
-        use aap::NoiseMode::{NoiseCancelling, Off};
+        use aap::NoiseMode::{NoiseCancellation, Off};
 
         let mut inner = inner_with(vec![]);
         inner.links.insert(AA, link(Some(aap_state(80))));
@@ -1917,7 +1917,7 @@ mod tests {
         let mode =
             |coordinator: &Coordinator| coordinator.subscribe().borrow().states[&AA].noise_mode;
         coordinator
-            .handle_noise_mode(NoiseCancelling, AA, &client)
+            .handle_noise_mode(NoiseCancellation, AA, &client)
             .await;
         {
             let mut inner = coordinator.inner.write().await;
@@ -1928,16 +1928,16 @@ mod tests {
         let _ = rx.borrow_and_update();
 
         coordinator
-            .handle_noise_mode(NoiseCancelling, AA, &client)
+            .handle_noise_mode(NoiseCancellation, AA, &client)
             .await;
         assert_eq!(mode(&coordinator), Some(Off));
         assert!(!rx.has_changed().unwrap(), "nothing to broadcast");
 
         coordinator.handle_noise_mode(Off, AA, &client).await;
         coordinator
-            .handle_noise_mode(NoiseCancelling, AA, &client)
+            .handle_noise_mode(NoiseCancellation, AA, &client)
             .await;
-        assert_eq!(mode(&coordinator), Some(NoiseCancelling));
+        assert_eq!(mode(&coordinator), Some(NoiseCancellation));
     }
 
     /// A read loop outliving its link reports the old session's mode, which
