@@ -21,10 +21,10 @@ src/
 ├── lib.rs         # Library target so layers can be driven from tests and examples
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
 ├── aap/           # Apple Accessory Protocol over L2CAP (PSM 4097): session, decode
-├── ble/           # Scanner, Apple Continuity parser, AES decryption
+├── ble/           # Scanner, Apple Continuity parser, AES decryption, RPA resolution
 ├── bluez.rs       # Adapters, devices, connection watch; a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
-├── keystore.rs    # Encryption keys at ~/.local/share/linuxpods/keys.json (0600)
+├── keystore.rs    # ENC_KEY and IRK per pair at ~/.local/share/linuxpods/keys.json (0600)
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
 ├── ui/            # GTK4/libadwaita: window, Control page, Preferences, automation
 ├── harness/       # Harness only: fake AirPods, fake BlueZ, the fake world
@@ -38,14 +38,14 @@ and the tray's window commands on an `async-channel`, both consumed with
 queue (`Coordinator::command`), and each result comes back on a oneshot. Never touch a
 widget from a tokio task.
 
-**State.** `Coordinator` merges AAP (exact, needs L2CAP) and BLE (exact, and only what a
-stored key decrypts, which also identifies the pair) **per device**, keyed by the
+**State.** `Coordinator` merges AAP (exact, needs L2CAP) and BLE (exact, and only from an
+address a stored IRK resolves, decrypted by that pair's key) **per device**, keyed by the
 **real** MAC.
 
 - `supersedes_ble` is per-device, never global - a global pause blanks out every other
   pair - and holds only once the link has a reading. Hidden from link-up, the device
   showed nothing until its first battery packet, and its GNOME Settings battery was
-  withdrawn and exported again on every reconnect (#62). It runs *after* decryption,
+  withdrawn and exported again on every reconnect (#62). It runs *after* identification,
   since an advertisement carries only a random MAC until then.
 - `subscribe()` returns a `watch::Receiver`: one latest-wins value every consumer sees,
   so UI, tray and attachment never compete for a snapshot, and a slow one skips stale
@@ -105,11 +105,17 @@ stored key decrypts, which also identifies the pair) **per device**, keyed by th
   `handle_advertisement` keeps the cached lid for it; with bit 4 clear the lid goes.
   Replaced wholesale, the lid blinked several times a second with one pod worn. The
   parser stays stateless: it reports the bit, the coordinator keeps.
-- Each pod advertises from a random address of its own, which changed across a closed lid
-  and never on a timer in the #71 captures, so an advertisement no stored key decrypts
-  cannot be attributed to anything. It is dropped on arrival - not stored, not
-  broadcast; storing those is what a BLE spam flood fed on. The scanner's `BLE parsable:`
-  log still records it.
+- Each pod advertises from a resolvable private address of its own, a new one every 4-8
+  minutes, connected or not, and across a closed lid (#71). An advertisement counts only
+  if its address resolves with a stored IRK and that pair's ENC_KEY decrypts it; only
+  that key is tried (#134). Anything else cannot be attributed to anything and is
+  dropped on arrival - not stored, not broadcast; storing those is what a BLE spam flood
+  fed on. The scanner's `BLE parsable:` log still records it. Resolved addresses are
+  remembered in `rpa::ResolvedAddresses`, bounded and expiring, each with the IRK that
+  resolved it; an address no IRK resolves is never remembered, so a spammer rotating
+  addresses grows nothing. It is a std mutex beside `inner`, taken alone and never held
+  across an await. A pair with no IRK yet, keyed before keystore version 2, is identified
+  by its ENC_KEY alone until its next AAP connection stores one.
 - A D-Bus subscription that advertisements reach is drained by a task that never awaits
   its reader, and what an advertiser or a flapping adapter can trigger at will is
   coalesced per device or adapter - never queued per signal, never dropped. Left in
@@ -172,20 +178,31 @@ stored key decrypts, which also identifies the pair) **per device**, keyed by th
 ## Protocol
 
 **Keys are requested on every AAP connection**, not only when none is stored. Re-pairing
-regenerates them, and a stale key fails suffix validation without a word: the pair drops
-off BLE altogether, since an advertisement no key decrypts is dropped. The request is one
+regenerates them, and a stale IRK or key leaves the pair unidentified without a word: it
+drops off BLE altogether, since an advertisement nothing identifies is dropped. The request is one
 packet, which `open_aap` sends right after `aap::Client::open`: `open` leaves it out, so
 a probe never receives keys it did not ask for and prints them. `aap_read_loop` takes the
-key that comes back if it is 16 bytes - the length check keeps a malformed key from
-replacing a working one. It goes into use at once, and the keystore is written only when
-the keys differ from those last saved, so an unchanged key costs no write and a save that
-failed is retried (#38).
+ENC_KEY and IRK that come back if each is 16 bytes - the length check keeps a malformed
+key from replacing a working one. A packet without a usable IRK keeps the stored one
+while the ENC_KEY is unchanged; a new ENC_KEY drops it, so the pair falls back to its key
+alone rather than vanishing. They go into use at once, and the keystore is written only
+when the keys differ from those last saved, so an unchanged key costs no write and a save
+that failed is retried (#38). Format version 2 keeps the IRKs in an `irks` map beside
+`keys`, so a version 1 file loads unchanged and a version 1 reader still finds its keys.
 
-**BLE validation is by MAC suffix.** Bytes 7-9 of the decrypted payload hold the last
-three bytes of the real MAC; a match both validates and identifies. The pods zero the
-field unless both are in the case (status bit 2), connected or not (#71), so `00 00 00`
-is accepted too - identification comes from *which key* decrypted, not from reading the
-suffix, and the union costs one bit (2^-23 per wrong key).
+**BLE identification is by IRK, then ENC_KEY.** The advertising address must resolve
+with a stored IRK (`ble::rpa::resolves`, `ah()` of Core spec Vol 3 Part H 2.2.2), and only
+that pair's ENC_KEY is tried after it. The key packet carries the IRK **byte-reversed**,
+least significant byte first: the keystore keeps it as sent, `resolves` reverses it, and
+a test pins the order with the spec's sample (Appendix D.7). Resolving makes a false
+match 2^-24 per address and IRK rather than 2^-23 per advertisement and key, and a
+replayed advertisement from another address counts for nothing.
+
+The plaintext is then validated by MAC suffix: bytes 7-9 hold the last three bytes of
+the real MAC. The pods zero the field unless both are in the case (status bit 2),
+connected or not (#71), so `00 00 00` is accepted too - identification comes from the
+IRK that resolved and the key that decrypted, not from reading the suffix, and the union
+costs one bit (2^-23 per wrong key).
 
 ⚠️ Do **not** validate with magic bytes. The older check (byte 0 upper nibble `0x0`, byte
 4 `0x2D`) holds on neither AirPods Pro 3 (0x2027) nor Pro 2 USB-C (0x2024) - byte 4 is
@@ -244,15 +261,16 @@ deadlocked every command sent meanwhile.
 ## Patterns
 
 - Keep protocol parsing pure and tested. `aap::battery`, `aap::keys`, `aap::noise`,
-  `aap::message`, `ble::parser`, `ble::decrypt` take bytes and return values, and carry
-  the bulk of the test suite; `noise::ModeState` takes the time as an argument for the
-  same reason. `aap::decode` routes every packet by its header and opcode;
+  `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and return values,
+  and carry the bulk of the test suite; `noise::ModeState` and `rpa::ResolvedAddresses`
+  take the time as an argument for the same reason. `aap::decode` routes every packet by its header and opcode;
   each module's `is_*` and `parse_*` still check the header themselves, so they stay safe
   to call on their own.
 - Use synthetic test vectors - never commit a real device key. New test keys come from
   `ble::decrypt::random_key()`, not literals (CodeQL's hard-coded key rule, #66); the
-  fixed keys in podstate's and keystore's tests predate that. Encrypt in the test and
-  assert the round trip.
+  fixed keys in podstate's and keystore's tests predate that, and the Core spec's public
+  RPA sample (Vol 3 Part H Appendix D.7) is marked `gitleaks:allow`. Encrypt in the test
+  and assert the round trip.
 - `Option<u8>` for unknown battery, never a sentinel. Levels above 100 mean unavailable,
   and so does an AAP part with status Disconnected (`0x04`), whatever its level byte: it
   comes as `0x00` as well as `0xFF`, and the `0x00` read as a real 0% put the case at 0%
@@ -296,7 +314,8 @@ A `Co-Authored-By:` trailer is fine.
 
 ## Documentation
 
-- `docs/ble-proximity-pairing.md` - proximity pairing, decrypted layout, suffix validation
+- `docs/ble-proximity-pairing.md` - proximity pairing, identification by IRK then ENC_KEY,
+  decrypted layout, suffix validation
 - `docs/aap-key-retrieval.md` - retrieving IRK and ENC_KEY over AAP
 - `docs/aap-noise-control.md` - mode packet, the 0x4B notification, the 0x09 family
 - `docs/releasing.md` - release steps, what a release contains, verifying one
