@@ -41,7 +41,6 @@ pub const AIRPODS_UUID: &str = "74ec2172-0bad-4d01-8f77-997b2be0722a";
 )]
 trait BatteryProviderManager1 {
     fn register_battery_provider(&self, provider: &ObjectPath<'_>) -> zbus::Result<()>;
-    fn unregister_battery_provider(&self, provider: &ObjectPath<'_>) -> zbus::Result<()>;
 }
 
 #[proxy(interface = "org.bluez.Device1", default_service = "org.bluez")]
@@ -101,8 +100,6 @@ impl BatteryProvider1 {
 /// the two cannot drift apart.
 pub struct BatteryProvider {
     conn: Connection,
-    /// The adapter whose manager took it.
-    adapter: String,
     /// Where its batteries are - see [`provider_root`].
     root: OwnedObjectPath,
 }
@@ -243,15 +240,11 @@ impl BatteryProvider {
             Err(e) => return Err(e).context("failed to register battery provider"),
         }
 
-        Ok(Self {
-            conn,
-            adapter: adapter.to_string(),
-            root,
-        })
+        Ok(Self { conn, root })
     }
 
     /// Carries out one change to the exported battery objects.
-    pub async fn apply(&mut self, action: &BatteryAction) -> Result<()> {
+    pub(crate) async fn apply(&mut self, action: &BatteryAction) -> Result<()> {
         match action {
             BatteryAction::Add {
                 mac,
@@ -313,17 +306,6 @@ impl BatteryProvider {
             .remove::<BatteryProvider1, _>(&battery_path(&self.root, mac)?)
             .await
             .context("failed to remove battery object")?;
-        Ok(())
-    }
-
-    pub fn connection(&self) -> &Connection {
-        &self.conn
-    }
-
-    /// Unregisters the provider. BlueZ drops its batteries along with it.
-    pub async fn close(&self) -> Result<()> {
-        let manager = BatteryProviderManager1Proxy::new(&self.conn, self.adapter.as_str()).await?;
-        manager.unregister_battery_provider(&self.root).await?;
         Ok(())
     }
 }

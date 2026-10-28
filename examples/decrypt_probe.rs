@@ -1,10 +1,10 @@
-//! Decrypts captured advertisements with the stored key, bypassing validation,
-//! so the plaintext can be inspected directly.
+//! Decrypts captured advertisements with each stored key and, for those the
+//! app's suffix rule accepts, prints the plaintext and what the old magic-byte
+//! check would have said.
 //!
 //! Usage: cargo run --example decrypt_probe
 
-use aes::Aes128;
-use aes::cipher::{Block, BlockCipherDecrypt, KeyInit};
+use linuxpods::ble::decrypt::decrypt_raw;
 use linuxpods::ble::matches_device;
 use linuxpods::keystore::Keystore;
 
@@ -35,23 +35,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (mac, key) in &keys {
         println!("=== key for {mac} ({} bytes) ===", key.len());
-        let cipher = Aes128::new_from_slice(key)?;
 
         for raw in CAPTURED {
             let payload = hex(raw);
             let ct = &payload[9..25];
-
-            let mut block = Block::<Aes128>::try_from(ct)?;
-            cipher.decrypt_block(&mut block);
-            let pt = block.as_slice();
+            let pt = decrypt_raw(ct, key)?;
 
             let magic_ok = (pt[0] & 0xF0) == 0 && pt[4] == 0x2D;
             // The library's rule, so the probe cannot disagree with the app about
             // what counts as a match - including the zeroed suffix of a connected
             // device, which an inline suffix comparison would silently skip.
-            let mut plain = [0u8; 16];
-            plain.copy_from_slice(pt);
-            if !matches_device(&plain, *mac) {
+            if !matches_device(&pt, *mac) {
                 continue;
             }
             println!(

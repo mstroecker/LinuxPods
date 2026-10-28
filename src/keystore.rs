@@ -122,7 +122,7 @@ impl Keystore {
     ///
     /// The next save then starts a fresh file, and the keys in the old one stay
     /// recoverable by hand. It is never deleted, nor renamed over an earlier one.
-    pub fn set_aside(&self) -> Result<PathBuf> {
+    pub(crate) fn set_aside(&self) -> Result<PathBuf> {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());

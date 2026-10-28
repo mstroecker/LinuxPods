@@ -250,7 +250,7 @@ pair for its proximity pairing keys and lays out what comes back, key bytes reda
 nothing stored, to debug a request that fails; `noise_probe <MAC>` cycles
 the noise control modes and classifies every packet that comes back; `apple_sniff` logs
 Apple manufacturer data as it arrives; `decrypt_probe` decrypts captured payloads
-offline, bypassing validation, which is how the payload layouts were worked out.
+offline and shows the plaintext of each the app would accept.
 
 ```
 src/
