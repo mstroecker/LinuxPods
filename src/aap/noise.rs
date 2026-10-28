@@ -12,8 +12,6 @@ use std::time::{Duration, Instant};
 
 use crate::aap::message::{self, HEADER};
 
-/// Command byte position, shared by every AAP packet.
-const CMD: usize = message::OPCODE;
 /// Sub-command position within the settings family.
 const SUB_CMD: usize = 6;
 /// Mode byte position.
@@ -291,7 +289,10 @@ pub fn settings_changed_packet() -> [u8; 10] {
 /// for a fake on the receiving end.
 #[cfg(any(test, feature = "harness"))]
 pub fn parse_allow_off_packet(packet: &[u8]) -> Option<bool> {
-    if packet.len() <= MODE || packet[CMD] != CMD_SETTINGS || packet[SUB_CMD] != SUB_ALLOW_OFF {
+    if packet.len() <= MODE
+        || message::opcode(packet) != Some(CMD_SETTINGS)
+        || packet[SUB_CMD] != SUB_ALLOW_OFF
+    {
         return None;
     }
     match packet[MODE] {

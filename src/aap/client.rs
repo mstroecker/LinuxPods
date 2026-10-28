@@ -32,7 +32,7 @@ use tracing::Instrument;
 use crate::aap::{battery, keys, noise};
 
 /// L2CAP Protocol/Service Multiplexer for AAP.
-pub const AAP_PSM: u16 = 0x1001; // 4097
+pub(crate) const AAP_PSM: u16 = 0x1001; // 4097
 
 /// Max AAP packet we will read in one recv.
 const READ_BUF_LEN: usize = 1024;
@@ -60,7 +60,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The span a link's log lines go under, naming the device: several links
 /// can be up at once.
-pub fn link_span(addr: Address) -> tracing::Span {
+pub(crate) fn link_span(addr: Address) -> tracing::Span {
     tracing::info_span!("aap", mac = %addr)
 }
 
@@ -68,13 +68,13 @@ pub fn link_span(addr: Address) -> tracing::Span {
 /// the device hung up, or [`Client::shutdown`] closed it here.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("connection closed")]
-pub struct Closed;
+pub(crate) struct Closed;
 
 /// Whether `e` - from [`Client::read_packet`], say - is the connection going
 /// away rather than something going wrong on it: closed from either end, or
 /// taken down with the Bluetooth link, as an ordinary disconnect does - reset
 /// by the device, aborted here, gone out of range, the adapter gone down.
-pub fn is_link_gone(e: &anyhow::Error) -> bool {
+pub(crate) fn is_link_gone(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
         cause.is::<Closed>()
             || cause.downcast_ref::<io::Error>().is_some_and(|e| {
@@ -102,14 +102,14 @@ const EHOSTDOWN: i32 = 112;
 /// message is the whole of what it says.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-pub struct ConnectFailed(String);
+pub(crate) struct ConnectFailed(String);
 
 /// Whether `e`, from bringing a link up - [`Client::connect`], the handshake,
 /// the requests after it - is a connection that had come up going away, as
 /// [`is_link_gone`] tells. A connect that fails is never that, whatever its
 /// cause: nothing came up to go, and an L2CAP connect that times out or finds
 /// the host down has failed.
-pub fn went_during_setup(e: &anyhow::Error) -> bool {
+pub(crate) fn went_during_setup(e: &anyhow::Error) -> bool {
     is_link_gone(e) && e.downcast_ref::<ConnectFailed>().is_none()
 }
 
@@ -117,7 +117,7 @@ pub fn went_during_setup(e: &anyhow::Error) -> bool {
 /// the MAC as [`Address`] displays it. One socket per pair keeps two fake pairs
 /// apart, and a fake that binds by this same function cannot drift from it.
 #[cfg(feature = "harness")]
-pub fn unix_socket_path(dir: &Path, addr: Address) -> PathBuf {
+pub(crate) fn unix_socket_path(dir: &Path, addr: Address) -> PathBuf {
     dir.join(format!("{addr}.sock"))
 }
 
@@ -179,15 +179,11 @@ impl Client {
     /// A client for `addr` that connects to the Unix socket at `path`, where a
     /// fake answers for the device. No I/O happens until [`Client::connect`].
     #[cfg(feature = "harness")]
-    pub fn with_unix_socket(addr: Address, path: PathBuf) -> Self {
+    pub(crate) fn with_unix_socket(addr: Address, path: PathBuf) -> Self {
         Self {
             unix_path: Some(path),
             ..Self::new(addr)
         }
-    }
-
-    pub fn is_connected(&self) -> bool {
-        self.socket.is_some()
     }
 
     /// Brings a session up on a client not yet connected, and returns it for
@@ -355,11 +351,11 @@ impl Client {
             })
     }
 
-    pub async fn request_battery_status(&self) -> Result<()> {
+    pub(crate) async fn request_battery_status(&self) -> Result<()> {
         self.send_packet(&battery::REQUEST, "battery request").await
     }
 
-    pub async fn enable_special_features(&self) -> Result<()> {
+    pub(crate) async fn enable_special_features(&self) -> Result<()> {
         self.send_packet(&noise::ENABLE_FEATURES, "feature enable")
             .await
     }
@@ -434,15 +430,10 @@ impl Client {
     ///
     /// Takes `&self` so it can be called through an `Arc` while a read loop is
     /// parked in `recv`; the shutdown is what wakes that read up with an error.
-    pub fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         if let Some(socket) = &self.socket {
             let _ = socket.shutdown(std::net::Shutdown::Both);
         }
-    }
-
-    /// Drops the socket, closing the connection.
-    pub fn close(&mut self) {
-        self.socket = None;
     }
 }
 
@@ -456,7 +447,7 @@ mod tests {
     fn starts_unconnected() {
         let c = Client::new(MAC);
         assert_eq!(c.addr, MAC);
-        assert!(!c.is_connected());
+        assert!(c.socket.is_none());
     }
 
     /// The connection going away is told from a fault on it, under whatever
@@ -539,7 +530,7 @@ mod tests {
             let mut client = Client::with_unix_socket(MAC, path);
             client.connect().await.unwrap();
             let peer = listener.accept().await.unwrap();
-            assert!(client.is_connected());
+            assert!(client.socket.is_some());
             (client, peer, dir)
         }
 
@@ -630,7 +621,7 @@ mod tests {
             assert_eq!(recv(&peer).await, battery::REQUEST);
             assert_eq!(recv(&peer).await, noise::ENABLE_FEATURES);
             let client = timeout(TIMEOUT, open).await.unwrap().unwrap().unwrap();
-            assert!(client.is_connected());
+            assert!(client.socket.is_some());
             let mut buf = [0u8; READ_BUF_LEN];
             let more = timeout(Duration::from_millis(50), peer.recv(&mut buf)).await;
             assert!(more.is_err(), "sent more: {more:?}");
@@ -733,7 +724,7 @@ mod tests {
                 failed.downcast_ref::<ConnectFailed>().is_some(),
                 "{failed:#}"
             );
-            assert!(!client.is_connected());
+            assert!(client.socket.is_none());
         }
     }
 }

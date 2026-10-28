@@ -32,7 +32,7 @@ use super::parser::{ProximityData, parse_proximity_data};
 use crate::bluez::{self, AdapterSet, BLUEZ_SERVICE, Queue, drain};
 
 /// The key of Apple's entry in a device's `ManufacturerData`.
-pub const APPLE_COMPANY_ID: u16 = 0x004C;
+pub(crate) const APPLE_COMPANY_ID: u16 = 0x004C;
 
 const DEVICE_INTERFACE: &str = "org.bluez.Device1";
 
@@ -145,7 +145,7 @@ impl Scanner {
 
     /// Sets an LE-only discovery filter on the adapter at `adapter`, and
     /// starts scanning there.
-    pub async fn start_discovery_on(&self, adapter: &str) -> Result<()> {
+    pub(crate) async fn start_discovery_on(&self, adapter: &str) -> Result<()> {
         let adapter = Adapter1Proxy::new(&self.conn, adapter).await?;
 
         let mut filter = HashMap::new();

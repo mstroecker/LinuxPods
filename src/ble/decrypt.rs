@@ -21,7 +21,7 @@ const MAC_SUFFIX_RANGE: std::ops::Range<usize> = 7..10;
 /// AirPods Pro 3 (0x2027) with a key that decrypts correctly by every other
 /// measure - batteries agreeing with the cleartext buckets and the usual
 /// `1d 7d 64` at bytes 4-6.
-pub const CONNECTED_SUFFIX: [u8; 3] = [0x00; 3];
+pub(crate) const CONNECTED_SUFFIX: [u8; 3] = [0x00; 3];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecryptError {
@@ -61,7 +61,7 @@ pub fn decrypt_for_device(
     key: &[u8],
     mac_addr: Address,
 ) -> Result<[u8; ENCRYPTED_LEN], DecryptError> {
-    let decrypted = decrypt_block_only(encrypted, key)?;
+    let decrypted = decrypt_raw(encrypted, key)?;
 
     if matches_device(&decrypted, mac_addr) {
         Ok(decrypted)
@@ -88,12 +88,10 @@ pub fn matches_device(decrypted: &[u8; ENCRYPTED_LEN], mac_addr: Address) -> boo
     decrypted[MAC_SUFFIX_RANGE] == mac_addr[3..] || decrypted[MAC_SUFFIX_RANGE] == CONNECTED_SUFFIX
 }
 
-/// Decrypts without any validation. Exposed for probes and tests.
+/// Decrypts without any validation: what [`decrypt_for_device`] checks, and
+/// what `examples/decrypt_probe.rs` checks with [`matches_device`] itself, so
+/// it can show what the magic-byte check would have said.
 pub fn decrypt_raw(encrypted: &[u8], key: &[u8]) -> Result<[u8; ENCRYPTED_LEN], DecryptError> {
-    decrypt_block_only(encrypted, key)
-}
-
-fn decrypt_block_only(encrypted: &[u8], key: &[u8]) -> Result<[u8; ENCRYPTED_LEN], DecryptError> {
     if encrypted.len() != ENCRYPTED_LEN {
         return Err(DecryptError::BadDataLen(encrypted.len()));
     }

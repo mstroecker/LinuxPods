@@ -82,7 +82,7 @@ pub const REQUEST: [u8; 8] = [
     HEADER[0], HEADER[1], HEADER[2], HEADER[3], 0x30, 0x00, 0x05, 0x00,
 ];
 
-pub fn is_key_packet(packet: &[u8]) -> bool {
+pub(crate) fn is_key_packet(packet: &[u8]) -> bool {
     packet.len() >= 7 && message::opcode(packet) == Some(KEY_MARKER)
 }
 
@@ -165,12 +165,6 @@ pub fn redacted_hex(packet: &[u8]) -> String {
     } else {
         hex(packet)
     }
-}
-
-pub fn find_irk(keys: &[ProximityKey]) -> Option<&[u8]> {
-    keys.iter()
-        .find(|k| k.key_type == KeyType::Irk)
-        .map(|k| k.data.as_slice())
 }
 
 /// Builds the packet [`parse_proximity_keys`] reads, keys in the order given.
@@ -273,9 +267,9 @@ mod tests {
 
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].key_type, KeyType::Irk);
+        assert_eq!(keys[0].data, irk);
         assert_eq!(keys[1].key_type, KeyType::EncKey);
         assert_eq!(find_encryption_key(&keys), Ok(enc));
-        assert_eq!(find_irk(&keys), Some(&irk[..]));
     }
 
     #[test]

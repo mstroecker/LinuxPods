@@ -65,7 +65,6 @@ pub struct ProximityData {
     pub raw_data: Vec<u8>,
 
     pub has_decrypted: bool,
-    pub raw_decrypted: Option<[u8; ENCRYPTED_LEN]>,
 }
 
 impl ProximityData {
@@ -85,9 +84,6 @@ impl ProximityData {
         }
 
         self.has_decrypted = true;
-        let mut buf = [0u8; ENCRYPTED_LEN];
-        buf.copy_from_slice(decrypted);
-        self.raw_decrypted = Some(buf);
 
         // Levels above 100 are invalid and mean "unknown".
         let split = |b: u8| -> (Option<u8>, bool) {
@@ -212,7 +208,7 @@ pub fn parse_proximity_data(data: &[u8]) -> Result<ProximityData, ParseError> {
 }
 
 /// 0x0-0x9 => 0-90% in 10% steps, 0xA-0xE => 100%, 0xF => unknown.
-pub fn decode_battery(nibble: u8) -> Option<u8> {
+pub(crate) fn decode_battery(nibble: u8) -> Option<u8> {
     match nibble {
         0x0..=0x9 => Some(nibble * 10),
         0xA..=0xE => Some(100),
@@ -366,7 +362,7 @@ pub fn decode_color(color: u8) -> String {
     }
 }
 
-pub fn decode_connection_state(state: u8) -> String {
+pub(crate) fn decode_connection_state(state: u8) -> String {
     match state {
         0x00 => "Disconnected".into(),
         0x04 => "Idle".into(),
@@ -389,7 +385,7 @@ pub fn decode_connection_state(state: u8) -> String {
 /// byte-swapped) and AirPodsDesktop (SpriteOvO/AirPodsDesktop,
 /// `Source/Core/AppleCP.cpp`). furiousMAC/continuity's Wireshark dissector
 /// lists the first two generations and the first AirPods Pro, byte-swapped too.
-pub fn decode_model_name(product_id: u16) -> Option<&'static str> {
+pub(crate) fn decode_model_name(product_id: u16) -> Option<&'static str> {
     let name = match product_id {
         0x2002 => "AirPods (1st gen)",
         0x200F => "AirPods (2nd gen)",

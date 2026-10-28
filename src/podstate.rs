@@ -789,7 +789,7 @@ impl Coordinator {
     /// actually differ - the BlueZ task re-reads them on every connection event,
     /// and rebroadcasting an identical map would wake the UI, tray and battery
     /// provider for nothing.
-    pub async fn set_device_names(&self, names: HashMap<Address, String>) {
+    pub(crate) async fn set_device_names(&self, names: HashMap<Address, String>) {
         let mut inner = self.inner.write().await;
         if inner.device_names == names {
             return;
@@ -819,7 +819,7 @@ impl Coordinator {
     ///
     /// A key that validates identifies the device, letting us map a randomized
     /// BLE MAC back to the real one. Returns the real MAC when identified.
-    pub async fn identify_and_decrypt(
+    pub(crate) async fn identify_and_decrypt(
         &self,
         data: &mut ProximityData,
         ble_mac: Address,
@@ -952,10 +952,11 @@ impl Coordinator {
     }
 
     /// Opens a device's AAP link and reads it in a task of its own until it
-    /// ends, and nothing opens it again. For a caller that has no supervisor,
-    /// as this module's tests have none; the app's links are each opened and
-    /// run by their pair's supervisor, in `attachment`.
-    pub async fn connect_aap(self: &Arc<Self>, mac_addr: Address) -> Result<()> {
+    /// ends, and nothing opens it again: for this module's tests, which have
+    /// no supervisor. The app's links are each opened and run by their pair's
+    /// supervisor, in `attachment`.
+    #[cfg(all(test, feature = "harness"))]
+    async fn connect_aap(self: &Arc<Self>, mac_addr: Address) -> Result<()> {
         let link = self.open_aap(mac_addr).await?;
         tokio::spawn(link.run());
         Ok(())
@@ -969,7 +970,7 @@ impl Coordinator {
     /// Dropped before it is done - timed out, or the pair detached - it leaves
     /// nothing behind: the connection closes with it, and the link is recorded
     /// only at the last step, which nothing awaits after.
-    pub async fn open_aap(self: &Arc<Self>, mac_addr: Address) -> Result<AapLink> {
+    pub(crate) async fn open_aap(self: &Arc<Self>, mac_addr: Address) -> Result<AapLink> {
         anyhow::ensure!(
             !self.inner.read().await.links.contains_key(&mac_addr),
             "AAP to {mac_addr} is up already"
@@ -1048,7 +1049,7 @@ impl Coordinator {
     }
 
     /// Closes one device's AAP link. Any other device's link is untouched.
-    pub async fn disconnect_aap(&self, mac_addr: Address) {
+    pub(crate) async fn disconnect_aap(&self, mac_addr: Address) {
         self.drop_link(mac_addr, None).await;
     }
 
@@ -1387,11 +1388,6 @@ impl Coordinator {
             Err(e) => tracing::warn!("failed to save encryption key to disk: {e:#}"),
         }
     }
-
-    /// Number of devices we hold a key for.
-    pub async fn known_key_count(&self) -> usize {
-        self.inner.read().await.encryption_keys.len()
-    }
 }
 
 #[cfg(test)]
@@ -1487,7 +1483,7 @@ mod tests {
         std::fs::write(dir.path().join("keys.json"), corrupt).unwrap();
 
         let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
-        assert_eq!(coordinator.known_key_count().await, 0);
+        assert_eq!(coordinator.inner.read().await.encryption_keys.len(), 0);
         coordinator.store_encryption_key(MAC, &KEY).await;
 
         let aside: Vec<_> = std::fs::read_dir(dir.path())
@@ -1523,7 +1519,7 @@ mod tests {
         chmod(&path, 0o600);
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
-        assert_eq!(coordinator.known_key_count().await, 1);
+        assert_eq!(coordinator.inner.read().await.encryption_keys.len(), 1);
     }
 
     /// Regression (#38): "unchanged" was judged against memory, which already
@@ -1539,7 +1535,7 @@ mod tests {
         chmod(dir.path(), 0o700);
         assert!(keystore_in(&dir).load().unwrap().is_empty());
         assert_eq!(
-            coordinator.known_key_count().await,
+            coordinator.inner.read().await.encryption_keys.len(),
             1,
             "in use whether saved or not"
         );
@@ -2269,7 +2265,7 @@ mod tests {
 
         // Keys are requested on every connection.
         coordinator.store_encryption_key(reported, &KEY).await;
-        assert_eq!(coordinator.known_key_count().await, 1);
+        assert_eq!(coordinator.inner.read().await.encryption_keys.len(), 1);
         assert_eq!(coordinator.subscribe().borrow().devices(), [reported]);
     }
 
