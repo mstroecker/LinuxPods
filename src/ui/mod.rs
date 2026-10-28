@@ -15,6 +15,7 @@
 
 use std::time::Duration;
 
+use adw::prelude::*;
 use gtk::gio;
 
 #[cfg(feature = "harness")]
@@ -30,8 +31,9 @@ pub use window::activate;
 /// Anything heard within this long counts as advertising now.
 const RECENT: Duration = Duration::from_secs(60);
 
-/// Prefix of the resources `build.rs` compiles from `assets/`.
-const RESOURCE_PREFIX: &str = "/io/github/mstroecker/LinuxPods";
+/// Prefix of the resources `build.rs` compiles from `assets/`: the app's
+/// path, under which GTK finds the bundled icons by name.
+const RESOURCE_PREFIX: &str = crate::APP_PATH;
 
 /// Registers the resources compiled into the binary. Call once, before the
 /// window is built.
@@ -49,11 +51,34 @@ fn last_seen_text(age: Duration) -> String {
     format!("Last seen {} min ago", age.as_secs() / 60)
 }
 
+/// A setting that is planned but not built, in Preferences and on the Control
+/// page. Shown so the plan is visible, but switched off and grayed out: it
+/// neither claims a state nor takes a click, and nothing listens to the switch.
+/// Once a feature lands, its state comes with the snapshot and a change goes
+/// out as a command, as noise control's does.
+///
+/// `id` names the switch, so that a test can find it and see it refuse.
+fn unavailable_row(id: &str, title: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .subtitle("Not available yet")
+        .sensitive(false)
+        .build();
+    row.add_suffix(
+        &gtk::Switch::builder()
+            .name(id)
+            .active(false)
+            .valign(gtk::Align::Center)
+            .build(),
+    );
+    row
+}
+
 #[cfg(test)]
 mod tests {
-    use super::control::{APP_SYMBOLIC_ICON, BATTERY_IMAGES, IN_EAR_ICON};
-    use super::window::APP_ICON;
+    use super::control::{BATTERY_IMAGES, IN_EAR_ICON};
     use super::*;
+    use crate::{APP_ID, APP_SYMBOLIC_ICON};
 
     /// A missing resource fails silently - gtk::Image::from_resource renders
     /// nothing, and the About dialog shows a placeholder for the app icon - so
@@ -62,7 +87,7 @@ mod tests {
     fn bundled_resources_resolve() {
         register_resources();
         let icons = [
-            format!("icons/scalable/apps/{APP_ICON}.svg"),
+            format!("icons/scalable/apps/{APP_ID}.svg"),
             format!("icons/scalable/status/{IN_EAR_ICON}.svg"),
             format!("icons/scalable/apps/{APP_SYMBOLIC_ICON}.svg"),
         ];

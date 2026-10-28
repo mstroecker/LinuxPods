@@ -250,9 +250,8 @@ mod tests {
             battery(Component::Left, 99, Status::Charging),
             battery(Component::Case, 17, Status::Discharging),
         ]);
-        let hex: Vec<String> = packet.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
-            hex.join(" "),
+            crate::hex(&packet),
             "04 00 04 00 04 00 03 02 01 64 02 01 04 01 63 01 01 08 01 11 02 01"
         );
     }

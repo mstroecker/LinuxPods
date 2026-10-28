@@ -6,7 +6,7 @@
 //! `Coordinator::command` - and the tray's window commands to the GTK main
 //! context on an async channel.
 
-use linuxpods::{attachment, ble, indicator, podstate, ui};
+use linuxpods::{APP_ID, attachment, ble, indicator, podstate, ui};
 
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
@@ -20,8 +20,6 @@ use indicator::{Indicator, TrayActions};
 use linuxpods::aap::NoiseMode;
 use linuxpods::bluez::Backoff;
 use podstate::{Command, Coordinator};
-
-const APP_ID: &str = "io.github.mstroecker.LinuxPods";
 
 /// Bridges tray clicks onto the GTK main context, and noise control to the
 /// AirPods.

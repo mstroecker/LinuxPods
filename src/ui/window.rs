@@ -22,9 +22,6 @@ use crate::podstate::{Command, ConnectionLost, Coordinator, Snapshot};
 /// replayed advertisement can arrive every few milliseconds.
 const RENDER_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Icon name of the app icon, installed into hicolor by `make install`.
-pub(super) const APP_ICON: &str = "io.github.mstroecker.LinuxPods";
-
 const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
 
 /// Builds the window and wires it to the coordinator. The caller presents it,
@@ -310,7 +307,7 @@ fn show_about(win: &adw::ApplicationWindow) {
     adw::AboutDialog::builder()
         .name("about")
         .application_name("LinuxPods")
-        .application_icon(APP_ICON)
+        .application_icon(crate::APP_ID)
         .comments("Manage Apple AirPods on Linux")
         .version(env!("CARGO_PKG_VERSION"))
         .developer_name("Marcel Ströcker")

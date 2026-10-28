@@ -16,7 +16,7 @@ const MAC_SUFFIX_RANGE: std::ops::Range<usize> = 7..10;
 
 /// What sits there instead while the device is connected to a host.
 ///
-/// The suffix exists so a paired-but-disconnected device can be recognised behind
+/// The suffix exists so a paired-but-disconnected device can be recognized behind
 /// a randomized address; connected, the device publishes zeros. Observed on
 /// AirPods Pro 3 (0x2027) with a key that decrypts correctly by every other
 /// measure - batteries agreeing with the cleartext buckets and the usual
@@ -239,13 +239,8 @@ mod tests {
     /// The builder's bytes are the documented sample's.
     #[test]
     fn builds_the_documented_pro3_sample() {
-        let hex: Vec<String> = pro3_plaintext([0xDD, 0xEE, 0xFF])
-            .to_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
         assert_eq!(
-            hex.join(" "),
+            crate::hex(&pro3_plaintext([0xDD, 0xEE, 0xFF]).to_bytes()),
             "10 be be 9f 1d 7d 64 dd ee ff 00 00 a7 8a b5 cc"
         );
     }

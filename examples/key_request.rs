@@ -22,6 +22,7 @@ use bluer::Address;
 use linuxpods::aap::keys::{self, KeyType};
 use linuxpods::aap::message::opcode;
 use linuxpods::aap::{Client, Message, decode, find_encryption_key, parse_proximity_keys};
+use linuxpods::hex;
 
 /// How long to listen after the request, unless the command line says.
 const DEFAULT_WINDOW: Duration = Duration::from_secs(5);
@@ -48,13 +49,6 @@ fn opcode_text(packet: &[u8]) -> String {
 /// not it parses - and then whether the app would take its ENC_KEY. Every byte
 /// but the key data is shown; of the key data, only its length.
 fn key_packet_layout(packet: &[u8]) -> Vec<String> {
-    let hex = |bytes: &[u8]| {
-        bytes
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
     let mut lines = vec![format!("total length: {} bytes", packet.len())];
     if packet.len() < keys::PREAMBLE_LEN {
         lines.push(format!(
