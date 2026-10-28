@@ -681,7 +681,7 @@ async fn supervise(
                 if failures == 1 {
                     tracing::warn!("failed to connect AAP to {mac}: {e:#}");
                     tracing::warn!(
-                        "Falling back to BLE for battery monitoring (approximate); \
+                        "Falling back to BLE for battery monitoring; \
                          trying AAP again in {}s",
                         wait.as_secs()
                     );

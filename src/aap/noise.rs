@@ -41,7 +41,7 @@ const SUB_ALLOW_OFF: u8 = 0x34;
 const ENABLED: u8 = 0x01;
 const DISABLED: u8 = 0x02;
 
-/// The settings-changed notification, the device's one consistent answer to a
+/// The settings-changed notification, AirPods 4's one consistent answer to a
 /// mode change - see [`settings_changed_packet`].
 #[cfg(any(test, feature = "harness"))]
 const CMD_SETTINGS_CHANGED: u8 = 0x4B;
@@ -263,8 +263,9 @@ pub fn settings_report(sub_cmd: u8, value: &[u8]) -> [u8; 11] {
     packet
 }
 
-/// The notification that follows a mode change: `04 00 04 00 4B 00 02 00 01
-/// 09`, a count of one and the family that changed.
+/// The notification that follows a mode change on AirPods 4: `04 00 04 00 4B
+/// 00 02 00 01 09`, a count of one and the family that changed. AirPods Pro 3
+/// sent none (#71).
 ///
 /// Byte-identical whichever mode was set, so it acknowledges that a command
 /// was processed and nothing more.
@@ -398,8 +399,8 @@ mod tests {
 
     #[test]
     fn rejects_the_settings_changed_notification() {
-        // 0x4B, the only consistent answer to a mode change - and no use as one,
-        // since it is byte-identical whichever mode was set.
+        // 0x4B, AirPods 4's only consistent answer to a mode change - and no use
+        // as one, since it is byte-identical whichever mode was set.
         assert!(!is_noise_mode_packet(&settings_changed_packet()));
     }
 

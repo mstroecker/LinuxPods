@@ -3,7 +3,7 @@
 //!
 //! - [`pods`]: one pair of fake AirPods, pure state in and bytes out.
 //! - [`bluez`]: a fake `org.bluez`, with as many adapters as asked for, for
-//!   the app's scanner and battery provider.
+//!   the app's scanner, and for attachment and its battery providers.
 //! - [`world`]: pairs, the fake BlueZ and their AAP sockets running together,
 //!   changed over D-Bus or from the same process. `fakepods` runs one.
 //!

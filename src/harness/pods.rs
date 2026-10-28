@@ -29,7 +29,7 @@ use bluer::Address;
 use crate::aap::battery::{Battery, Component, Status, battery_packet};
 use crate::aap::keys::{KeyType, ProximityKey, key_packet};
 use crate::aap::noise::{self, NoiseMode};
-use crate::ble::decrypt::{CONNECTED_SUFFIX, KEY_LEN, Plaintext, encrypt, random_key};
+use crate::ble::decrypt::{KEY_LEN, Plaintext, ZEROED_SUFFIX, encrypt, random_key};
 use crate::ble::parser::{Cleartext, PodSide, proximity_message};
 
 /// AirPods Pro 3, by the product ID `parse_proximity_data` reads.
@@ -37,8 +37,9 @@ pub const PRO_3: u16 = 0x2027;
 /// AirPods Pro 2 with USB-C.
 pub const PRO_2_USB_C: u16 = 0x2024;
 
-/// How long a pair advertises from one address. Apple rotates it every few
-/// seconds - four addresses for one pair were seen inside 45 seconds.
+/// How long the fake advertises from one address. Real AirPods advertise from
+/// an address per pod, which in the #71 captures changed across a closed lid
+/// and never on a timer; #115 brings the fake in line.
 pub const ADDRESS_ROTATION: Duration = Duration::from_secs(10);
 
 /// How long a pair with the silent quirk holds a connection before hanging up,
@@ -48,9 +49,10 @@ pub const SILENT_HANG_UP: Duration = Duration::from_secs(9);
 /// Where an AAP packet carries its command.
 const OPCODE: usize = 4;
 
-// The requests `aap::Client::open` sends, known by their command byte, as a
-// device would know them - not by the packets beside the app's parsers, which
-// a change on the wire would change here along with them.
+// The requests a link sends as it comes up - `aap::Client::open`'s, and the key
+// request `Coordinator::open_aap` adds - known by their command byte, as a
+// device would know them: not by the packets beside the app's parsers, which a
+// change on the wire would change here along with them.
 const OP_HANDSHAKE: u8 = 0x01;
 const OP_NOTIFICATIONS: u8 = 0x0F;
 const OP_FEATURES: u8 = 0x4D;
@@ -61,8 +63,10 @@ const OP_KEY_REQUEST: u8 = 0x30;
 /// four, so the fake sends just them.
 const HANDSHAKE_ACK: [u8; 4] = [0x01, 0x00, 0x04, 0x00];
 
-/// The answer to the features packet, as LibrePods recognises it - by these
-/// six bytes, and tested there with AirPods Pro 2 only.
+/// The answer to the features packet, as LibrePods takes it - by these six
+/// bytes, and tested there with AirPods Pro 2 only. On AirPods Pro 3, 0x2B is
+/// a list of known hosts that comes unasked with the handshake's answer, and
+/// nothing answers the features packet (#71); #115 brings the fake in line.
 const FEATURES_ACK: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x2B, 0x00];
 
 /// The startup dump's settings beside the mode and allow-Off, with the values
@@ -113,8 +117,14 @@ pub enum Part {
     Case,
 }
 
-/// Behaviour of the hardware that the fake can switch. The default is what the
-/// hardware does.
+/// Behavior of the hardware that the fake can switch. The default is what the
+/// hardware does, with two exceptions from the #71 captures. The answers to a
+/// mode change are AirPods 4's (`docs/aap-noise-control.md`), where a Pro 3
+/// echoes every change about 1 s later and sends no 0x4B. And
+/// [`Quirks::zero_suffix_when_connected`] zeroes the suffix while connected,
+/// where a Pro 3 zeroes it whenever a pod is out of the case. #115 brings
+/// those in line, along with two things that are not quirks: the address
+/// rotation, [`ADDRESS_ROTATION`], and the features answer, `FEATURES_ACK`.
 ///
 /// Each one is read when it applies, so a change takes effect from the next
 /// packet, advertisement or connection.
@@ -128,12 +138,13 @@ pub struct Quirks {
     pub settings_changed: bool,
     /// Echo every n-th mode change with a 0x0D report of the mode set: 1
     /// echoes every change, 0 none. Counted rather than drawn at random, so
-    /// tests are never flaky; the default 4 is the hardware's one change in
+    /// tests are never flaky; the default 4 is AirPods 4's one change in
     /// four, the first echo following the fourth change.
     pub echo_every: u32,
-    /// How long after its change an echo comes. The captures record that it
-    /// comes, not when; the default puts it after the app has recorded the mode
-    /// it asked for, so the echo confirms rather than sets it.
+    /// How long after its change an echo comes. A Pro 3 echoed 1.0-1.1 s after
+    /// each change in the #71 captures; the default 500 ms is shorter, and still
+    /// puts it after the app has recorded the mode it asked for, so the echo
+    /// confirms rather than sets it.
     pub echo_delay: Duration,
     /// Report the mode an Off replaced, this long after the change - before
     /// the echo, when one comes sooner than that. In the #71 capture, switched
@@ -143,8 +154,9 @@ pub struct Quirks {
     /// own: [`Quirks::echo_every`] and [`Quirks::echo_delay`] say when that
     /// comes.
     pub stale_report: Option<Duration>,
-    /// Zero the MAC suffix in the encrypted payload while connected to a host,
-    /// as Pro 3 does.
+    /// Zero the MAC suffix in the encrypted payload while connected to a host.
+    /// Pro 3 zeroes it whenever a pod is out of the case instead, connected or
+    /// not (#71); #115 brings the fake in line.
     pub zero_suffix_when_connected: bool,
     /// Accept an AAP connection, never answer, and hang up after
     /// [`SILENT_HANG_UP`] - seen once, with the Flatpak build. Off by default,
@@ -411,7 +423,7 @@ impl Pods {
     }
 
     /// Connects the pair to a host, or disconnects it - this one or another,
-    /// such as a phone. A connected pair zeroes the suffix in its advertisement
+    /// such as a phone. A connected fake zeroes the suffix in its advertisement
     /// (see [`Quirks::zero_suffix_when_connected`]) and reports itself idle in
     /// byte 8. Disconnecting takes an open AAP connection with it: the next
     /// [`Pods::poll`] hangs up.
@@ -440,7 +452,8 @@ impl Pods {
     ///
     /// The cleartext gives the batteries in 10% steps. The encrypted portion,
     /// under the pair's ENC_KEY, gives them exact, with the real address's last
-    /// three bytes in bytes 7-9 - zeroed while connected - and a tail that
+    /// three bytes in bytes 7-9 - zeroed while connected, see
+    /// [`Quirks::zero_suffix_when_connected`] - and a tail that
     /// changes with `now`.
     pub fn advertisement(&self, now: Duration) -> Advertisement {
         let (primary, secondary) = match self.primary {
@@ -479,7 +492,7 @@ impl Pods {
         };
 
         let mac_suffix = if self.connected && self.quirks.zero_suffix_when_connected {
-            CONNECTED_SUFFIX
+            ZEROED_SUFFIX
         } else {
             [self.mac[3], self.mac[4], self.mac[5]]
         };
@@ -557,11 +570,12 @@ impl Pods {
     /// Requests are known by their command byte, and settings by their
     /// sub-command too:
     ///
-    /// - the handshake gets its acknowledgement;
+    /// - the handshake gets its acknowledgment;
     /// - the notification request (0x0F) the battery and the startup dump - the
     ///   mode, allow-Off and other 0x09 settings - and from then on a report of
     ///   every change;
-    /// - the features packet (0x4D) its acknowledgement;
+    /// - the features packet (0x4D) the 0x2B LibrePods takes for its
+    ///   acknowledgment - see `FEATURES_ACK`;
     /// - the key request (0x30) the key packet, IRK then ENC_KEY;
     /// - a mode change the 0x4B notification and now and then the delayed echo,
     ///   or nothing for an Off not allowed - see [`Quirks`];
@@ -919,7 +933,7 @@ mod tests {
 
         pods.set_connected(true);
         let plain = plaintext(&pods, ms(0));
-        assert_eq!(plain[7..10], CONNECTED_SUFFIX);
+        assert_eq!(plain[7..10], ZEROED_SUFFIX);
         assert!(matches_device(&plain, MAC));
         assert_eq!(read(&pods, ms(0)).connection_state, CONNECTION_IDLE);
     }
@@ -1111,9 +1125,10 @@ mod tests {
         }
     }
 
-    /// As the #71 capture has it: Off from Noise Cancelling, the 0x4B at
-    /// once, a report of Noise Cancelling at +0.33 s and the echo of Off at
-    /// +1.4 s. No other mode brings such a report, nor does Off from Off.
+    /// Off from Noise Cancelling as the #71 capture has it - a report of
+    /// Noise Cancelling at +0.33 s and the echo of Off at +1.4 s - with the
+    /// fake's default 0x4B at once on top. No other mode brings such a
+    /// report, nor does Off from Off.
     #[test]
     fn off_can_bring_a_report_of_the_mode_it_replaced() {
         let mut pods = subscribed();

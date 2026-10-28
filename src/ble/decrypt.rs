@@ -14,14 +14,11 @@ pub use crate::KEY_LEN;
 /// Where the device's MAC suffix sits inside the decrypted payload.
 const MAC_SUFFIX_RANGE: std::ops::Range<usize> = 7..10;
 
-/// What sits there instead while the device is connected to a host.
-///
-/// The suffix exists so a paired-but-disconnected device can be recognized behind
-/// a randomized address; connected, the device publishes zeros. Observed on
-/// AirPods Pro 3 (0x2027) with a key that decrypts correctly by every other
-/// measure - batteries agreeing with the cleartext buckets and the usual
-/// `1d 7d 64` at bytes 4-6.
-pub(crate) const CONNECTED_SUFFIX: [u8; 3] = [0x00; 3];
+/// What sits there instead unless both pods are in the case (status bit 2),
+/// whether a host is connected or not (#71). Observed on AirPods Pro 3
+/// (0x2027) with a key that decrypts correctly by every other measure -
+/// batteries agreeing with the cleartext buckets.
+pub(crate) const ZEROED_SUFFIX: [u8; 3] = [0x00; 3];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecryptError {
@@ -41,21 +38,24 @@ pub enum DecryptError {
 /// offset 7, so it identifies its own device - which is exactly what is needed to
 /// resolve a randomized BLE MAC back to a permanent one.
 ///
-/// While the device is connected the suffix reads `00 00 00` instead; see
+/// Unless both pods are in the case the suffix reads `00 00 00` instead; see
 /// [`matches_device`], which accepts either.
 ///
-/// Layout confirmed on two models; only byte 0, the batteries and the trailing
-/// four bytes differ between them:
+/// Layout confirmed on two models. Byte 0 follows the connection state, bytes
+/// 4-6 are the address suffix of the host the pods last used - placeholders
+/// here - and byte 11 counts:
 /// ```text
-/// Pro 3  (0x2027): 10 be be 9f 1d 7d 64 [DD EE FF] 00 00 a7 8a b5 cc
-/// Gen 2  (0x2024): 00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 3b a2 15 bd
-///                     ^^ ^^ ^^              ^^^^^^ MAC suffix
+/// Pro 3  (0x2027): 10 be be 9f a1 a2 a3 [DD EE FF] 00 00 a7 8a b5 cc
+/// Gen 2  (0x2024): 00 e4 e4 8e a1 a2 a3 [44 55 66] 00 00 3b a2 15 bd
+///                     ^^ ^^ ^^ ^^ ^^ ^^ ^^^^^^^^^^
+///                     |        |        MAC suffix
+///                     |        last host
 ///                     batteries (bit 7 = charging)
 /// ```
 ///
 /// Note there is no magic-byte alternative: the 0x2D marker at byte 4 reported by
-/// earlier reverse engineering appears on neither model (both report 0x1D), so a
-/// magic-byte check rejects every correct decryption.
+/// earlier reverse engineering appears on neither model - byte 4 is part of the
+/// last host's address - so a magic-byte check rejects every correct decryption.
 pub fn decrypt_for_device(
     encrypted: &[u8],
     key: &[u8],
@@ -71,7 +71,7 @@ pub fn decrypt_for_device(
 }
 
 /// True when the payload carries the last three bytes of `mac_addr` at offset 7,
-/// or the zeros a connected device publishes in their place.
+/// or the zeros the pods publish in their place once out of the case.
 ///
 /// Identification does not come from reading the suffix - it comes from *which*
 /// key produced this plaintext, one key being tried at a time. The suffix is only
@@ -81,11 +81,12 @@ pub fn decrypt_for_device(
 ///
 /// Accepting both costs exactly one bit - a false accept per wrong key goes from
 /// 2^-24 to 2^-23, measured at 4 and 4 accepts respectively over 40M random keys.
-/// Without the second rule, a device connected to a phone falls back to the
-/// cleartext's 10% buckets and stays unidentified behind its rotating address,
-/// which is the case `docs/ble-proximity-pairing.md` sets out to cover.
+/// Without the second rule, a pair with a pod out of the case - worn, on a
+/// phone or not - stays unidentified behind its random address, and an
+/// unidentified advertisement is dropped: the pair would vanish from BLE in the
+/// case `docs/ble-proximity-pairing.md` sets out to cover.
 pub fn matches_device(decrypted: &[u8; ENCRYPTED_LEN], mac_addr: Address) -> bool {
-    decrypted[MAC_SUFFIX_RANGE] == mac_addr[3..] || decrypted[MAC_SUFFIX_RANGE] == CONNECTED_SUFFIX
+    decrypted[MAC_SUFFIX_RANGE] == mac_addr[3..] || decrypted[MAC_SUFFIX_RANGE] == ZEROED_SUFFIX
 }
 
 /// Decrypts without any validation: what [`decrypt_for_device`] checks, and
@@ -114,8 +115,8 @@ pub fn decrypt_raw(encrypted: &[u8], key: &[u8]) -> Result<[u8; ENCRYPTED_LEN], 
 #[cfg(any(test, feature = "harness"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plaintext {
-    /// Byte 0, unexplained and model-dependent: 0x10 on Pro 3, 0x00 or 0x04 on
-    /// Pro 2.
+    /// Byte 0: the connection state, as cleartext byte 8 has it, in the #71
+    /// captures; the September samples carry 0x10 on top on Pro 3, unexplained.
     pub header: u8,
     /// Byte 1, the primary pod: the left one unless the advertisement says the
     /// right is primary. Each battery byte holds the level in bits 0-6 - `None`
@@ -128,8 +129,8 @@ pub struct Plaintext {
     /// Byte 3.
     pub case_battery: Option<u8>,
     pub case_charging: bool,
-    /// Bytes 7-9: the last three bytes of the real MAC, or [`CONNECTED_SUFFIX`]
-    /// while the device is connected to a host.
+    /// Bytes 7-9: the last three bytes of the real MAC, or [`ZEROED_SUFFIX`]
+    /// unless both pods are in the case.
     pub mac_suffix: [u8; 3],
     /// Bytes 12-15, which change with every advertisement.
     pub tail: [u8; 4],
@@ -137,9 +138,9 @@ pub struct Plaintext {
 
 #[cfg(any(test, feature = "harness"))]
 impl Plaintext {
-    /// The 16 bytes to encrypt. Bytes 4-6 get the `1d 7d 64` both models
-    /// tested send, and bytes 10-11 zeros: written so the plaintext looks like
-    /// a captured one, and checked by nothing.
+    /// The 16 bytes to encrypt. Bytes 4-6, the last host's address suffix, get
+    /// a placeholder, and bytes 10-11 zeros: written so the plaintext is laid
+    /// out like a captured one, and checked by nothing.
     pub fn to_bytes(&self) -> [u8; ENCRYPTED_LEN] {
         let battery = |level: Option<u8>, charging: bool| {
             level.unwrap_or(0x7F) & 0x7F | if charging { 0x80 } else { 0x00 }
@@ -149,7 +150,7 @@ impl Plaintext {
         plain[1] = battery(self.primary_battery, self.primary_charging);
         plain[2] = battery(self.secondary_battery, self.secondary_charging);
         plain[3] = battery(self.case_battery, self.case_charging);
-        plain[4..7].copy_from_slice(&[0x1D, 0x7D, 0x64]);
+        plain[4..7].copy_from_slice(&[0xA1, 0xA2, 0xA3]);
         plain[MAC_SUFFIX_RANGE].copy_from_slice(&self.mac_suffix);
         plain[12..16].copy_from_slice(&self.tail);
         plain
@@ -221,7 +222,7 @@ mod tests {
 
     /// The Pro 3 sample in `docs/ble-proximity-pairing.md`: 62% / 62% / 31%, all
     /// charging, with the given suffix. Deliberately fails the legacy magic check
-    /// (byte 0 = 0x10, byte 4 = 0x1D).
+    /// (byte 0 = 0x10, byte 4 not 0x2D).
     fn pro3_plaintext(mac_suffix: [u8; 3]) -> Plaintext {
         Plaintext {
             header: 0x10,
@@ -241,7 +242,7 @@ mod tests {
     fn builds_the_documented_pro3_sample() {
         assert_eq!(
             crate::hex(&pro3_plaintext([0xDD, 0xEE, 0xFF]).to_bytes()),
-            "10 be be 9f 1d 7d 64 dd ee ff 00 00 a7 8a b5 cc"
+            "10 be be 9f a1 a2 a3 dd ee ff 00 00 a7 8a b5 cc"
         );
     }
 
@@ -252,7 +253,7 @@ mod tests {
         let plain = Plaintext {
             case_battery: None,
             case_charging: true,
-            ..pro3_plaintext(CONNECTED_SUFFIX)
+            ..pro3_plaintext(ZEROED_SUFFIX)
         };
         assert_eq!(plain.to_bytes()[3], 0xFF);
         let plain = Plaintext {
@@ -296,13 +297,13 @@ mod tests {
         ));
     }
 
-    /// A connected device zeroes the suffix field. The plaintext is otherwise
-    /// intact, so rejecting it would drop 1% accuracy exactly when AAP is not
-    /// available - the AirPods are on someone's phone.
+    /// Pods out of the case zero the suffix field. The plaintext is otherwise
+    /// intact, so rejecting it would leave the pair unidentified - and dropped -
+    /// whenever it is worn, on someone's phone or not.
     #[test]
-    fn accepts_the_zeroed_suffix_of_a_connected_device() {
+    fn accepts_the_zeroed_suffix_of_pods_out_of_the_case() {
         let key = random_key();
-        let plain = pro3_plaintext(CONNECTED_SUFFIX).to_bytes();
+        let plain = pro3_plaintext(ZEROED_SUFFIX).to_bytes();
         let ct = encrypt(&plain, &key);
 
         assert_eq!(decrypt_for_device(&ct, &key, MAC).unwrap(), plain);

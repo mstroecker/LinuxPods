@@ -11,9 +11,11 @@
 //! Protocol flow, which [`Client::open`] runs:
 //!   1. Open L2CAP connection to AirPods (PSM 4097)
 //!   2. Send handshake, and wait for the device to answer it
-//!   3. Request battery notifications, enable the special features, and
-//!      request the proximity keys
+//!   3. Request battery notifications and enable the special features
 //!   4. Read incoming packets - `aap::decode` reads each one
+//!
+//! The proximity keys are not among the steps: the caller that stores them
+//! asks, with [`Client::request_proximity_keys`] - see [`Client::open`].
 //!
 //! Based on reverse engineering from LibrePods and OpenPods.
 
@@ -38,7 +40,8 @@ pub(crate) const AAP_PSM: u16 = 0x1001; // 4097
 const READ_BUF_LEN: usize = 1024;
 
 /// Connect attempts before giving up. The first attempt against an idle device
-/// usually loses the race with ACL link setup (see [`Client::connect`]).
+/// can lose the race with ACL link setup (see [`Client::connect`]): it did in
+/// one #71 capture, and not in the other.
 const CONNECT_ATTEMPTS: usize = 6;
 
 /// Backoff between connect attempts.
@@ -368,10 +371,12 @@ impl Client {
 
     /// Switches the noise control mode.
     ///
-    /// Fire and forget: the device answers with a generic settings-changed
-    /// notification that names neither the sub-command nor the mode, and the
-    /// 0x0D echo carrying the new mode arrives only sometimes. There is nothing
-    /// here to wait for - the caller updates its own state optimistically.
+    /// Fire and forget: no answer confirms it on every model. AirPods 4 sent
+    /// a generic settings-changed notification that names neither the
+    /// sub-command nor the mode, and the 0x0D echo carrying the new mode only
+    /// sometimes; AirPods Pro 3 echo every change, but about a second later.
+    /// There is nothing here to wait for - the caller updates its own state
+    /// optimistically.
     /// `enable_special_features` must have been sent first, or Adaptive is
     /// unavailable.
     pub async fn set_noise_mode(&self, mode: noise::NoiseMode) -> Result<()> {

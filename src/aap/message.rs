@@ -146,8 +146,8 @@ mod tests {
     }
 
     /// What the app has no use for is passed over, by its opcode: the startup
-    /// dump's other settings, the settings-changed notification, the features
-    /// acknowledgement.
+    /// dump's other settings, the settings-changed notification, the list of
+    /// known hosts that comes with the handshake's answer.
     #[test]
     fn other_packets_are_unknown() {
         let others: [(&[u8], u8); 4] = [
