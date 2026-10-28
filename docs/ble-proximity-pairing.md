@@ -9,10 +9,16 @@ AirPods continuously broadcast BLE advertisements containing battery levels, cha
 ### Key Characteristics
 
 - **Passive Monitoring**: No connection required
-- **Two-Tier Accuracy System**:
-  - **Unencrypted data**: ~10% battery accuracy (10% granularity)
-  - **Encrypted data**: 1% battery accuracy (requires encryption key from AAP)
-- **Slow Updates**: Advertisements update infrequently. Updates mainly take place when something happens.
+- **Cleartext and encrypted parts**:
+  - **Cleartext**: the model, status, lid and connection state, and the batteries in 10% steps
+  - **Encrypted**: the exact batteries, and the last three bytes of the pair's real MAC. The
+    key comes over AAP
+- **Identification needs the key**: an advertisement comes from a random address, and only a
+  key that decrypts it says which pair sent it. LinuxPods drops every advertisement no stored
+  key decrypts, so what it shows over BLE is always the exact, decrypted reading. The cleartext
+  is what an unidentified pair advertises, and is still decoded: offering such a pair for
+  pairing would read it (#131)
+- **Slow Updates**: The payload changes when something happens, and otherwise every 20-30 s
 
 ### Use Cases
 
@@ -42,17 +48,17 @@ Byte    Description                     Example     Status      Notes
 type    Message Type                    0x07        ✅ Working   0x07 = proximity pairing
 len     Length                          0x19        ✅ Working   Payload length (25 bytes)
 0       Prefix                          0x01        ✅ Working   Always 0x01
-1-2     Device Model (Big-Endian)       0x2420      ✅ Working   0x2420 = AirPods Pro
+1-2     Product ID (little-endian)      27 20       ✅ Working   0x2027 = AirPods Pro 3
 3       Status Byte                     0x0b        ✅ Working   Ear detection, orientation, in case
-4       Battery Levels                  0x88        ✅ Working   Left/Right AirPods (~10% accuracy)
-5       Charging + Case Battery         0x07        ✅ Working   Charging bits, case battery (~10% accuracy)
+4       Battery Levels                  0x88        ✅ Working   Pod batteries, a nibble each (10% steps)
+5       Charging + Case Battery         0x07        ✅ Working   Charging bits, case battery nibble
 6       Lid State                       0x31        ✅ Working   Bit 3 = lid (0=open), read while in case
 7       Device Color                    0x00        ✅ Working   Color byte
 8       Connection State                0x04        ✅ Working   0x00 disconnected, 0x04 idle, 0x05 music, ...
-9-24    Encrypted Battery Data          ...         ✅ Working   AES-128 ECB, 1% accuracy (if key available)
+9-24    Encrypted Battery Data          ...         ✅ Working   AES-128 ECB: exact batteries, MAC suffix
 ```
 
-**Working Features** (unencrypted): All batteries (~10%), In Ear detection, Orientation (IsFlipped), Model, Color, Lid state<br>
+**Working Features** (unencrypted): All batteries (10% steps), In Ear detection, Orientation (`is_flipped`), Model, Color, Lid state<br>
 **Not Working** (format unknown): Byte 6 bits 0-2 and 4-7
 
 ## Byte-by-Byte Parsing
@@ -67,23 +73,35 @@ AirPods broadcast which pod is "primary" (left or right). When the right pod is 
 
 Parse **byte 3 (status byte)** to determine orientation.
 
-### Bytes 1-2: Device Model
+### Bytes 1-2: Product ID
 
-16-bit big-endian value identifying the AirPods model:
+Apple's product ID, little-endian - the number BlueZ's `Modalias` carries for the
+same pair (`p2027` for AirPods Pro 3). Read big-endian, the bytes `27 20` give
+`0x2720`, a second number for one model; several public tables list the IDs that
+way. `decode_model_name` in `src/ble/parser.rs` names them:
 
 ```
-Model ID    Device
---------    ------
-0x2420      AirPods Pro
-0x0e20      AirPods Pro (older)
-0x0220      AirPods (2nd gen)
-0x2420      AirPods Pro (2nd gen)
-0x2720      AirPods Pro 3
+Product ID  Device
+----------  ------
+0x2002      AirPods (1st gen)
+0x200F      AirPods (2nd gen)
+0x2013      AirPods (3rd gen)
+0x2019      AirPods 4
+0x201B      AirPods 4 (ANC)
+0x200E      AirPods Pro
+0x2014      AirPods Pro (2nd gen)
+0x2024      AirPods Pro (2nd gen, USB-C)   verified here
+0x2027      AirPods Pro 3                  verified here
+0x200A      AirPods Max
+0x201F      AirPods Max (USB-C)
 ```
+
+Only the two marked are verified on hardware in this project. The rest are listed
+where two public tables agree - the function's documentation names them.
 
 **Decoding:**
 ```rust
-let device_model = u16::from(payload[1]) << 8 | u16::from(payload[2]);
+let product_id = u16::from_le_bytes([payload[1], payload[2]]);
 ```
 
 ### Byte 3: Status Byte
@@ -130,25 +148,24 @@ let is_flipped = !primary_left;
 let xor_factor = primary_left != this_in_case;
 ```
 
-- **isFlipped**: When `true`, battery nibbles and charging bits are swapped
-- **xorFactor**: Used to determine correct ear detection bits
+- **`is_flipped`**: When `true`, battery nibbles and charging bits are swapped
+- **`xor_factor`**: Used to determine correct ear detection bits
 
 **Note:** Ear detection may require calibration and may not work reliably in all scenarios.
 
 ### Byte 4: Battery Levels (Left/Right AirPods)
 
-Battery levels for both AirPods are encoded using the same nibble system:
+A nibble per pod, the primary pod's in the high one:
 ```
-Bit     Component (Normal) 
+Bit     Component (Normal)
 ---     ------------------
-0-4     Left AirPod Battery
-5-7     Right AirPod Battery
+0-3     Right AirPod Battery
+4-7     Left AirPod Battery
 ---     ------------------
 ```
 
-Left and Right AirPods may be swapped based on the primary pod.
-
-**Important:** These values are **approximate** and may differ from actual battery levels by 5-10%. The BLE advertisements update slowly and do not reflect real-time battery drainage.
+With the right pod primary the two swap. Each nibble is a level in 10% steps,
+rounded down - see [Accuracy Limitations](#accuracy-limitations).
 
 ### Byte 5: Charging Status
 
@@ -236,9 +253,17 @@ Color byte -> name
 0x0C: Yellow
 ```
 
-### Byte 8: Lid/Connection Status (Encrypted?)
+### Byte 8: Connection State
 
-❌ **TO FIX** - This byte appears to contain lid and/or connection state but is likely encrypted or uses an unknown encoding. Current parsing attempts are unreliable.
+✅ **Working** - whether a host is connected, and what the AirPods are doing on it.
+See [Connection State](#connection-state) for the values `decode_connection_state`
+names. The #71 captures (AirPods Pro 3) add some that come and go:
+
+- `0x08` for an advertisement or two while a connection is set up, before `0x04`;
+  the first capture had `0x0c` there
+- `0x04` for one or two advertisements while the pods page the host they last
+  used - after the lid opens, or the pods leave the case - even when the page is
+  rejected and nothing connects
 
 ⚠️ Byte 8 is the **last cleartext byte**; everything from byte 9 on is encrypted.
 Any parser reading "connection state" from byte 9 is reading ciphertext, and its
@@ -248,7 +273,8 @@ treat it as unknown.
 
 ### Bytes 9-24: Encrypted Battery Data
 
-✅ **Working** - The final 16 bytes contain encrypted battery data with 1% accuracy.
+✅ **Working** - The final 16 bytes hold the exact batteries, and the real MAC's
+suffix that identifies the pair.
 
 **Decryption Details:**
 - **Algorithm**: AES-128 ECB mode (single block, no IV, no padding)
@@ -263,41 +289,52 @@ treat it as unknown.
 ```
 Byte    Description                     Status      Notes
 ----    -----------                     ------      -----
-0       Header/Flags                    ❓          Model-dependent: 0x10 (Pro 3), 0x00/0x04 (Gen 2)
-1       First Pod Battery + Charging    ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
-2       Second Pod Battery + Charging   ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
-3       Case Battery + Charging         ✅ Working   Bit 7=charging, bits 0-6=level (1% accuracy)
-4       Unknown                         ❓          Constant 0x1D on both models tested
-5       Unknown                         ❓          Constant 0x7D on both models tested
-6       Unknown                         ❓          Constant 0x64 on both models tested
-7-9     Real MAC suffix                 ✅ Working   Last 3 bytes of the permanent MAC; 00 00 00 while connected
-10-11   Padding/Unknown                 ❓          Always 00 00 in observed samples
-12-15   Rotating tail                   ❓          Changes every advertisement (counter or MIC?)
+0       Connection state + flags        ❓          Cleartext byte 8; high bits unexplained
+1       First Pod Battery + Charging    ✅ Working   Bit 7=charging, bits 0-6=level (exact)
+2       Second Pod Battery + Charging   ✅ Working   Bit 7=charging, bits 0-6=level (exact)
+3       Case Battery + Charging         ✅ Working   Bit 7=charging, bits 0-6=level (exact)
+4-6     Last host's address suffix      ❓          The host the pods last used, connected or not
+7-9     Real MAC suffix                 ✅ Working   Last 3 bytes of the permanent MAC; 00 00 00 unless both pods are in the case
+10      Unknown                         ❓          00 in every sample
+11      Counter                         ❓          Counts up slowly
+12-15   Tail                            ❓          Changes whenever the payload does (MIC?)
 ```
+
+The #71 captures (AirPods Pro 3) explain three of these:
+
+- **Byte 0** equaled cleartext byte 8 in all 111 payloads of the second capture:
+  `00`, `04` and `08`. The September samples below carry `0x10` on top on Pro 3,
+  and the first capture a `0x40`; neither is explained.
+- **Bytes 4-6** are the last three bytes of the address of the host the pods last
+  used - the one they page - whether or not it is connected. They changed when
+  another host connected, and changed back after it disconnected (#116).
+- **Byte 11** counted up slowly across the first capture.
 
 **Observed samples** (two models, placeholder MACs):
 ```
-Pro 3 (0x2720), real MAC AA:BB:CC:DD:EE:FF
+Pro 3 (0x2027), real MAC AA:BB:CC:DD:EE:FF
 10 be be 9f 1d 7d 64 [DD EE FF] 00 00 a7 8a b5 cc   -> 62% / 62% / 31%
 10 c8 ca ba 1d 7d 64 [DD EE FF] 00 00 7e 5b ee 7a   -> 72% / 74% / 58%
 
-Gen 2 (0x2420), real MAC 11:22:33:44:55:66
+Gen 2 (0x2024), real MAC 11:22:33:44:55:66
 00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 3b a2 15 bd   -> 100% / 100% / 14%
 00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 03 f4 13 e0   -> 100% / 100% / 14%
    ^^ ^^ ^^  ^^ ^^ ^^  ^^^^^^^^ ^^^^^
-   batteries  identical across both models
+   batteries  last host
 ```
-Within one device, only bytes 1-3 (batteries) and 12-15 (rotating tail) change
-between advertisements. Across the two models, bytes 4-6 and 10-11 are identical;
-only byte 0 differs.
+Within one device, only bytes 1-3 (batteries) and 12-15 (tail) change between
+these samples. Bytes 4-6 are the same for both models because both had last used
+the same host.
 
 **Decryption Validation:**
 
 ⚠️ **Do not validate with magic bytes.** Earlier reverse engineering described a
 marker of byte 0 upper-nibble clear plus byte 4 == `0x2D`. Neither model tested here
-produces it - both report byte 4 = `0x1D`, and byte 0 varies by model (`0x10` on
-Pro 3, `0x00`/`0x04` on Gen 2). A magic-byte check therefore rejects *correct*
-decryptions, which silently disables 1% battery accuracy altogether.
+produces it: byte 4 is part of the last host's address, `0x1D` in every sample
+here, and byte 0 follows the connection state, with `0x10` on top in the Pro 3
+samples. A magic-byte check therefore rejects *correct* decryptions, which leaves
+every pair unidentified - and LinuxPods drops unidentified advertisements, so
+nothing would show over BLE at all.
 
 Validate against the **MAC suffix** instead:
 
@@ -325,25 +362,38 @@ payload of a different length.
 
 ## Accuracy Limitations
 
-### Two-Tier Battery System
+### Batteries in the clear and encrypted
 
 **Unencrypted Data** (bytes 4-5):
-- **Granularity:** 10% increments (0%, 10%, 20%, ..., 100%)
-- **Accuracy:** ~10% off actual values
+- **Granularity:** 10% steps, rounded down (0%, 10%, 20%, ..., 100%)
 - **Encoding:** Nibble-based (0x0-0x9 = 0-90%, 0xA-0xE = 100%, 0xF = unknown)
-- **No encryption key required**
+- **No encryption key required** - but nothing in the clear says which pair sent it
 
 **Encrypted Data** (bytes 9-24):
-- **Granularity:** 1% increments (0-100%)
-- **Accuracy:** 1% accuracy (matches actual battery)
+- **Granularity:** 1% (0-100%), the levels AAP reports
 - **Encoding:** Bit 7 = charging, bits 0-6 = level
 - **Requires ENC_KEY from AAP connection (See [AAP Key Retrieval](aap-key-retrieval.md))**
 
+LinuxPods parses the cleartext levels, then replaces them with the decrypted ones.
+An advertisement no stored key decrypts is dropped, as it cannot be attributed to
+a pair, so today the cleartext levels are never shown: what the key gives is not
+precision but identification. The cleartext is still decoded, as it is all an
+unidentified pair advertises - what offering such a pair for pairing would read
+(#131).
+
 ### Update Frequency
 
-- **BLE Advertisements:** 30-60 seconds (slow)
-- **Real-time:** No - values are cached/delayed
-- **Recommendation:** Use AAP for real-time battery monitoring
+From the #71 captures (AirPods Pro 3):
+
+- **Advertisements:** about 5 a second from each pod that advertises, in every
+  steady state - open case, out of the case, connected or not - with bursts of
+  30-35 a second for about 10 s after the lid opens or the pods go back in the case
+- **Payload:** repeated for hundreds of advertisements. It changes in bursts when
+  something happens, and otherwise every 20-30 s
+- **Closed lid:** the pods stop advertising about 4 s after the lid closes
+- **Which pod:** with both pods in the case, both advertise, each from its own
+  address. With both out of the case, worn or not, only the right one does
+- **Recommendation:** Use AAP for live battery monitoring
 
 ### Ear Detection
 
@@ -379,9 +429,10 @@ Value  State
 
 | Feature | Unencrypted | Encrypted |
 |---------|-------------|-----------|
-| Battery Accuracy | ±10% | 1% |
-| Battery Granularity | 10% increments | 1% increments |
-| Update Rate | 30-60s | 30-60s |
+| Battery Granularity | 10% steps | 1% |
+| Identifies the pair | No | Yes (MAC suffix) |
+| Shown by LinuxPods | No | Yes |
+| Update Rate | on events, else every 20-30 s | on events, else every 20-30 s |
 | Connection Required | No | No (but needs key from AAP) |
 | Works with iPhone connected | Yes | Yes |
 | Control (Noise modes) | No | No |
@@ -391,17 +442,19 @@ Value  State
 
 | Feature                             | Status |
 |-------------------------------------|--------|
-| Accuracy                            | 1% (real-time) |
+| Battery                             | 1%, live |
 | Update Rate                         | <1s |
 | Connection Required                 | Yes (L2CAP PSM 4097) |
 | Works with iPhone connected         | No (disconnects iPhone) |
 | Control Commands (e.g. Noise modes) | Yes |
-| Battery granularity                 | 1% increments |
 
 **Recommendation:**
-- Use **AAP** for real-time battery and control when AirPods connected to Linux
-- Use **BLE (unencrypted)** for quick approximate monitoring when connected to other devices
-- Use **BLE (encrypted)** for accurate passive monitoring (requires one-time key retrieval via AAP)
+- Use **AAP** for live battery and control when the AirPods are connected to Linux
+- Use **BLE (encrypted)** for passive monitoring while they are connected elsewhere
+  (requires one-time key retrieval via AAP)
+- **BLE (unencrypted)** cannot tell one pair from another behind their random
+  addresses, so it is no basis for monitoring a pair. What it can serve is offering
+  to pair AirPods nearby that no key identifies (#131)
 
 ## MAC Address Randomization and Device Identification
 
@@ -409,7 +462,7 @@ Value  State
 
 AirPods use **Bluetooth LE Privacy** (MAC address randomization) in their BLE advertisements:
 
-- **BLE Advertisements**: Use randomized MAC addresses that change periodically
+- **BLE Advertisements**: Use randomized MAC addresses that change from time to time
 - **AAP Connections**: Use the real (permanent) MAC address
 - **Privacy Goal**: Prevent tracking of AirPods via BLE advertisements
 
@@ -417,8 +470,12 @@ AirPods use **Bluetooth LE Privacy** (MAC address randomization) in their BLE ad
 
 When monitoring multiple AirPods devices:
 1. Each device has a real MAC address (from AAP connection)
-2. Each device's BLE advertisements use a different randomized MAC
-3. The randomized MAC changes periodically (every few minutes to hours)
+2. Each device's BLE advertisements use randomized MACs - one per pod, as both pods
+   advertise
+3. The randomized MACs change: in the #71 captures not on a timer, but across a
+   closed lid, both pods at once. Otherwise each pod kept its address for as long
+   as the capture lasted, five minutes, through connecting, disconnecting, and the
+   pods leaving the case and going back
 4. **Problem**: Cannot directly match BLE advertisements to stored encryption keys
 
 ### Solution: Decryption-Based Identification
@@ -427,7 +484,7 @@ To identify which device a BLE advertisement belongs to:
 
 1. **Store encryption keys by real MAC**: When retrieving keys via AAP, store them with the AAP connection's MAC address
 2. **Try all keys on BLE data**: When receiving a BLE advertisement, attempt decryption with all stored keys
-3. **Validate decryption**: Check if decrypted data matches expected format
+3. **Validate decryption**: Check the decrypted MAC suffix - see below
 4. **Identify device**: The key that successfully decrypts identifies the real device
 
 ### Decryption Validation
@@ -441,26 +498,28 @@ Bytes 7-9 of the decrypted payload carry the last 3 bytes of the device's real
 MAC. Compare them against the MAC the candidate key is stored under:
 
 ```rust
-fn matches_device(decrypted: &[u8; 16], mac_addr: &str) -> bool {
-    let Some(suffix) = mac_suffix(mac_addr) else { return false };
-    decrypted[7..10] == suffix || decrypted[7..10] == [0x00; 3]
+fn matches_device(decrypted: &[u8; 16], mac_addr: bluer::Address) -> bool {
+    decrypted[7..10] == mac_addr[3..] || decrypted[7..10] == [0x00; 3]
 }
 ```
 
-**While connected, the suffix is zeroed.** A device connected to a host publishes
-`00 00 00` in bytes 7-9 instead of its MAC suffix - which fits the field's purpose,
-since it exists so a *disconnected* device can be recognized behind a randomized
-address. Observed on AirPods Pro 3 (0x2720), with the rest of the plaintext intact:
+**Out of the case, the suffix is zeroed.** The pods publish `00 00 00` in bytes
+7-9 instead of the MAC suffix unless both are in the case (status bit 2), whether
+a host is connected or not. In the #71 captures the suffix went to zero with the
+first advertisement from out of the case, and came back about 0.1 s after bit 2
+when the pods went back in. Observed on AirPods Pro 3 (0x2027) with both pods
+worn, the rest of the plaintext intact:
 
 ```
 14 50 4d ff 1d 7d 64 [00 00 00] 00 0f d4 65 7c 03   -> 80% / 77% / case unknown
       ^^ ^^ ^^  ^^ ^^ ^^ ^^^^^^^^
-      batteries  usual markers   zeroed suffix
+      batteries  last host  zeroed suffix
 ```
 
-Rejecting that form drops the connected device to the cleartext's 10% buckets and
-leaves it unidentified behind its rotating address - exactly the "connected to an
-iPhone" case this document sets out to support.
+Rejecting that form leaves the pair unidentified whenever a pod is out of the case
+- in someone's ears, connected to an iPhone or not - and an unidentified
+advertisement is dropped, so the pair would vanish from BLE in exactly the case
+this document sets out to support.
 
 **Why accepting both is safe.** Identification never came from *reading* the
 suffix; it comes from which key produced the plaintext, one key being tried at a
@@ -491,8 +550,9 @@ BLE Advertisement received (Random MAC: 77:88:99:00:11:22)
 
 Because identification resolves the randomized MAC back to the permanent one,
 per-device state should be keyed by the **real** MAC. Keying by the advertised
-MAC instead makes state grow without bound, since Apple rotates it continuously
-while disconnected (observed: 4 distinct MACs for one device inside 45 seconds).
+MAC instead splits one pair across an address per pod, and adds two more every
+time the lid closes. An early count of four addresses for one pair inside 45
+seconds was most likely that: two pods, and a closed lid.
 Advertisements that cannot be identified - no stored key, or a key that does not
 match - are best dropped rather than kept: their rotating MACs cannot be collapsed,
 nothing can be attributed to them, and storing them is exactly what a BLE spam flood
@@ -507,8 +567,8 @@ first AAP connection.
 - Advertisement packets may be intermittent
 - Check payload length before accessing bytes
 - Handle missing/incomplete packets gracefully
-- Battery values > 100 indicate unavailable (parser returns nil pointer)
-- Parser automatically handles orientation (IsFlipped)
+- Battery values > 100 indicate unavailable (the parser returns `None`)
+- Parser automatically handles orientation (`is_flipped`)
 
 ## References
 
@@ -519,29 +579,31 @@ first AAP connection.
 
 ## Known Limitations
 
-1. **Update latency** - BLE advertisements update every 30-60 seconds (inherent to protocol)
-2. **Unencrypted battery accuracy** - ~10% granularity, may be off by up to 10% (use encrypted data for 1% accuracy)
-3. **Encryption key requirement** - Accurate (1%) battery requires one-time key retrieval via AAP connection
-4. **Byte 0 is model-dependent** - `0x10` on Pro 3, `0x00`/`0x04` on Gen 2. Its meaning
-   is unknown; do not validate against it. Validate by MAC suffix (bytes 7-9); see
+1. **Update latency** - the payload changes on events, and otherwise every 20-30 s
+   (inherent to protocol)
+2. **Cleartext batteries** - 10% steps, and nothing to tell which pair sent them
+3. **Encryption key requirement** - identifying a pair, and with it any BLE reading
+   in LinuxPods, requires one-time key retrieval via AAP connection
+4. **Byte 0's high bits are unexplained** - the rest of it follows the connection
+   state. Do not validate against it. Validate by MAC suffix (bytes 7-9); see
    [Decryption Validation](#decryption-validation)
-5. **Bytes 4-6 and 12-15 unidentified** - Bytes 4 (`0x1D`), 5 (`0x7D`) and 6 (`0x64`) are
-   constant across both models tested; bytes 12-15 change on every advertisement and are
-   presumed to be a counter or MIC. None have been confirmed
-6. **Only two models tested** - AirPods Pro 3 (0x2720) and AirPods Pro Gen 2 (0x2420).
+5. **Bytes 10 and 12-15 unidentified** - byte 10 is `00` in every sample; bytes 12-15
+   change whenever the payload does, and may be a MIC. Neither has been confirmed
+6. **Only two models tested** - AirPods Pro 3 (0x2027) and AirPods Pro Gen 2 (0x2024).
    The MAC-suffix rule holds on both; behavior on older hardware is unknown
 
 ---
 
-**Last Updated:** 2026-10-25<br>
+**Last Updated:** 2026-10-28<br>
 **Tested With:**
- - AirPods Pro (Gen 2) (0x2420), Firmware 7A305
- - AirPods Pro 3 (0x2720), Firmware 8A353
+ - AirPods Pro (Gen 2) (0x2024), Firmware 7A305
+ - AirPods Pro 3 (0x2027), Firmware 8A353
 
 **Confidence note:** The decrypted layout was derived from advertisements captured
 from two devices on 2026-09-09/10. Byte positions 1-3 (batteries) and 7-9 (MAC
 suffix) are confirmed on both - the batteries track the cleartext values, and the
-suffix matched the real MAC on every sample across both models. The remaining fields
-are inference from constancy, not verified meaning. The `0x2D` marker at byte 4
-described by earlier reverse engineering was not observed on either device.
+suffix matched the real MAC on every sample with both pods in the case. Bytes 0, 4-6
+and 11 are read from the two #71 captures of AirPods Pro 3; the rest is unexplained.
+The `0x2D` marker at byte 4 described by earlier reverse engineering was not
+observed on either device.
 

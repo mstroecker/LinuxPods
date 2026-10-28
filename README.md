@@ -30,27 +30,31 @@ be changed, only observed.
 
 | Feature | Status |
 | --- | --- |
-| Battery level - left pod, right pod, case | ✅ |
-| Exact (1%) battery, once a stored key decrypts the advertisement | ✅ |
+| Battery level - left pod, right pod, case, exact to 1% | ✅ |
 | Charging state, per pod and case | ✅ |
 | In-ear detection | ✅ |
 | Case lid open/closed | ✅ |
 | Playback state - idle, music, call, ringing | ✅ |
 | Model and color identification | ✅ |
 | Identification behind a randomized BLE MAC | ✅ |
+| Offering to pair AirPods nearby that no key identifies | 📋 |
 
-Without a key the levels arrive in ~10% steps, and every 30-60 seconds rather than live.
+All of this needs the pair's encryption key, which the app fetches over AAP the first
+time the pair connects to this machine. An advertisement comes from a random address,
+and only a key that decrypts it says which pair sent it; one no stored key decrypts is
+dropped. The advertised payload changes when something happens, and otherwise only
+every 20-30 seconds, so levels are not live.
 
 ### Over AAP
 
-Needs an L2CAP connection to this machine, so it covers one pair at a time. This is the
-only channel that can *send* commands.
+Needs an L2CAP connection to this machine: every pair connected here gets one of its
+own. This is the only channel that can *send* commands.
 
 | Feature | Status |
 | --- | --- |
-| Exact (1%) battery, live | ✅ |
+| Battery, exact to 1% and live | ✅ |
 | Charging state | ✅ |
-| Encryption key retrieval, which unlocks 1% over BLE | ✅ |
+| Encryption key retrieval, which identifies the pair over BLE | ✅ |
 | Noise control - Transparency, Adaptive, ANC, Off | ✅ |
 | Conversation Awareness | 🚧 |
 | Device rename | 📋 |
@@ -59,7 +63,7 @@ only channel that can *send* commands.
 | Loud sound reduction | 📋 |
 | Firmware version | 📋 |
 
-🚧 means the interface is built but the command behind it is still unknown.
+🚧 means the switch is in the window, grayed out: the command behind it is still unknown.
 
 ### Linux integration
 
@@ -177,18 +181,22 @@ compiled into the binary, so the installed copy does not depend on the source tr
 
 Launch with `cargo run`, or `./target/release/linuxpods` after a release build.
 `--minimized` starts in the system tray without showing the window; the tray's
-**Open LinuxPods** brings it up.
+**Open LinuxPods** brings it up. Launched again with `--minimized` while it runs, it
+leaves the window as it is.
 
 The window shows the three battery levels, charging state and in-ear detection; under
 them the model and its color, and which source the reading came from. With more than
-one pair known, the header bar switches between them. **Preferences**, in the main menu,
-lists every known device with its encryption key status.
+one pair to show - each one it holds a key for, and each one connected over AAP - the
+header bar switches between them. **Preferences**, in the main menu, lists every one of
+them with its encryption key status.
 
 Setup is connecting the AirPods to this machine once. On every connection LinuxPods asks
 them for their encryption keys and writes them to `~/.local/share/linuxpods/keys.json`,
-which is what unlocks 1% accuracy over BLE. From then on the app reads exact levels even
-when the AirPods are connected elsewhere. Asking again on each connection picks up the new
-keys after a re-pair: reconnecting the AirPods is all it takes.
+which is what identifies them over BLE: until then the app has no way to tell their
+advertisements from any other pair's, and shows nothing for them there. From then on the
+app reads exact levels even when the AirPods are connected elsewhere. Asking again on
+each connection picks up the new keys after a re-pair: reconnecting the AirPods is all
+it takes.
 
 ## How it works
 
@@ -204,11 +212,13 @@ Coordinator (state per device, keyed by real MAC)
     └─ Broadcasts snapshots to every subscriber:
         ├─ UI ─────────────> battery widgets, device switcher
         ├─ System tray ────> tray menu
-        └─ BlueZ provider ─> GNOME Settings battery, one per connected pair
+        └─ Attachment ─────> GNOME Settings battery for each attached pair with a reading
 ```
 
-Each subscriber gets its own channel and receives the current state immediately on
-subscribing, so the interface is populated before the first advertisement arrives.
+Every subscriber sees the same latest snapshot, on one `watch` channel: one that falls
+behind skips to the newest rather than queueing the ones it missed. It receives the
+current state immediately on subscribing, so the interface is populated before the
+first advertisement arrives.
 
 AAP runs over an L2CAP socket on PSM 4097; BLE advertisements are decrypted with AES-128
 when a key is stored. Both protocols are documented in full:
@@ -232,14 +242,26 @@ GTK_DEBUG=interactive cargo run      # GTK inspector (make run-debug)
 
 Both feature sets are checked, as CI checks them. The `harness` feature adds the test
 harness: a fake BlueZ and fake AirPods, the pipeline tests that run against them, and
-`make fake-world`, which runs the app among them.
+`make fake-world`, which runs the app among them:
+
+```bash
+make fake-world SCENARIO=two-pairs   # in-range, connected, two-pairs, flood or empty
+make fake-world HEADLESS=1           # the app on Broadway, in a browser
+make fake-world-stop
+```
+
+`scripts/fake-world.sh` changes the fake world and drives the app's UI while it runs;
+[`.claude/skills/fake-world/SKILL.md`](.claude/skills/fake-world/SKILL.md) describes it.
+Both `make test` and `make fake-world` leave a harness build at `target/debug/linuxpods`,
+which behaves like a plain one unless the fake world's script started it: run
+`cargo build` before testing against real AirPods all the same.
 
 Debug logging reports each protocol stage separately:
 
 ```
-BLE parsable: 5C:4D:3F:B5:41:B6 model=0x2720 payload=25B
+BLE parsable: 5C:4D:3F:B5:41:B6 model=0x2027 payload=25B
 BLE decryptable: 5C:4D:3F:B5:41:B6 -> AA:BB:CC:DD:EE:FF (key matched)
-BLE AA:BB:CC:DD:EE:FF [decrypted 1%]: left=Some(75) right=Some(73) case=Some(61)
+BLE 5C:4D:3F:B5:41:B6 [decrypted 1%]: left=Some(75) right=Some(73) case=Some(61) lid_open=None one_in_case=false in_ear=true/true
 AAP connected to AA:BB:CC:DD:EE:FF (cid 2822, attempt 1)
 ```
 
@@ -259,17 +281,21 @@ src/
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
 ├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
-├── bluez.rs       # Adapters, the device watch, a BatteryProvider1 per adapter
+├── bluez.rs       # Adapters, the device watch, a battery provider per adapter
+├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # Key storage under XDG data dir
 ├── indicator.rs   # System tray (StatusNotifierItem)
-└── ui/            # GTK4/libadwaita: window, Control page, Preferences
+├── ui/            # GTK4/libadwaita: window, Control page, Preferences; automation.rs, harness only
+├── harness/       # harness only: fake AirPods (pods.rs), fake BlueZ (bluez.rs), the world (world.rs)
+└── bin/           # harness only: fakepods.rs, the fake world make fake-world runs
 ```
 
 GTK owns the main thread; tokio carries BLE, AAP and D-Bus work. The two meet over
 channels, since GTK types are `!Send`: snapshots reach the window and tray on a `watch`
-channel, and a command to the AirPods - a noise control mode - goes on the queue of that
-pair's AAP link, which carries its commands out in the order they were sent and hands
-each result back to its caller.
+channel, the tray's window commands reach the window on an `async-channel`, and a
+command to the AirPods - a noise control mode - goes on the queue of that pair's AAP
+link, which carries its commands out in the order they were sent and hands each result
+back to its caller.
 
 ## Contributing
 
