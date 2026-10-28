@@ -98,7 +98,8 @@ synthetic, or a captured advertisement committed together with the key that decr
   label from a command's result, say.
 - A `StringList` behind a `DropDown` spliced, appended or removed without reading
   `selected()` first.
-- Noise Control or Features left sensitive when the device is not on AAP.
+- Noise Control left sensitive when the device is not on AAP, or Features made
+  sensitive while the command behind it is unknown.
 - A resource path the UI loads that is missing from `assets/resources.gresource.xml`, or
   from the list in the `bundled_resources_resolve` test.
 - Placeholder UI the user has not built yet must stay visible but insensitive, with a

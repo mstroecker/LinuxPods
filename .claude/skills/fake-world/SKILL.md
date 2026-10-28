@@ -171,7 +171,9 @@ Change, settle, then read: `SetBattery`, `Settle`, `tree`.
   rotates every 10 s, and the fake BlueZ drops an address 30 s after it goes quiet. An
   address's first advertisement comes in `InterfacesAdded`, the rest in
   `PropertiesChanged`, and the app reads both: 10 readings out of 10 per address, and a
-  first reading within about a second of start.
+  first reading within about a second of start. Real AirPods differ: about 5
+  advertisements a second from each pod, each from its own address, which changes
+  across a closed lid rather than on a timer (#71). #115 brings the fake in line.
 - **Logs** are in `$XDG_RUNTIME_DIR/linuxpods-harness/world/log/`: `linuxpods.log` at
   `RUST_LOG=linuxpods=debug`, `fakepods.log` and `broadwayd.log`. Set `RUST_LOG` before
   `make` to change the level. They stay until the next start.

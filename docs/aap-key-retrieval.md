@@ -4,15 +4,15 @@ This document describes how to retrieve encryption keys from AirPods using the A
 
 ## Overview
 
-AirPods encrypt the last 16 bytes of their BLE proximity pairing advertisements. To decrypt this data and access accurate battery information (1% precision), you need to retrieve encryption keys from the AirPods via an AAP connection.
+AirPods encrypt the last 16 bytes of their BLE proximity pairing advertisements. To decrypt this data, you need to retrieve encryption keys from the AirPods via an AAP connection.
 
 ### Why This Matters
 
-- **BLE advertisements**: 10% battery accuracy (unencrypted portion)
-- **Encrypted BLE payload**: 1% battery accuracy (requires decryption keys)
-- **Direct AAP connection**: 1% battery accuracy (but requires active connection)
+- **BLE advertisements** come from random addresses. The cleartext part says nothing about which pair sent them
+- **The encrypted part** carries the last three bytes of the pair's real MAC, and the exact batteries. A key that decrypts it identifies the pair
+- **Direct AAP connection**: exact batteries too, but requires an active connection
 
-By retrieving keys via AAP, you can decrypt BLE advertisements and get accurate battery readings even when the AirPods are disconnected or connected to another device.
+By retrieving keys via AAP, you can identify a pair's BLE advertisements and read its batteries even when the AirPods are disconnected or connected to another device. LinuxPods drops every advertisement no stored key decrypts, so without the key a pair does not show over BLE at all.
 
 ## Connection Details
 
@@ -217,7 +217,9 @@ See [BLE Proximity Pairing documentation](ble-proximity-pairing.md) for details 
 ### Multiple Packets
 
 The AirPods may send several packets after the key request:
-- Some packets are status updates, or the features acknowledgment (`04 00 04 00 2B 00`)
+- Some packets are status updates, or the unsolicited list of known hosts (`04 00 04 00 2B 00`),
+  which comes with the handshake's answer. It is not an answer to the features packet, which
+  nothing answers (#71)
 - Only packets with `data[4] == 0x31` contain keys
 - **Loop and check each packet** until keys are found
 
@@ -342,5 +344,5 @@ Likely works with:
 
 ---
 
-- **Last Updated:** 2026-10-20
-- **Tested With:** AirPods Pro (2nd Gen) 0x2420, AirPods Pro 3 0x2720
+- **Last Updated:** 2026-10-28
+- **Tested With:** AirPods Pro (2nd Gen) 0x2024, AirPods Pro 3 0x2027
