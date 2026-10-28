@@ -42,10 +42,13 @@ let socket = Socket::<SeqPacket>::new_seq_packet()?;
 let stream = socket.connect(sa).await?;
 ```
 
-⚠️ A non-blocking connect returns almost immediately and reports success even when
-the BR/EDR ACL link is not yet up. **Check `peer_addr().cid` straight after
-connecting**: a zero cid means no channel was established, every send will fail with
-`ENOTCONN`, and the socket cannot recover - discard it and retry with a fresh one.
+⚠️ bluer's connect can report success with the channel still connecting: a zero
+`peer_addr().cid` means the connect has not finished, and every send fails with
+`ENOTCONN` until it has. **Wait for the channel, and never drop the socket while it is
+pending**: `conn_info()` reads back once the channel is up, and `peer_addr()` fails
+`ENOTCONN` once it has closed. A socket closed while connecting leaves the device
+holding a channel this end has forgotten, and a retry that gets the same local channel
+shares it with that orphan (#136). `Client::connect` does the waiting.
 
 ### Step 2: Send Handshake
 
