@@ -310,17 +310,20 @@ The #71 captures (AirPods Pro 3) explain three of these:
   another host connected, and changed back after it disconnected (#116).
 - **Byte 11** counted up slowly across the first capture.
 
-**Observed samples** (two models, placeholder MACs):
+**Observed samples** (two models; the MACs and the host address are placeholders):
 ```
 Pro 3 (0x2027), real MAC AA:BB:CC:DD:EE:FF
-10 be be 9f 1d 7d 64 [DD EE FF] 00 00 a7 8a b5 cc   -> 62% / 62% / 31%
-10 c8 ca ba 1d 7d 64 [DD EE FF] 00 00 7e 5b ee 7a   -> 72% / 74% / 58%
+10 be be 9f a1 a2 a3 [DD EE FF] 00 00 a7 8a b5 cc   -> 62% / 62% / 31%
+10 c8 ca ba a1 a2 a3 [DD EE FF] 00 00 7e 5b ee 7a   -> 72% / 74% / 58%
 
 Gen 2 (0x2024), real MAC 11:22:33:44:55:66
-00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 3b a2 15 bd   -> 100% / 100% / 14%
-00 e4 e4 8e 1d 7d 64 [44 55 66] 00 00 03 f4 13 e0   -> 100% / 100% / 14%
-   ^^ ^^ ^^  ^^ ^^ ^^  ^^^^^^^^ ^^^^^
-   batteries  last host
+00 e4 e4 8e a1 a2 a3 [44 55 66] 00 00 3b a2 15 bd   -> 100% / 100% / 14%
+00 e4 e4 8e a1 a2 a3 [44 55 66] 00 00 03 f4 13 e0   -> 100% / 100% / 14%
+   ^^ ^^ ^^ ^^ ^^ ^^ ^^^^^^^^^^ ^^^^^
+   |        |        |          bytes 10-11
+   |        |        MAC suffix
+   |        last host
+   batteries
 ```
 Within one device, only bytes 1-3 (batteries) and 12-15 (tail) change between
 these samples. Bytes 4-6 are the same for both models because both had last used
@@ -330,17 +333,19 @@ the same host.
 
 ⚠️ **Do not validate with magic bytes.** Earlier reverse engineering described a
 marker of byte 0 upper-nibble clear plus byte 4 == `0x2D`. Neither model tested here
-produces it: byte 4 is part of the last host's address, `0x1D` in every sample
-here, and byte 0 follows the connection state, with `0x10` on top in the Pro 3
-samples. A magic-byte check therefore rejects *correct* decryptions, which leaves
-every pair unidentified - and LinuxPods drops unidentified advertisements, so
-nothing would show over BLE at all.
+produces it: byte 4 is part of the last host's address, whatever that host's is,
+and byte 0 follows the connection state, with `0x10` on top in the Pro 3 samples.
+A magic-byte check therefore rejects *correct* decryptions, which leaves every pair
+unidentified - and LinuxPods drops unidentified advertisements, so nothing would
+show over BLE at all.
 
 Validate against the **MAC suffix** instead:
 
 - Bytes 7-9 of the decrypted payload hold the last 3 bytes of the device's real MAC
-- Compare them against the MAC the candidate key is stored under
-- Three exact bytes make a false positive roughly 1 in 16.7 million per key tried
+- Compare them against the MAC the candidate key is stored under, and accept
+  `00 00 00` too - see [Decryption Validation](#decryption-validation) below
+- That makes a false positive roughly 1 in 8.4 million per key tried (2^-23): three
+  exact bytes would be 2^-24, and the zeroed form doubles it
 
 This is both more reliable and more useful: the payload identifies *its own device*,
 which is exactly what is needed to resolve a randomized BLE MAC back to a real one.
@@ -353,12 +358,11 @@ It is the only validation this implementation performs.
 **Battery Validation:**
 - Values > 100 indicate unavailable/unknown battery
 
-**Important:** The encrypted portion is always the **last 16 bytes** of the payload, not a fixed byte offset. Extract using `payload[len(payload)-16:]`.
-
-Note that every payload observed so far is exactly 25 bytes, where the last 16
-bytes and the fixed range `payload[9..25]` are the same slice. Implementations
-using the fixed offset therefore work today, but would break on any future
-payload of a different length.
+**Where it is:** LinuxPods takes the fixed range `payload[9..25]`
+(`ENCRYPTED_RANGE` in `src/ble/parser.rs`), right after the last cleartext byte.
+Every payload observed so far is exactly 25 bytes, where that range is also the
+last 16 bytes. Whether a payload of another length would keep the encrypted
+portion at byte 9 or at the end is unknown.
 
 ## Accuracy Limitations
 
@@ -507,13 +511,16 @@ fn matches_device(decrypted: &[u8; 16], mac_addr: bluer::Address) -> bool {
 7-9 instead of the MAC suffix unless both are in the case (status bit 2), whether
 a host is connected or not. In the #71 captures the suffix went to zero with the
 first advertisement from out of the case, and came back about 0.1 s after bit 2
-when the pods went back in. Observed on AirPods Pro 3 (0x2027) with both pods
-worn, the rest of the plaintext intact:
+when the pods went back in. Observed on AirPods Pro 3 (0x2027), connected and
+out of the case, the rest of the plaintext intact:
 
 ```
-14 50 4d ff 1d 7d 64 [00 00 00] 00 0f d4 65 7c 03   -> 80% / 77% / case unknown
-      ^^ ^^ ^^  ^^ ^^ ^^ ^^^^^^^^
-      batteries  last host  zeroed suffix
+14 50 4d ff a1 a2 a3 [00 00 00] 00 0f d4 65 7c 03   -> 80% / 77% / case unknown
+   ^^ ^^ ^^ ^^ ^^ ^^ ^^^^^^^^^^ ^^^^^
+   |        |        |          bytes 10-11
+   |        |        zeroed suffix
+   |        last host
+   batteries
 ```
 
 Rejecting that form leaves the pair unidentified whenever a pod is out of the case
@@ -572,7 +579,7 @@ first AAP connection.
 
 ## References
 
-- [LibrePods](https://github.com/kavishdevar/librepods) - Open source Android and Linux AirPods client
+- [LibrePods](https://github.com/librepods-org/librepods) - Open source Android and Linux AirPods client
 - [OpenPods](https://github.com/adolfintel/OpenPods) - Open source Android AirPods client
 - [furiousMAC/continuity](https://github.com/furiousMAC/continuity) - Apple Continuity protocol documentation
 - BlueZ D-Bus API documentation

@@ -8,8 +8,10 @@ LinuxPods manages Apple AirPods on Linux: a GTK4/libadwaita GNOME app with batte
 monitoring, a system tray and GNOME Settings integration. Rust, edition 2024, 1.92+.
 Dependencies and versions are in `Cargo.toml`; build targets are in the `Makefile`.
 
-**Verify the binary is fresh before testing against hardware.** `cargo test` builds test
-harnesses, not `target/debug/linuxpods`; a stale binary has wasted debugging time twice.
+**Verify the binary is fresh before testing against hardware.** Plain `cargo test` builds
+test harnesses, not `target/debug/linuxpods`, and `make test` and `make fake-world` leave
+a harness build there. Run `cargo build` before testing against a pair; a stale binary
+has wasted debugging time twice.
 
 ## Architecture
 
@@ -24,7 +26,9 @@ src/
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # Encryption keys at ~/.local/share/linuxpods/keys.json (0600)
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
-└── ui/            # GTK4/libadwaita: window, Control page, Preferences
+├── ui/            # GTK4/libadwaita: window, Control page, Preferences, automation
+├── harness/       # Harness only: fake AirPods, fake BlueZ, the fake world
+└── bin/fakepods.rs # Harness only: the fake world's process, which `make fake-world` runs
 ```
 
 **Threading.** GTK owns the main thread, tokio carries BLE/AAP/D-Bus. GTK types are
@@ -34,8 +38,9 @@ and the tray's window commands on an `async-channel`, both consumed with
 queue (`Coordinator::command`), and each result comes back on a oneshot. Never touch a
 widget from a tokio task.
 
-**State.** `Coordinator` merges AAP (exact, needs L2CAP) and BLE (10% steps, or exact
-once a stored key decrypts) **per device**, keyed by the **real** MAC.
+**State.** `Coordinator` merges AAP (exact, needs L2CAP) and BLE (exact, and only what a
+stored key decrypts, which also identifies the pair) **per device**, keyed by the
+**real** MAC.
 
 - `supersedes_ble` is per-device, never global - a global pause blanks out every other
   pair - and holds only once the link has a reading. Hidden from link-up, the device
@@ -43,7 +48,7 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   withdrawn and exported again on every reconnect (#62). It runs *after* decryption,
   since an advertisement carries only a random MAC until then.
 - `subscribe()` returns a `watch::Receiver`: one latest-wins value every consumer sees,
-  so UI, tray and provider never compete for a snapshot, and a slow one skips stale
+  so UI, tray and attachment never compete for a snapshot, and a slow one skips stale
   snapshots instead of queueing them (per-consumer unbounded queues grew without limit
   under an advertisement flood). It is marked changed so the current state arrives at
   once - otherwise the window comes up blank until the first advertisement. Never hold
@@ -67,15 +72,15 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   while the write ran on, and a second save raced it on the same temp file.
 - The session itself - connect, handshake, battery and feature requests - is
   `aap::Client::open`. `open_aap` refuses a device that has a link, before and after it,
-  requests the keys, and records the link (`Inner::links`: client, reading, mode) and its
-  command queue (`Coordinator::queues`) as its last step, with nothing awaited after, and
-  returns the `AapLink` that owns it. Dropped anywhere - timed out, aborted, run to its
-  end - it shuts the socket and removes its own record and queue, matched by client, so a
-  newer link stands. Its read loop reads that client only, never
+  requests the keys, and records the link (`Inner::links`: client, reading, mode,
+  identity) and its command queue (`Coordinator::queues`) as its last step, with nothing
+  awaited after, and returns the `AapLink` that owns it. Dropped anywhere - timed out,
+  aborted, run to its end - it shuts the socket and removes its own record and queue,
+  matched by client, so a newer link stands. Its read loop reads that client only, never
   one looked up by MAC - a loop outliving its link would read the replacement's socket
   under the old identity, which once stored one device's key under another's MAC.
   `Coordinator::command` and `disconnect_aap` name their device, and GNOME Settings gets
-  one `BatteryProvider1` object per attached pair.
+  one `BatteryProvider1` object per attached pair with a reading.
 - Commands to the AirPods take one path: `Coordinator::command(mac, Command)`. It queues
   the command on the link's queue in the call itself, not at the first poll, so commands
   go out in the order of the calls however their futures are spawned. Spawned apart, two
@@ -100,16 +105,17 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   `handle_advertisement` keeps the cached lid for it; with bit 4 clear the lid goes.
   Replaced wholesale, the lid blinked several times a second with one pod worn. The
   parser stays stateless: it reports the bit, the coordinator keeps.
-- Apple rotates the advertised BLE MAC every few seconds while disconnected, so an
-  advertisement no stored key decrypts cannot be attributed to anything. It is dropped on
-  arrival - not stored, not broadcast; storing those is what a BLE spam flood fed on.
-  The scanner's `BLE parsable:` log still records it.
+- Each pod advertises from a random address of its own, which changed across a closed lid
+  and never on a timer in the #71 captures, so an advertisement no stored key decrypts
+  cannot be attributed to anything. It is dropped on arrival - not stored, not
+  broadcast; storing those is what a BLE spam flood fed on. The scanner's `BLE parsable:`
+  log still records it.
 - A D-Bus subscription that advertisements reach is drained by a task that never awaits
   its reader, and what an advertiser or a flapping adapter can trigger at will is
   coalesced per device or adapter - never queued per signal, never dropped. Left in
   zbus's 64-message queue, advertisements stopped zbus reading the connection, and a
   reply attachment awaited never came (#90). Queued one per signal, an advertiser
-  re-signalling its services kept a pair waiting 55 s to attach in a test (#96).
+  re-signaling its services kept a pair waiting 55 s to attach in a test (#96).
   `Connected` changes are kept, in order. A draining task only coalesces and never calls
   BlueZ: awaiting a reply leaves its own subscription unread, the #90 stall again. An
   answer that needs BlueZ is worked out in another task, as `bluez::watch_adapters`
@@ -127,8 +133,9 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
   cannot check a well-known sender, and the connection watch's rule names no sender at
   all. A BlueZ signal counts only from the unique name the state was read from (the
   `GetManagedObjects` reply's sender), and `NameOwnerChanged` only from
-  `org.freedesktop.DBus`. Applied as they came, an old bluetoothd's last `Powered`, or
-  any local process's, left a phantom adapter behind (#50).
+  `org.freedesktop.DBus`; the connection watch does not check yet (#132). Applied as they
+  came, an old bluetoothd's last `Powered`, or any local process's, left a phantom
+  adapter behind (#50).
 - Signals whose order matters come from one match rule, one stream: zbus queues each
   subscription apart, and `select!` over several picks among ready ones at random.
   `adapter_changes` reads all of bluetoothd's that way; the fake BlueZ, reading a
@@ -165,22 +172,25 @@ once a stored key decrypts) **per device**, keyed by the **real** MAC.
 ## Protocol
 
 **Keys are requested on every AAP connection**, not only when none is stored. Re-pairing
-regenerates them, and a stale key fails suffix validation without a word, dropping BLE
-to 10% steps. The request is one packet, which `open_aap` sends right after
-`aap::Client::open`: `open` leaves it out, so a probe never receives keys it did not ask
-for and prints them. `aap_read_loop` stores the key that comes back if it is
-16 bytes and differs from the one held - the length check keeps a malformed key from
-replacing a working one on disk, and skipping an unchanged key avoids a keystore
-write per connection.
+regenerates them, and a stale key fails suffix validation without a word: the pair drops
+off BLE altogether, since an advertisement no key decrypts is dropped. The request is one
+packet, which `open_aap` sends right after `aap::Client::open`: `open` leaves it out, so
+a probe never receives keys it did not ask for and prints them. `aap_read_loop` takes the
+key that comes back if it is 16 bytes - the length check keeps a malformed key from
+replacing a working one. It goes into use at once, and the keystore is written only when
+the keys differ from those last saved, so an unchanged key costs no write and a save that
+failed is retried (#38).
 
 **BLE validation is by MAC suffix.** Bytes 7-9 of the decrypted payload hold the last
-three bytes of the real MAC; a match both validates and identifies. A connected device
-zeroes the field, so `00 00 00` is accepted too - identification comes from *which key*
-decrypted, not from reading the suffix, and the union costs one bit (2^-23 per wrong key).
+three bytes of the real MAC; a match both validates and identifies. The pods zero the
+field unless both are in the case (status bit 2), connected or not (#71), so `00 00 00`
+is accepted too - identification comes from *which key* decrypted, not from reading the
+suffix, and the union costs one bit (2^-23 per wrong key).
 
 ⚠️ Do **not** validate with magic bytes. The older check (byte 0 upper nibble `0x0`, byte
-4 `0x2D`) holds on neither AirPods Pro 3 (0x2720) nor Pro Gen 2 (0x2420) - both report
-byte 4 = `0x1D` - and rejects correct decryptions, silently disabling 1% accuracy.
+4 `0x2D`) holds on neither AirPods Pro 3 (0x2027) nor Pro 2 USB-C (0x2024) - byte 4 is
+part of the last host's address, and byte 0 follows the connection state - and rejects
+correct decryptions, leaving every pair unidentified and so dropped.
 
 **AAP packets carry battery only.** `Inner::snapshot` merges in the rest: model and color
 from the identity the link holds; ears, lid, activity and primary pod from the cached
@@ -239,7 +249,9 @@ deadlocked every command sent meanwhile.
   same reason. `aap::decode` routes every packet by its header and opcode;
   each module's `is_*` and `parse_*` still check the header themselves, so they stay safe
   to call on their own.
-- Use synthetic test vectors - never commit a real device key. Encrypt in the test and
+- Use synthetic test vectors - never commit a real device key. New test keys come from
+  `ble::decrypt::random_key()`, not literals (CodeQL's hard-coded key rule, #66); the
+  fixed keys in podstate's and keystore's tests predate that. Encrypt in the test and
   assert the round trip.
 - `Option<u8>` for unknown battery, never a sentinel. Levels above 100 mean unavailable,
   and so does an AAP part with status Disconnected (`0x04`), whatever its level byte: it
@@ -249,8 +261,8 @@ deadlocked every command sent meanwhile.
   ones the coordinator later drops; `BLE decryptable:` reports identification. Noisy
   non-proximity Apple data goes to `trace`.
 - Bytes in logs and probe output go through `linuxpods::hex`, and a packet that may carry
-  keys through `aap::keys::redacted_hex`, which shows a key packet's preamble only. No log,
-  probe or example prints key bytes: their output gets pasted into issues.
+  keys through `aap::keys::redacted_hex`, which shows a key packet's preamble only. No
+  log, probe or example prints key bytes: their output gets pasted into issues.
 - Log text describing control flow goes stale like comments, and is more visible.
 - Tasks on the system bus (`ble_task`, `attachment::run`) never return for good: they set
   themselves up again with `bluez::Backoff`, which counts a run under a minute as a
@@ -266,8 +278,9 @@ deadlocked every command sent meanwhile.
 command that fails: its result comes back to the main context and goes up as a toast, an
 event, never a control's state, so the noise radios keep showing the recorded mode. Read
 a selection *before* mutating the widget - splicing a `StringList` makes `GtkDropDown`
-emit `selected-notify`, clobbering the user's choice. Noise Control and Features are
-commands, so they stay insensitive unless the device is on AAP; BLE is receive-only.
+emit `selected-notify`, clobbering the user's choice. Noise Control is a command,
+so it stays insensitive unless the device is on AAP, and Features stays insensitive until
+the commands behind it are known; BLE is receive-only.
 Artwork and the app icon are compiled into a GResource by `build.rs`
 (`assets/resources.gresource.xml`); a missing resource fails silently, so a test asserts
 every name the UI loads is in the bundle. The tray still points the shell at

@@ -9,3 +9,10 @@ ff4fa2947c5e880621b9866c19fa577d35af09eb:cmd/debug_decrypt_test/main.go:airpods-
 
 # Apple's AAP service UUID, not a key
 3e5033abcee20529d0b4a5665ffbffefb79ab24f:cmd/discover/main.go:generic-api-key:133
+
+# Revoked IRK and ENC_KEY (re-paired 2026-10-04), once the example in
+# docs/aap-key-retrieval.md, which now shows synthetic keys
+d9a7f17f4f6d4934b78e47415fdf0d52daae580e:docs/aap-key-retrieval.md:airpods-key-hex:175
+d9a7f17f4f6d4934b78e47415fdf0d52daae580e:docs/aap-key-retrieval.md:airpods-key-hex:178
+d9a7f17f4f6d4934b78e47415fdf0d52daae580e:docs/aap-key-retrieval.md:airpods-key-hex:261
+d9a7f17f4f6d4934b78e47415fdf0d52daae580e:docs/aap-key-retrieval.md:airpods-key-hex:265

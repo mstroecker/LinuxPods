@@ -106,7 +106,9 @@ synthetic, or a captured advertisement committed together with the key that decr
   "Not available yet" subtitle.
 
 **Logs.** Keep the `BLE parsable:` and `BLE decryptable:` stage prefixes. Noisy
-non-proximity Apple data goes to `trace`.
+non-proximity Apple data goes to `trace`. Bytes go through `linuxpods::hex`, and a
+packet that may carry keys through `aap::keys::redacted_hex`; no log, probe or example
+prints key bytes.
 
 **Commits and PR body.** Flag a `Claude-Session:` trailer or a
 `https://claude.ai/code/session_` link in any commit message in the range or in the PR

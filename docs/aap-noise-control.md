@@ -6,7 +6,7 @@ AirPods noise control modes (Off, ANC, Transparency, Adaptive) can be switched v
 
 **Status:** Verified against AirPods 4 with ANC (firmware A3055) on 2026-02-15, against AirPods Pro 3 and AirPods Pro Gen 2 on 2026-09-12, and against AirPods Pro 3 in the #71 captures. `cargo run --example noise_probe -- <MAC>` reproduces the exchange below.
 
-**Source:** Packet format originally from [LibrePods](https://github.com/kavishdevar/librepods/blob/main/AAP%20Definitions.md) reverse engineering, validated independently.
+**Source:** Packet format originally from [LibrePods](https://github.com/librepods-org/librepods/blob/main/docs/AAP%20Definitions.md) reverse engineering, validated independently.
 
 ## Command Packet
 
@@ -83,7 +83,7 @@ back with no delay, which is enough; and as a link carries out its commands one
 at a time, no other command goes out between them.
 
 Identifier and values from [LibrePods' control command
-table](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.md).
+table](https://github.com/librepods-org/librepods/blob/main/docs/control_commands.md).
 
 ## Response Behavior
 
@@ -160,9 +160,9 @@ When the noise control mode is changed from another device (e.g., iPhone, Apple 
 
 ## Settings Command Family (0x09)
 
-The `0x09` command byte is a family of settings sub-commands, not exclusive to noise control. Observed sub-commands during connection startup, with the data where it was recorded - the earlier runs', and AirPods Pro 3's from #71, whose dump held 21 settings:
+The `0x09` command byte is a family of settings sub-commands, not exclusive to noise control. Observed sub-commands during connection startup, with the data where it was recorded: AirPods 4's from the test runs below, and AirPods Pro 3's from #71, whose dump held 21 settings and neither `0x1A` nor `0x34`:
 
-| Sub-cmd (byte 6) | Notes | Pro 3 (#71) |
+| Sub-cmd (byte 6) | Notes (AirPods 4) | AirPods Pro 3 (#71) |
 |-------------------|-------|-------------|
 | `0x0D` | **Noise control mode** | the mode |
 | `0x17` | Unknown | seen |
@@ -250,8 +250,8 @@ On AirPods 4; AirPods Pro 3 differ, see [Command Acknowledgment](#command-acknow
 
 ## References
 
-- [LibrePods AAP Definitions](https://github.com/kavishdevar/librepods/blob/main/docs/AAP%20Definitions.md)
-- [LibrePods control commands](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.md) -
+- [LibrePods AAP Definitions](https://github.com/librepods-org/librepods/blob/main/docs/AAP%20Definitions.md)
+- [LibrePods control commands](https://github.com/librepods-org/librepods/blob/main/docs/control_commands.md) -
   the 0x09 sub-command table, including 0x34
 - [LibrePods GNOME Extension](https://github.com/Anoryth/librepods-gnome)
 - [kAirPods (KDE)](https://github.com/can1357/kAirPods)
