@@ -13,11 +13,14 @@ AirPods continuously broadcast BLE advertisements containing battery levels, cha
   - **Cleartext**: the model, status, lid and connection state, and the batteries in 10% steps
   - **Encrypted**: the exact batteries, and the last three bytes of the pair's real MAC. The
     key comes over AAP
-- **Identification needs the key**: an advertisement comes from a random address, and only a
-  key that decrypts it says which pair sent it. LinuxPods drops every advertisement no stored
-  key decrypts, so what it shows over BLE is always the exact, decrypted reading. The cleartext
-  is what an unidentified pair advertises, and is still decoded: offering such a pair for
-  pairing would read it (#131)
+- **Identification needs the keys**: an advertisement comes from a resolvable private address,
+  which only the pair's IRK resolves, and only the pair's ENC_KEY decrypts it. Both keys come
+  over AAP. LinuxPods counts an advertisement only if its address resolves with a stored IRK
+  and that pair's ENC_KEY decrypts it, and drops every other, so what it shows over BLE is
+  always the exact, decrypted reading - see
+  [Device Identification](#solution-identification-by-irk-then-enc_key). The cleartext is what
+  an unidentified pair advertises, and is still decoded: offering such a pair for pairing
+  would read it (#131)
 - **Slow Updates**: The payload changes when something happens, and otherwise every 20-30 s
 
 ### Use Cases
@@ -274,14 +277,14 @@ treat it as unknown.
 ### Bytes 9-24: Encrypted Battery Data
 
 ✅ **Working** - The final 16 bytes hold the exact batteries, and the real MAC's
-suffix that identifies the pair.
+suffix, which confirms the key was the pair's.
 
 **Decryption Details:**
 - **Algorithm**: AES-128 ECB mode (single block, no IV, no padding)
 - **Key Source**: Retrieved via AAP connection (PSM 4097) (See [AAP Key Retrieval](aap-key-retrieval.md))
 - **Key Type**: ENC_KEY from proximity pairing keys
 - **Tools**:
-  - `cargo run --example key_request <MAC>` - request the keys over AAP and lay out the key packet, key bytes redacted, without storing anything; the app itself retrieves and stores the key on every connection
+  - `cargo run --example key_request <MAC>` - request the keys over AAP and lay out the key packet, key bytes redacted, without storing anything; the app itself retrieves and stores the IRK and ENC_KEY on every connection
   - `cargo run --example decrypt_probe` - decrypt captured payloads offline
   - `RUST_LOG=linuxpods=debug cargo run` - live parse/decrypt logging
 
@@ -347,9 +350,11 @@ Validate against the **MAC suffix** instead:
 - That makes a false positive roughly 1 in 8.4 million per key tried (2^-23): three
   exact bytes would be 2^-24, and the zeroed form doubles it
 
-This is both more reliable and more useful: the payload identifies *its own device*,
-which is exactly what is needed to resolve a randomized BLE MAC back to a real one.
-It is the only validation this implementation performs.
+This is both more reliable and more useful: the payload carries *its own device's*
+address, so it checks that the key it was decrypted with is that device's. It is the
+only check of the plaintext this implementation performs; the address the
+advertisement comes from has to resolve with the same pair's IRK first - see
+[Device Identification](#solution-identification-by-irk-then-enc_key).
 
 **Orientation Handling:**
 - If NOT flipped (left pod primary): Byte 1=left, Byte 2=right
@@ -379,8 +384,9 @@ portion at byte 9 or at the end is unknown.
 - **Requires ENC_KEY from AAP connection (See [AAP Key Retrieval](aap-key-retrieval.md))**
 
 LinuxPods parses the cleartext levels, then replaces them with the decrypted ones.
-An advertisement no stored key decrypts is dropped, as it cannot be attributed to
-a pair, so today the cleartext levels are never shown: what the key gives is not
+An advertisement not identified as a pair's - its address resolved by a stored IRK,
+then decrypted by that pair's key - is dropped, as it cannot be attributed to a
+pair, so today the cleartext levels are never shown: what the keys give is not
 precision but identification. The cleartext is still decoded, as it is all an
 unidentified pair advertises - what offering such a pair for pairing would read
 (#131).
@@ -434,13 +440,13 @@ Value  State
 | Feature | Unencrypted | Encrypted |
 |---------|-------------|-----------|
 | Battery Granularity | 10% steps | 1% |
-| Identifies the pair | No | Yes (MAC suffix) |
+| Identifies the pair | No | Yes (IRK, then ENC_KEY) |
 | Shown by LinuxPods | No | Yes |
 | Update Rate | on events, else every 20-30 s | on events, else every 20-30 s |
 | Connection Required | No | No (but needs key from AAP) |
 | Works with iPhone connected | Yes | Yes |
 | Control (Noise modes) | No | No |
-| Encryption Key Required | No | Yes (from AAP) |
+| Keys Required | No | Yes: IRK and ENC_KEY, from AAP |
 
 ### AAP (Apple Accessory Protocol)
 
@@ -466,9 +472,11 @@ Value  State
 
 AirPods use **Bluetooth LE Privacy** (MAC address randomization) in their BLE advertisements:
 
-- **BLE Advertisements**: Use randomized MAC addresses that change from time to time
+- **BLE Advertisements**: Come from resolvable private addresses (RPAs) that change from
+  time to time
 - **AAP Connections**: Use the real (permanent) MAC address
-- **Privacy Goal**: Prevent tracking of AirPods via BLE advertisements
+- **Privacy Goal**: Prevent tracking of AirPods via BLE advertisements, by anyone who does
+  not hold the pair's IRK
 
 ### Device Identification Challenge
 
@@ -476,20 +484,66 @@ When monitoring multiple AirPods devices:
 1. Each device has a real MAC address (from AAP connection)
 2. Each device's BLE advertisements use randomized MACs - one per pod, as both pods
    advertise
-3. The randomized MACs change: in the #71 captures not on a timer, but across a
-   closed lid, both pods at once. Otherwise each pod kept its address for as long
-   as the capture lasted, five minutes, through connecting, disconnecting, and the
-   pods leaving the case and going back
-4. **Problem**: Cannot directly match BLE advertisements to stored encryption keys
+3. The randomized MACs change on a timer and across a closed lid. In the #71 captures
+   an address lasted about 4 to 8 minutes, connected or not, each pod rotating on a
+   clock of its own; and both pods came back with new addresses after the lid had been
+   closed, on both models. Between a pod's last advertisement from the old address and
+   its first from the new one, nothing was heard from it for one to three minutes
+4. **Problem**: Cannot directly match BLE advertisements to stored keys by address
 
-### Solution: Decryption-Based Identification
+### Solution: Identification by IRK, then ENC_KEY
 
-To identify which device a BLE advertisement belongs to:
+Every advertising address of the two models tested is a **resolvable private address**,
+and resolves with the IRK the pair sends over AAP: 12 of 12 addresses across the two
+models, connected, disconnected and across a lid close (#134, `examples/irk_probe.rs`).
+Every advertisement from them also decrypted with the pair's ENC_KEY, and the two checks
+never disagreed. LinuxPods requires both:
 
-1. **Store encryption keys by real MAC**: When retrieving keys via AAP, store them with the AAP connection's MAC address
-2. **Try all keys on BLE data**: When receiving a BLE advertisement, attempt decryption with all stored keys
-3. **Validate decryption**: Check the decrypted MAC suffix - see below
-4. **Identify device**: The key that successfully decrypts identifies the real device
+1. **Store the keys by real MAC**: The key packet carries the IRK (type `0x01`) and the
+   ENC_KEY (type `0x04`). Both are stored under the AAP connection's MAC address, on
+   every connection - see [AAP Key Retrieval](aap-key-retrieval.md)
+2. **Resolve the address**: An RPA is `prand || hash`, 24 bits each, with the top two
+   bits of `prand` `01`, and `hash = ah(IRK, prand)`: the low 24 bits of
+   `AES-128(IRK, 0^104 || prand)` (Core spec Vol 3 Part H 2.2.2). The address
+   resolves with the pair's IRK when the hash matches
+3. **Decrypt with that pair's ENC_KEY only**, and check the decrypted MAC suffix - see
+   [Decryption Validation](#decryption-validation) below
+4. **Identify device**: An address that resolves, with a payload that pair's key
+   decrypts, identifies the real device. Anything else is dropped
+
+**Byte order.** `ah()` takes the IRK most significant byte first, and the address
+written as usual, most significant byte first: in `AA:BB:CC:DD:EE:FF`, `prand` is
+`AA BB CC` and the hash `DD EE FF`. The key packet carries the IRK **byte-reversed**,
+least significant byte first as SMP carries keys: it has to be reversed before it is
+used as the key. Resolved as it comes, it resolves nothing. The keystore keeps the IRK
+as AAP sends it, and `ble::rpa::resolves` reverses it. Its test pins the order with
+the specification's sample data (Appendix D.7): the IRK `ec0234a3 57c8ad05 341010a6
+0a397d9b`, most significant byte first, resolves the address `70:81:94:0D:FB:AA`
+(`prand` `708194`, hash `0dfbaa`) - and reversed, as AAP would send it, is what
+`resolves` takes.
+
+**Why both.** With the ENC_KEY alone, every stored key was tried on every
+advertisement, and a wrong key passes the suffix check one time in 2^23 (see below).
+That chance was paid per advertisement and per key: with about ten foreign pairs in
+range and two stored keys, one false match about every 12 hours; a spammer sending
+random payloads at 1000 a second, one every couple of hours per key. A false match
+gave one of the user's pairs random levels, cached for 30 minutes. A wrong IRK
+resolves an address by chance one time in 2^24, and an address lasts minutes, so that
+chance is paid once per address, not per advertisement - and the resolving pair's key,
+the only one tried, still has to pass the suffix check. A recorded advertisement replayed from another address is dropped,
+too.
+
+**Cost.** A resolve is one AES block per stored IRK. The coordinator remembers the
+addresses that resolved, and which pair each is, for 10 minutes (longer than an
+address lasts), at most 64 of them, the oldest going first: an address is resolved
+about once. An address no IRK resolves is not remembered, as a spammer rotating its
+address would only churn the list; it is resolved again with each advertisement,
+which costs what trying every key on it used to.
+
+**Pairs keyed before the IRK was kept.** The keystore kept only the ENC_KEY until
+format version 2. A pair keyed then has no IRK until its next AAP connection brings
+one, as the keys are requested on every connection. Until then it is identified by its
+key alone, as before: its key is tried on every advertisement no stored IRK resolves.
 
 ### Decryption Validation
 
@@ -529,43 +583,44 @@ advertisement is dropped, so the pair would vanish from BLE in exactly the case
 this document sets out to support.
 
 **Why accepting both is safe.** Identification never came from *reading* the
-suffix; it comes from which key produced the plaintext, one key being tried at a
-time. The suffix is only the test that the key was right, and zeros test that just
-as well - a wrong key yields pseudorandom bytes either way. The union of the two
+suffix; it comes from the IRK that resolved the address, and from which key produced
+the plaintext, one key being tried at a time. The suffix is only the test that the
+key was right, and zeros test that just as well - a wrong key yields pseudorandom
+bytes either way. The union of the two
 rules costs exactly one bit: 2^-23 per wrong key rather than 2^-24, measured at 4
 and 4 false accepts respectively over 40M random keys against one real ciphertext.
 
-This is the only validation needed. Do not add a magic-byte check alongside it -
-see the warning under [Bytes 9-24](#bytes-9-24-encrypted-battery-data).
+With the address resolved first, this is the only check of the plaintext needed. Do
+not add a magic-byte check alongside it - see the warning under
+[Bytes 9-24](#bytes-9-24-encrypted-battery-data).
 
 ### Multi-Device Workflow
 
 ```
 Device A (Real MAC: 11:22:33:44:55:66)
-  └─> Store encryption key: 11:22:33:44:55:66 -> [16-byte key]
+  └─> Store keys: 11:22:33:44:55:66 -> IRK A, ENC_KEY A
 
 Device B (Real MAC: AA:BB:CC:DD:EE:FF)
-  └─> Store encryption key: AA:BB:CC:DD:EE:FF -> [16-byte key]
+  └─> Store keys: AA:BB:CC:DD:EE:FF -> IRK B, ENC_KEY B
 
-BLE Advertisement received (Random MAC: 77:88:99:00:11:22)
-  ├─> Try decrypt with key from 11:22:33:44:55:66
-  │     └─> decrypted[7..10] = DD EE FF != 44 55 66 -> ❌ not this device
-  └─> Try decrypt with key from AA:BB:CC:DD:EE:FF
-        └─> decrypted[7..10] = DD EE FF == DD EE FF -> ✅ match
-            └─> Device identified as AA:BB:CC:DD:EE:FF
+BLE Advertisement received (Random MAC: 4A:1C:93:7E:20:D5)
+  ├─> Resolve with IRK A: ah(IRK A, 4a1c93) != 7e20d5 -> ❌ not this device
+  └─> Resolve with IRK B: ah(IRK B, 4a1c93) == 7e20d5 -> ✅ device B's address
+        └─> Decrypt with ENC_KEY B only
+              └─> decrypted[7..10] = DD EE FF (or 00 00 00) -> ✅ match
+                    └─> Device identified as AA:BB:CC:DD:EE:FF
 ```
 
 Because identification resolves the randomized MAC back to the permanent one,
 per-device state should be keyed by the **real** MAC. Keying by the advertised
-MAC instead splits one pair across an address per pod, and adds two more every
-time the lid closes. An early count of four addresses for one pair inside 45
-seconds was most likely that: two pods, and a closed lid.
-Advertisements that cannot be identified - no stored key, or a key that does not
-match - are best dropped rather than kept: their rotating MACs cannot be collapsed,
-nothing can be attributed to them, and storing them is exactly what a BLE spam flood
-(a Flipper Zero or ESP32 broadcasting proximity pairing messages) feeds on.
-LinuxPods keeps only what a stored key decrypts; the key arrives on the device's
-first AAP connection.
+MAC instead splits one pair across an address per pod, and adds more as the
+addresses rotate - every few minutes, and every time the lid closes.
+Advertisements that cannot be identified - an address no stored IRK resolves, or a
+key that does not match - are best dropped rather than kept: their rotating MACs
+cannot be collapsed, nothing can be attributed to them, and storing them is exactly
+what a BLE spam flood (a Flipper Zero or ESP32 broadcasting proximity pairing
+messages) feeds on. LinuxPods keeps only what it identifies; the keys arrive on the
+device's first AAP connection.
 
 ## Implementation Notes
 
@@ -589,15 +644,18 @@ first AAP connection.
 1. **Update latency** - the payload changes on events, and otherwise every 20-30 s
    (inherent to protocol)
 2. **Cleartext batteries** - 10% steps, and nothing to tell which pair sent them
-3. **Encryption key requirement** - identifying a pair, and with it any BLE reading
-   in LinuxPods, requires one-time key retrieval via AAP connection
+3. **Key requirement** - identifying a pair, and with it any BLE reading in LinuxPods,
+   requires one-time retrieval of its IRK and ENC_KEY via AAP connection
 4. **Byte 0's high bits are unexplained** - the rest of it follows the connection
    state. Do not validate against it. Validate by MAC suffix (bytes 7-9); see
    [Decryption Validation](#decryption-validation)
 5. **Bytes 10 and 12-15 unidentified** - byte 10 is `00` in every sample; bytes 12-15
    change whenever the payload does, and may be a MIC. Neither has been confirmed
 6. **Only two models tested** - AirPods Pro 3 (0x2027) and AirPods Pro Gen 2 (0x2024).
-   The MAC-suffix rule holds on both; behavior on older hardware is unknown
+   The MAC-suffix rule and IRK resolution, with the IRK byte-reversed, hold on both;
+   behavior on older hardware is unknown. `examples/irk_probe.rs` checks a new model:
+   it reports an address that resolves only with the IRK unreversed, which the app
+   would miss
 
 ---
 

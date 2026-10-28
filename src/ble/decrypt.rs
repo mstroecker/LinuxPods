@@ -35,8 +35,9 @@ pub enum DecryptError {
 /// Decrypts a 16-byte payload and checks it against the device the key belongs to.
 ///
 /// The decrypted payload embeds the last three bytes of the device's real MAC at
-/// offset 7, so it identifies its own device - which is exactly what is needed to
-/// resolve a randomized BLE MAC back to a permanent one.
+/// offset 7, so it tells whether the key was its device's. Which device sent it
+/// the coordinator learns first, from the IRK that resolves the address
+/// (`ble::rpa`), and tries that device's key alone.
 ///
 /// Unless both pods are in the case the suffix reads `00 00 00` instead; see
 /// [`matches_device`], which accepts either.
@@ -73,9 +74,10 @@ pub fn decrypt_for_device(
 /// True when the payload carries the last three bytes of `mac_addr` at offset 7,
 /// or the zeros the pods publish in their place once out of the case.
 ///
-/// Identification does not come from reading the suffix - it comes from *which*
-/// key produced this plaintext, one key being tried at a time. The suffix is only
-/// the test that the key was the right one, so zeros serve that purpose just as
+/// Identification does not come from reading the suffix - it comes from the IRK
+/// that resolved the address, and *which* key produced this plaintext, one key
+/// being tried at a time. The suffix is only the test that the key was the right
+/// one, so zeros serve that purpose just as
 /// well: a wrong key yields pseudorandom bytes, and three of them landing on zero
 /// is as unlikely as landing on one specific device's suffix.
 ///

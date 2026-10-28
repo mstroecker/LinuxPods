@@ -16,7 +16,8 @@
 //! as the subscription takes in every signal bluetoothd sends.
 //!
 //! Every advertisement that parses goes to the coordinator, which keeps only
-//! those a stored ENC_KEY decrypts: the key is what says which pair sent one.
+//! those it identifies: from an address a stored IRK resolves, decrypted by the
+//! same pair's ENC_KEY. The keys are what say which pair sent one.
 
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
@@ -215,8 +216,8 @@ impl Scanner {
             };
 
             // Logged here rather than downstream so it covers every advertisement
-            // that parses, including ones the coordinator later drops: those no
-            // stored key decrypts.
+            // that parses, including ones the coordinator later drops: those it
+            // does not identify as a pair's.
             match parse_proximity_data(&apple_data) {
                 Ok(data) => {
                     tracing::debug!(

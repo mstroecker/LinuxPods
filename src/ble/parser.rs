@@ -76,7 +76,8 @@ impl ProximityData {
     /// Merges decrypted battery data, replacing the cleartext's levels in 10%
     /// steps with exact ones.
     ///
-    /// The app shows only advertisements a stored key decrypts, so it shows
+    /// The app shows only advertisements it identifies - from an address a
+    /// stored IRK resolves, decrypted by that pair's ENC_KEY - so it shows
     /// only these. The cleartext levels are what an unidentified pair
     /// advertises, decoded all the same: offering such a pair for pairing
     /// would read them (#131).

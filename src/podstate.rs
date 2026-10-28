@@ -305,8 +305,8 @@ impl Snapshot {
     /// Every device there is to show, sorted by MAC: each one we hold a key for,
     /// and each one on AAP - whose key may not have arrived, or may never.
     ///
-    /// Neither set takes in strangers: an advertisement no stored key decrypts is
-    /// never stored, and an AAP link is only opened to attached AirPods. Nor does
+    /// Neither set takes in strangers: an advertisement not identified as a
+    /// pair's is never stored, and an AAP link is only opened to attached AirPods. Nor does
     /// either depend on a reading being present, so the list holds still as
     /// advertisements come and go and cached readings expire, rather than a
     /// device flickering in and out of the switcher.
@@ -1053,11 +1053,11 @@ impl Coordinator {
 
         let client = Arc::new(self.aap_client(mac_addr).open().await?);
         // Ask for the proximity keys on every connection, not only when none is
-        // stored: re-pairing regenerates them, and a stale key decrypts nothing,
-        // so the pair would silently vanish from BLE. The reply is stored by
-        // `aap_read_loop` like any key packet, and waits in the socket until that
-        // loop starts. Without a key only BLE suffers, so a failure does not fail
-        // the connection.
+        // stored: re-pairing regenerates them, and a stale IRK or key leaves the
+        // pair unidentified, so it would silently vanish from BLE. The reply is
+        // stored by `aap_read_loop` like any key packet, and waits in the socket
+        // until that loop starts. Without a key only BLE suffers, so a failure
+        // does not fail the connection.
         if let Err(e) = client.request_proximity_keys().await {
             tracing::warn!("failed to request encryption keys: {e:#}");
         }
