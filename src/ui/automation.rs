@@ -64,7 +64,7 @@
 //! | `status` | the status text under the battery display: model and color, then the rest |
 //! | `last-seen` | how old a BLE reading is; hidden for AAP |
 //! | `noise-control` | the Noise Control group, insensitive unless the device is on AAP |
-//! | `noise-off`, `noise-noise-cancelling`, `noise-transparency`, `noise-adaptive` | its radios |
+//! | `noise-off`, `noise-noise-cancellation`, `noise-transparency`, `noise-adaptive` | its radios |
 //! | `conversation-awareness` | the Features switch, always insensitive |
 //! | `preferences` | the Preferences dialog, while open |
 //! | `auto-connect`, `battery-notifications` | its switches, always insensitive |

@@ -322,7 +322,7 @@ fn create_empty_state() -> adw::StatusPage {
 fn noise_target(mode: NoiseMode) -> &'static str {
     match mode {
         NoiseMode::Off => "off",
-        NoiseMode::NoiseCancelling => "noise-cancelling",
+        NoiseMode::NoiseCancellation => "noise-cancellation",
         NoiseMode::Transparency => "transparency",
         NoiseMode::Adaptive => "adaptive",
     }

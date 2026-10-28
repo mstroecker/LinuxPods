@@ -756,7 +756,7 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
     app.until("the mode from the startup dump", |s| {
         s.states
             .get(&PAIR)
-            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancelling))
+            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancellation))
     })
     .await;
 
@@ -764,7 +764,7 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
         NoiseMode::Transparency,
         NoiseMode::Adaptive,
         NoiseMode::Off,
-        NoiseMode::NoiseCancelling,
+        NoiseMode::NoiseCancellation,
     ];
     for mode in modes {
         app.coordinator
@@ -794,22 +794,22 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
         set_packet(NoiseMode::Adaptive),
         allow_off_packet(true),
         set_packet(NoiseMode::Off),
-        set_packet(NoiseMode::NoiseCancelling),
+        set_packet(NoiseMode::NoiseCancellation),
     ]
     .map(|packet| packet.to_vec());
     assert_eq!(settings, expected);
 }
 
 /// After Off, a report of the mode it replaced does not bring that mode back:
-/// in the #71 capture the pair reported Noise Cancelling 0.33 s after Off
+/// in the #71 capture the pair reported Noise Cancellation 0.33 s after Off
 /// was set from it, and Off itself only at 1.4 s, and the window showed Noise
-/// Cancelling for the second in between (#113). The fake pair does the same.
+/// Cancellation for the second in between (#113). The fake pair does the same.
 ///
 /// Every snapshot from the command on is watched, until a battery change made
 /// once the echo is out has arrived: it comes over the same connection, after
 /// the stale report and the echo, so by then both have been read. The stale
 /// report comes well inside the 2 s the app holds it off for, and the pair
-/// reports Noise Cancelling for a whole second before the echo: a snapshot
+/// reports Noise Cancellation for a whole second before the echo: a snapshot
 /// showing it would be seen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_report_after_off_does_not_bring_the_old_mode_back() {
@@ -822,7 +822,7 @@ async fn a_stale_report_after_off_does_not_bring_the_old_mode_back() {
     app.until("the mode from the startup dump", |s| {
         s.states
             .get(&PAIR)
-            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancelling))
+            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancellation))
     })
     .await;
     fixture
@@ -888,7 +888,7 @@ async fn a_stale_report_after_off_does_not_bring_the_old_mode_back() {
         .unwrap();
     assert_eq!(
         shown,
-        [Some(NoiseMode::NoiseCancelling), Some(NoiseMode::Off)],
+        [Some(NoiseMode::NoiseCancellation), Some(NoiseMode::Off)],
         "Off, and nothing after it"
     );
 }
@@ -932,7 +932,7 @@ async fn two_quick_switches(spawned: bool) {
     app.until("the mode from the startup dump", |s| {
         s.states
             .get(&PAIR)
-            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancelling))
+            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancellation))
     })
     .await;
 

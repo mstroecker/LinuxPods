@@ -148,7 +148,7 @@ pub struct Quirks {
     pub echo_delay: Duration,
     /// Report the mode an Off replaced, this long after the change - before
     /// the echo, when one comes sooner than that. In the #71 capture, switched
-    /// from Noise Cancelling to Off, the pair reported `0D 02` 0.33 s later and
+    /// from Noise Cancellation to Off, the pair reported `0D 02` 0.33 s later and
     /// the Off itself, `0D 01`, at 1.4 s; the other three modes came with no
     /// such report. Seen once, so `None` by default. It brings no echo of its
     /// own: [`Quirks::echo_every`] and [`Quirks::echo_delay`] say when that
@@ -286,7 +286,7 @@ impl Pods {
     /// It starts as if just taken out of the box: both pods in the open case,
     /// left at 80%, right at 70% and the case at 50% - different, so a
     /// left/right mix-up shows - nothing charging, white, left primary, noise
-    /// cancelling, Off not allowed, and connected to nothing.
+    /// cancellation, Off not allowed, and connected to nothing.
     pub fn new(product_id: u16, mac: Address) -> Self {
         Self::with_keys(product_id, mac, Keys::generate())
     }
@@ -309,7 +309,7 @@ impl Pods {
             case_charging: false,
             lid_open: true,
             primary: PodSide::Left,
-            noise_mode: NoiseMode::NoiseCancelling,
+            noise_mode: NoiseMode::NoiseCancellation,
             allow_off: false,
             keys,
             connected: false,
@@ -1069,7 +1069,7 @@ mod tests {
         let mut pods = subscribed();
         pods.receive(&noise::set_packet(NoiseMode::Off), ms(10));
         assert!(pods.poll(ms(10)).is_empty());
-        assert_eq!(pods.noise_mode(), NoiseMode::NoiseCancelling);
+        assert_eq!(pods.noise_mode(), NoiseMode::NoiseCancellation);
 
         pods.receive(&noise::allow_off_packet(true), ms(20));
         pods.receive(&noise::set_packet(NoiseMode::Off), ms(20));
@@ -1098,7 +1098,7 @@ mod tests {
         let modes = [
             NoiseMode::Transparency,
             NoiseMode::Adaptive,
-            NoiseMode::NoiseCancelling,
+            NoiseMode::NoiseCancellation,
             NoiseMode::Transparency,
         ];
         for (i, mode) in modes.into_iter().enumerate() {
@@ -1125,8 +1125,8 @@ mod tests {
         }
     }
 
-    /// Off from Noise Cancelling as the #71 capture has it - a report of
-    /// Noise Cancelling at +0.33 s and the echo of Off at +1.4 s - with the
+    /// Off from Noise Cancellation as the #71 capture has it - a report of
+    /// Noise Cancellation at +0.33 s and the echo of Off at +1.4 s - with the
     /// fake's default 0x4B at once on top. No other mode brings such a
     /// report, nor does Off from Off.
     #[test]
@@ -1144,7 +1144,7 @@ mod tests {
         assert_eq!(pods.next_due(), Some(ms(1330)));
         assert_eq!(
             sent(&pods.poll(ms(1330))),
-            [noise::set_packet(NoiseMode::NoiseCancelling).to_vec()]
+            [noise::set_packet(NoiseMode::NoiseCancellation).to_vec()]
         );
         assert_eq!(pods.noise_mode(), NoiseMode::Off, "the report is stale");
         assert_eq!(
