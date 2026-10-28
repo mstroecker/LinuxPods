@@ -44,9 +44,10 @@ where the logs are. Only one world runs at a time.
 | `empty` | nothing; add pairs with `AddPods` |
 
 Each new pair starts with both pods in the open case: left 80%, right 70%, case 50%,
-Noise Cancellation. A scenario's pairs have their keys saved in the app's keystore before
-it starts, as though each had connected once before. A pair added later with `AddPods`
-has no key until it connects, so until then the app shows nothing of it.
+Noise Cancellation. A scenario's pairs have their keys - IRK and ENC_KEY - saved in the
+app's keystore before it starts, as though each had connected once before. A pair added
+later with `AddPods` has no keys until it connects, so until then the app shows nothing of
+it.
 
 The fake BlueZ has one adapter, powered, at `/org/bluez/hci0`. `ADAPTER=hci1` puts it
 at `/org/bluez/hci1` instead, as on a machine whose only adapter is not the first
@@ -78,10 +79,10 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 | `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP |
 | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case` |
 | `SetLid(s mac, b open)` | the case lid |
-| `Repair(s mac)` | new keys, sent at the next key request; the old key stops decrypting BLE |
+| `Repair(s mac)` | new keys, sent at the next key request; the old IRK stops resolving the pair's addresses, and the old key stops decrypting BLE |
 | `HangUp(s mac)` | closes AAP from the pods' end; the link stays, and the app links the pair again after a second, longer after repeated hang-ups (#49) |
 | `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `settings_changed`, `echo_every`, `echo_delay_ms`, `zero_suffix_when_connected`, `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `report_delay_ms` (hold back the battery and startup dump), `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none) |
-| `Flood(u count)` | that many advertisers no key decrypts |
+| `Flood(u count)` | that many advertisers no key decrypts and no IRK resolves |
 | `Received(s mac) → aay` | every AAP packet the app sent the pair: check `0x34 01` precedes Off |
 | `Batteries() → a{sy}` | what GNOME Settings shows, by MAC |
 
@@ -167,13 +168,15 @@ Change, settle, then read: `SetBattery`, `Settle`, `tree`.
 - **Popovers are separate surfaces.** A screenshot of `main-window` leaves an open menu
   out; take one of the popover by its path. Screenshots go to
   `$XDG_RUNTIME_DIR/linuxpods-harness/`.
-- **BLE timing.** Each pair advertises once a second from a random address that
-  rotates every 10 s, and the fake BlueZ drops an address 30 s after it goes quiet. An
-  address's first advertisement comes in `InterfacesAdded`, the rest in
-  `PropertiesChanged`, and the app reads both: 10 readings out of 10 per address, and a
-  first reading within about a second of start. Real AirPods differ: about 5
-  advertisements a second from each pod, each from its own address, which changes
-  across a closed lid rather than on a timer (#71). #115 brings the fake in line.
+- **BLE timing.** Each pair advertises once a second from a resolvable private address,
+  made from its IRK, that rotates every 10 s, and the fake BlueZ drops an address 30 s
+  after it goes quiet. An address's first advertisement comes in `InterfacesAdded`, the
+  rest in `PropertiesChanged`, and the app reads both: 10 readings out of 10 per
+  address, and a first reading within about a second of start. Real AirPods differ:
+  about 5 advertisements a second from each pod, each from its own address, which
+  changes every 4 to 8 minutes, connected or not, and across a closed lid (#71). The
+  fake's rotation stays this fast on purpose, to exercise it; #115 brings the rest in
+  line.
 - **Logs** are in `$XDG_RUNTIME_DIR/linuxpods-harness/world/log/`: `linuxpods.log` at
   `RUST_LOG=linuxpods=debug`, `fakepods.log` and `broadwayd.log`. Set `RUST_LOG` before
   `make` to change the level. They stay until the next start.

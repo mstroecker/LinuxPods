@@ -39,10 +39,10 @@ be changed, only observed.
 | Identification behind a randomized BLE MAC | ✅ |
 | Offering to pair AirPods nearby that no key identifies | 📋 |
 
-All of this needs the pair's encryption key, which the app fetches over AAP the first
-time the pair connects to this machine. An advertisement comes from a random address,
-and only a key that decrypts it says which pair sent it; one no stored key decrypts is
-dropped. The advertised payload changes when something happens, and otherwise only
+All of this needs the pair's keys, which the app fetches over AAP the first time the
+pair connects to this machine. An advertisement comes from a random address that only
+the pair's IRK resolves, and only its encryption key decrypts it: an advertisement
+counts only when both hold, and is dropped otherwise. The advertised payload changes when something happens, and otherwise only
 every 20-30 seconds, so levels are not live.
 
 ### Over AAP
@@ -54,7 +54,7 @@ own. This is the only channel that can *send* commands.
 | --- | --- |
 | Battery, exact to 1% and live | ✅ |
 | Charging state | ✅ |
-| Encryption key retrieval, which identifies the pair over BLE | ✅ |
+| Key retrieval - IRK and encryption key - which identifies the pair over BLE | ✅ |
 | Noise control - Transparency, Adaptive, ANC, Off | ✅ |
 | Conversation Awareness | 🚧 |
 | Device rename | 📋 |
@@ -191,7 +191,8 @@ header bar switches between them. **Preferences**, in the main menu, lists every
 them with its encryption key status.
 
 Setup is connecting the AirPods to this machine once. On every connection LinuxPods asks
-them for their encryption keys and writes them to `~/.local/share/linuxpods/keys.json`,
+them for their keys - the IRK and the encryption key - and writes them to
+`~/.local/share/linuxpods/keys.json`,
 which is what identifies them over BLE: until then the app has no way to tell their
 advertisements from any other pair's, and shows nothing for them there. From then on the
 app reads exact levels even when the AirPods are connected elsewhere. Asking again on
@@ -220,8 +221,8 @@ behind skips to the newest rather than queueing the ones it missed. It receives 
 current state immediately on subscribing, so the interface is populated before the
 first advertisement arrives.
 
-AAP runs over an L2CAP socket on PSM 4097; BLE advertisements are decrypted with AES-128
-when a key is stored. Both protocols are documented in full:
+AAP runs over an L2CAP socket on PSM 4097; a BLE advertisement is decrypted with AES-128
+when its address resolves with a stored IRK, and with that pair's key alone. Both protocols are documented in full:
 
 - [`docs/ble-proximity-pairing.md`](docs/ble-proximity-pairing.md) - advertisement layout,
   decryption, and how a device is identified behind a randomized address
@@ -260,7 +261,7 @@ Debug logging reports each protocol stage separately:
 
 ```
 BLE parsable: 5C:4D:3F:B5:41:B6 model=0x2027 payload=25B
-BLE decryptable: 5C:4D:3F:B5:41:B6 -> AA:BB:CC:DD:EE:FF (key matched)
+BLE decryptable: 5C:4D:3F:B5:41:B6 -> AA:BB:CC:DD:EE:FF (address resolved)
 BLE 5C:4D:3F:B5:41:B6 [decrypted]: left=Some(75) right=Some(73) case=Some(61) lid_open=None one_in_case=false in_ear=true/true
 AAP connected to AA:BB:CC:DD:EE:FF (cid 2822, attempt 1)
 ```
@@ -272,7 +273,10 @@ pair for its proximity pairing keys and lays out what comes back, key bytes reda
 nothing stored, to debug a request that fails; `noise_probe <MAC>` cycles
 the noise control modes and classifies every packet that comes back; `apple_sniff` logs
 Apple manufacturer data as it arrives; `decrypt_probe` decrypts captured payloads
-offline and shows the plaintext of each the app would accept.
+offline and shows the plaintext of each the app's suffix rule accepts; `irk_probe <MAC>...` asks
+pairs for their keys, keeps them in memory, and reports per advertising address whether
+it resolves with the IRK, as the app resolves it, and decrypts, without printing keys
+or addresses.
 
 ```
 src/
