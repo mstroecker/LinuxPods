@@ -24,7 +24,7 @@
 //! BlueZ reports through [`World::batteries`].
 //!
 //! Time runs at real speed: each pair advertises once a second, from an
-//! address that rotates every ten. Tests wait for what they expect to see,
+//! address that its IRK resolves and that rotates every ten. Tests wait for what they expect to see,
 //! under [`TIMEOUT`]. The 30-minute BLE cache expiry stays with the
 //! coordinator's unit tests.
 //!
@@ -45,13 +45,16 @@ use zbus::Connection;
 use linuxpods::aap::NoiseMode;
 use linuxpods::aap::noise::{allow_off_packet, set_packet};
 use linuxpods::attachment::Attachment;
+use linuxpods::ble::decrypt::random_key;
 use linuxpods::ble::decrypt_for_device;
+use linuxpods::ble::parser::parse_proximity_data;
+use linuxpods::ble::rpa::{resolvable_address, resolves};
 use linuxpods::ble::scanner::{Advertisement, Scanner};
 use linuxpods::bluez::{BatteryProvider, ProviderConnection};
 use linuxpods::harness::bluez::device_path;
-use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3, Part, Pods};
+use linuxpods::harness::pods::{ADDRESS_ROTATION, PRO_2_USB_C, PRO_3, Part, Pods};
 use linuxpods::harness::{PrivateBus, World};
-use linuxpods::keystore::{Keystore, PairKeys};
+use linuxpods::keystore::{KEYS_FILE, Keystore, PairKeys};
 use linuxpods::podstate::{Command, Coordinator, DataSource, Snapshot};
 
 /// The longest any one wait may take, so that a regression fails the test
@@ -214,6 +217,27 @@ impl Fixture {
             keys.insert(mac, self.pair_keys(mac).await);
         }
         self.keystore().save(&keys).unwrap();
+    }
+
+    /// Saves the pairs' ENC_KEYs alone, in format version 1, as a build from
+    /// before the keystore kept IRKs left them.
+    async fn seed_version_1_keys(&self, macs: &[Address]) {
+        use base64::Engine as _;
+
+        let mut keys = serde_json::Map::new();
+        for &mac in macs {
+            let key = base64::engine::general_purpose::STANDARD.encode(self.enc_key(mac).await);
+            keys.insert(mac.to_string(), key.into());
+        }
+        let file = serde_json::json!({"version": 1, "keys": keys});
+        std::fs::write(self.data.path().join(KEYS_FILE), file.to_string()).unwrap();
+    }
+
+    /// The key file's format version.
+    fn stored_version(&self) -> u64 {
+        let raw = std::fs::read(self.data.path().join(KEYS_FILE)).unwrap();
+        let file: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        file["version"].as_u64().unwrap()
     }
 
     /// Waits until the key file holds `expected` and nothing else. The
@@ -438,10 +462,21 @@ impl App {
         &mut self,
         what: &str,
         count: usize,
+        pick: impl FnMut(&Advertisement) -> bool,
+    ) {
+        self.handled_within(TIMEOUT, what, count, pick).await;
+    }
+
+    /// [`App::handled`], waiting up to `budget` rather than [`TIMEOUT`].
+    async fn handled_within(
+        &mut self,
+        budget: Duration,
+        what: &str,
+        count: usize,
         mut pick: impl FnMut(&Advertisement) -> bool,
     ) {
         let mut seen = 0;
-        let waited = timeout(TIMEOUT, async {
+        let waited = timeout(budget, async {
             while seen < count {
                 let advert = self.handled.recv().await.expect("the scanner runs");
                 if pick(&advert) {
@@ -760,6 +795,147 @@ async fn a_repaired_pairs_new_key_replaces_the_stored_one_on_the_next_connection
         levels(s, PAIR, DataSource::Ble) == Some(changed)
     })
     .await;
+}
+
+/// A pair is identified by its address, which its IRK resolves, and then by
+/// its key, and it stays identified as its address rotates: its reading
+/// follows it to a new address. Every address it is heard from resolves with
+/// its IRK (#134).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_whose_address_resolves_is_identified_across_a_rotation() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let keys = fixture.pair_keys(PAIR).await;
+    let irk = keys.irk.unwrap();
+    let mut app = fixture.start_app().await;
+    app.until("an exact BLE reading", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+
+    // The address the pair is heard from now, then the next one: up to a
+    // rotation and an advertising interval away, which is more than
+    // `TIMEOUT` leaves room for on a loaded runner.
+    app.skip_handled();
+    let mut first = None;
+    let next = "an advertisement from the pair's next address";
+    app.handled_within(ADDRESS_ROTATION * 3, next, 1, |a| {
+        if !sent_by(a, PAIR, &keys.enc_key) {
+            return false;
+        }
+        assert!(resolves(&irk, a.ble_mac), "{} does not resolve", a.ble_mac);
+        *first.get_or_insert(a.ble_mac) != a.ble_mac
+    })
+    .await;
+
+    // What only an advertisement from here on can bring.
+    let changed = [38, 72, 55];
+    fixture.set_levels(PAIR, changed).await;
+    let snapshot = app
+        .until("the reading to follow the pair", |s| {
+            levels(s, PAIR, DataSource::Ble) == Some(changed)
+        })
+        .await;
+    let heard_from = snapshot.states[&PAIR].current_ble_mac.unwrap();
+    assert_ne!(Some(heard_from), first, "the first address");
+    assert!(resolves(&irk, heard_from));
+}
+
+/// What the pair's key decrypts counts only from an address its IRK
+/// resolves: from any other address - a replay, or a spoof - it is dropped,
+/// though it decrypts. From the pair's own address the same advertisement
+/// counts (#134).
+///
+/// The pair is none of the world's, so nothing advertises for it but the
+/// test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_decrypts_from_an_address_that_does_not_resolve_is_dropped() {
+    let fixture = Fixture::new(&[]).await;
+    let pods = pods_at(PAIR, PAIR_LEVELS);
+    let keys = pods.keys().clone();
+    fixture
+        .keystore()
+        .save(&HashMap::from([(
+            PAIR,
+            PairKeys::new(keys.enc_key, Some(keys.irk)),
+        )]))
+        .unwrap();
+    let mut app = fixture.start_app().await;
+
+    let advert = pods.advertisement(Duration::ZERO);
+    // A resolvable private address, as the pair's are, but another IRK's.
+    let elsewhere = resolvable_address(&random_key(), [0x12, 0x34, 0x56]);
+    assert!(!resolves(&keys.irk, elsewhere));
+    let bluez = fixture.world.bluez();
+    let heard = bluez.advertise(elsewhere, &advert.data).await.unwrap();
+    assert!(heard, "advertised while the app discovers");
+    app.handled("the advertisement from elsewhere", 1, |a| {
+        a.ble_mac == elsewhere && sent_by(a, PAIR, &keys.enc_key)
+    })
+    .await;
+    assert_eq!(app.coordinator.device_count().await, 0, "identified");
+
+    assert!(resolves(&keys.irk, advert.address));
+    bluez.advertise(advert.address, &advert.data).await.unwrap();
+    app.until("the reading from the pair's own address", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+}
+
+/// A pair keyed before the keystore kept IRKs - a version 1 key file,
+/// ENC_KEYs alone - is identified as it was then, by its key alone, until
+/// its next connection brings its IRK. From then on its address has to
+/// resolve too, and the key file is version 2 (#134).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_keyed_before_irks_were_kept_works_until_it_reconnects() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_version_1_keys(&[PAIR]).await;
+    let mut app = fixture.start_app().await;
+    app.until("an exact BLE reading, by the key alone", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+    assert_eq!(fixture.stored_version(), 1, "nothing to write yet");
+
+    app.attach(PAIR).await;
+    let keys = fixture.pair_keys(PAIR).await;
+    fixture
+        .until_stored(&HashMap::from([(PAIR, keys.clone())]))
+        .await;
+    assert_eq!(fixture.stored_version(), 2);
+    app.detach(PAIR).await;
+    let changed = [38, 72, 55];
+    fixture.set_levels(PAIR, changed).await;
+    app.until("an exact BLE reading, now by the IRK and the key", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(changed)
+    })
+    .await;
+
+    // Off the air from here, so that only what the test hands the
+    // coordinator is heard.
+    app.stop_listening().await;
+    let mut pods = pods_at(PAIR, [21, 32, 43]);
+    pods.repair_with(fixture.world.keys(PAIR).await.unwrap());
+    let advert = pods.advertisement(Duration::ZERO);
+    let data = parse_proximity_data(&advert.data).unwrap();
+    let elsewhere = resolvable_address(&random_key(), [0x12, 0x34, 0x56]);
+    app.coordinator
+        .handle_advertisement(data.clone(), elsewhere)
+        .await;
+    assert_eq!(
+        levels(&app.updates.borrow(), PAIR, DataSource::Ble),
+        Some(changed),
+        "identified by the key alone"
+    );
+    app.coordinator
+        .handle_advertisement(data, advert.address)
+        .await;
+    assert_eq!(
+        levels(&app.updates.borrow(), PAIR, DataSource::Ble),
+        Some([21, 32, 43]),
+        "from the pair's own address"
+    );
 }
 
 /// Off goes out with `0x34 01` right before it, as recent firmware takes Off
