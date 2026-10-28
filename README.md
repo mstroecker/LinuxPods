@@ -115,7 +115,7 @@ What is actually unclear in each case:
 | Device | Status |
 | --- | --- |
 | AirPods Pro 3 | Tested, fully supported |
-| AirPods Pro (2nd generation) | Tested, fully supported |
+| AirPods Pro (2nd generation, USB-C) | Tested, fully supported |
 | Other Apple AirPods | Untested, may work |
 
 ## Requirements
@@ -308,7 +308,7 @@ Contributions are welcome. Please:
 
 ## Acknowledgments
 
-- [LibrePods](https://github.com/kavishdevar/librepods) - reference for BLE protocol
+- [LibrePods](https://github.com/librepods-org/librepods) - reference for BLE protocol
   reverse engineering and primary pod orientation logic
 - [furiousMAC/continuity](https://github.com/furiousMAC/continuity) - Apple Continuity
   protocol documentation

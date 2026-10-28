@@ -38,11 +38,3 @@ paths = [
     '''^\.flatpak-builder/''',
     '''^security-audit/''',
 ]
-
-[[allowlists]]
-description = "Revoked example keys in docs/aap-key-retrieval.md (re-paired 2026-10-04)"
-regexTarget = "secret"
-regexes = [
-    '''^64dd9ce7bcb5b50a9a334542cbaf1902$''',
-    '''^1bdd73d2be019b9855cc5b367bf99d5d$''',
-]

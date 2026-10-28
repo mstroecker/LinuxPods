@@ -79,14 +79,18 @@ The AirPods will send one or more response packets. **Not all packets contain ke
 
 A packet contains key data if:
 - Length ≥ 7 bytes
+- **Bytes [0..4] == `04 00 04 00`**, the header every packet after the handshake carries
 - **Byte [4] == 0x31** (key data marker)
 
 Example check:
 ```rust
-if packet.len() >= 7 && packet[4] == 0x31 {
+if packet.len() >= 7 && packet[..4] == [0x04, 0x00, 0x04, 0x00] && packet[4] == 0x31 {
     // This packet contains keys
 }
 ```
+
+The header matters: a packet of another kind with `0x31` at byte 4 is not a key
+packet. `aap::decode` checks it once for every kind of packet.
 
 #### Key Packet Format
 
@@ -127,8 +131,9 @@ for _ in 0..key_count {
 
     // Process key...
     match key_type {
-        0x01 => println!("IRK: {key_bytes:02x?}"),
-        0x04 => println!("ENC_KEY: {key_bytes:02x?}"),
+        // The length, never the bytes: printed output ends up in issues
+        0x01 => println!("IRK: {} bytes", key_bytes.len()),
+        0x04 => println!("ENC_KEY: {} bytes", key_bytes.len()),
         _ => {}
     }
 }
@@ -151,7 +156,7 @@ for _ in 0..key_count {
 ## Example Response
 
 ```
-Hex dump of key response packet:
+Hex dump of key response packet, with synthetic keys:
 
 Data         Description
 ------       -----------
@@ -163,27 +168,27 @@ Data         Description
 00           Unknown
 10           Key Length (16 bytes)
 00           Unknown
-64 dd 9c e7  Key Data
-bc b5 b5 0a
-9a 33 45 42
-cb af 19 02
+aa aa aa aa  Key Data
+aa aa aa aa
+aa aa aa aa
+aa aa aa aa
 04           Key Type (ENC_KEY)
 00           Unknown
 10           Key Length (16 bytes)
 00           Unknown
-1b dd 73 d2  Key Data
-be 01 9b 98
-55 cc 5b 36
-7b f9 9d 5d
+bb bb bb bb  Key Data
+bb bb bb bb
+bb bb bb bb
+bb bb bb bb
 ```
 
 **Parsed output:**
 ```
 Key 1: IRK (Identity Resolving Key)
-  64dd9ce7bcb5b50a9a334542cbaf1902
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 Key 2: ENC_KEY (Encryption Key)
-  1bdd73d2be019b9855cc5b367bf99d5d
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 ```
 
 ## Using the Keys
@@ -192,9 +197,10 @@ Key 2: ENC_KEY (Encryption Key)
 
 Once you have the **ENC_KEY** (type 0x04), you can decrypt BLE proximity pairing advertisements:
 
-1. **Extract encrypted portion**: last 16 bytes of the BLE payload
+1. **Extract encrypted portion**: bytes 9-24 of the BLE payload
 2. **Decrypt**: AES-128 ECB, single block, no padding
-3. **Validate**: bytes 7-9 hold the last three bytes of the device's real MAC
+3. **Validate**: bytes 7-9 hold the last three bytes of the device's real MAC, or
+   `00 00 00` unless both pods are in the case
 4. **Parse**: bytes 1-3 are first pod, second pod and case (bit 7 = charging)
 
 ```rust
@@ -220,7 +226,7 @@ The AirPods may send several packets after the key request:
 - Some packets are status updates, or the unsolicited list of known hosts (`04 00 04 00 2B 00`),
   which comes with the handshake's answer. It is not an answer to the features packet, which
   nothing answers (#71)
-- Only packets with `data[4] == 0x31` contain keys
+- Only packets with the `04 00 04 00` header and `data[4] == 0x31` contain keys
 - **Loop and check each packet** until keys are found
 
 ### Timeout Handling
@@ -231,7 +237,7 @@ The AirPods may send several packets after the key request:
 let keys = tokio::time::timeout(Duration::from_secs(5), async {
     loop {
         let packet = client.read_packet().await?;
-        if packet.len() >= 7 && packet[4] == 0x31 {
+        if packet.len() >= 7 && packet[..4] == [0x04, 0x00, 0x04, 0x00] && packet[4] == 0x31 {
             return Ok::<_, anyhow::Error>(parse_proximity_keys(&packet)?);
         }
     }
@@ -260,8 +266,10 @@ Common failure modes:
 
 The app itself asks for the keys on every AAP connection: `Coordinator::open_aap`
 sends the request once the session is up, and the link's read loop hands each key
-packet to `aap::find_encryption_key`, storing a 16-byte key that differs from the one
-held. A re-paired pair's new key therefore arrives with the next connection, and a
+packet to `aap::find_encryption_key`, which takes a 16-byte ENC_KEY. That key goes into
+use at once, and is written to the keystore whenever the keys in memory differ from
+those last saved successfully - so a save that failed is tried again when the key next
+arrives. A re-paired pair's new key therefore arrives with the next connection, and a
 request that went unanswered is sent again by reconnecting. Run the app with the
 AirPods connected; a key it had not saved yet is logged as it is written:
 ```
@@ -338,7 +346,7 @@ Likely works with:
 
 ## References
 
-- [LibrePods](https://github.com/kavishdevar/librepods) - Original implementation
+- [LibrePods](https://github.com/librepods-org/librepods) - Original implementation
 - [BLE Proximity Pairing Protocol](ble-proximity-pairing.md) - BLE advertisement format
 - Bluetooth Core Specification - L2CAP protocol details
 
