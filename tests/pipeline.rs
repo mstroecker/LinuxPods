@@ -49,9 +49,9 @@ use linuxpods::ble::decrypt_for_device;
 use linuxpods::ble::scanner::{Advertisement, Scanner};
 use linuxpods::bluez::{BatteryProvider, ProviderConnection};
 use linuxpods::harness::bluez::device_path;
-use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3, Part};
+use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3, Part, Pods};
 use linuxpods::harness::{PrivateBus, World};
-use linuxpods::keystore::Keystore;
+use linuxpods::keystore::{Keystore, PairKeys};
 use linuxpods::podstate::{Command, Coordinator, DataSource, Snapshot};
 
 /// The longest any one wait may take, so that a regression fails the test
@@ -195,6 +195,13 @@ impl Fixture {
         self.world.keys(mac).await.unwrap().enc_key.to_vec()
     }
 
+    /// A pair's keys as its key packet carries them, and the app keeps them:
+    /// the ENC_KEY and the IRK.
+    async fn pair_keys(&self, mac: Address) -> PairKeys {
+        let keys = self.world.keys(mac).await.unwrap();
+        PairKeys::new(keys.enc_key, Some(keys.irk))
+    }
+
     fn keystore(&self) -> Keystore {
         Keystore::with_dir(self.data.path().to_path_buf()).unwrap()
     }
@@ -204,7 +211,7 @@ impl Fixture {
     async fn seed_keys(&self, macs: &[Address]) {
         let mut keys = HashMap::new();
         for &mac in macs {
-            keys.insert(mac, self.enc_key(mac).await);
+            keys.insert(mac, self.pair_keys(mac).await);
         }
         self.keystore().save(&keys).unwrap();
     }
@@ -212,7 +219,7 @@ impl Fixture {
     /// Waits until the key file holds `expected` and nothing else. The
     /// coordinator saves a key after it broadcasts it, and nothing tells when
     /// the save is done.
-    async fn until_stored(&self, expected: &HashMap<Address, Vec<u8>>) {
+    async fn until_stored(&self, expected: &HashMap<Address, PairKeys>) {
         let keystore = &self.keystore();
         eventually("the keys to be saved", move || async move {
             keystore.load().ok().as_ref() == Some(expected)
@@ -497,6 +504,17 @@ fn levels(snapshot: &Snapshot, mac: Address, source: DataSource) -> Option<[u8; 
     ])
 }
 
+/// A pair at `mac` with fresh keys and its batteries at `levels` - left,
+/// right, case - that is none of the world's: only what the test hands on
+/// of it is heard.
+fn pods_at(mac: Address, [left, right, case]: [u8; 3]) -> Pods {
+    let mut pods = Pods::new(PRO_3, mac);
+    pods.set_battery(Part::Left, Some(left));
+    pods.set_battery(Part::Right, Some(right));
+    pods.set_battery(Part::Case, Some(case));
+    pods
+}
+
 /// What GNOME Settings shows for a pair at `levels`: the lower earbud.
 fn lowest([left, right, _]: [u8; 3]) -> u8 {
     left.min(right)
@@ -542,7 +560,7 @@ async fn a_key_that_arrives_on_connect_is_stored_and_makes_the_ble_reading_exact
     })
     .await;
     fixture
-        .until_stored(&HashMap::from([(PAIR, key.clone())]))
+        .until_stored(&HashMap::from([(PAIR, fixture.pair_keys(PAIR).await)]))
         .await;
 
     app.detach(PAIR).await;
@@ -616,10 +634,11 @@ async fn each_pairs_key_is_stored_under_its_own_mac() {
     ])
     .await;
     let keys = HashMap::from([
-        (PAIR, fixture.enc_key(PAIR).await),
-        (OTHER, fixture.enc_key(OTHER).await),
+        (PAIR, fixture.pair_keys(PAIR).await),
+        (OTHER, fixture.pair_keys(OTHER).await),
     ]);
-    assert_ne!(keys[&PAIR], keys[&OTHER]);
+    assert_ne!(keys[&PAIR].enc_key, keys[&OTHER].enc_key);
+    assert_ne!(keys[&PAIR].irk, keys[&OTHER].irk);
     let mut app = fixture.start_app().await;
 
     // One pair after the other.
@@ -734,7 +753,7 @@ async fn a_repaired_pairs_new_key_replaces_the_stored_one_on_the_next_connection
 
     app.attach(PAIR).await;
     fixture
-        .until_stored(&HashMap::from([(PAIR, new.clone())]))
+        .until_stored(&HashMap::from([(PAIR, fixture.pair_keys(PAIR).await)]))
         .await;
     app.detach(PAIR).await;
     app.until("a BLE reading with the new key", |s| {
@@ -1068,7 +1087,7 @@ async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast
     assert_eq!(snapshot.known_keys, [PAIR]);
     assert_eq!(
         fixture.keystore().load().unwrap(),
-        HashMap::from([(PAIR, key)])
+        HashMap::from([(PAIR, fixture.pair_keys(PAIR).await)])
     );
 }
 
@@ -1083,14 +1102,14 @@ async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_address_that_advertises_once_reaches_the_coordinator() {
     let fixture = Fixture::new(&[]).await;
-    let mut pods = linuxpods::harness::pods::Pods::new(PRO_3, PAIR);
-    let [left, right, case] = PAIR_LEVELS;
-    pods.set_battery(Part::Left, Some(left));
-    pods.set_battery(Part::Right, Some(right));
-    pods.set_battery(Part::Case, Some(case));
+    let pods = pods_at(PAIR, PAIR_LEVELS);
+    let keys = pods.keys();
     fixture
         .keystore()
-        .save(&HashMap::from([(PAIR, pods.keys().enc_key.to_vec())]))
+        .save(&HashMap::from([(
+            PAIR,
+            PairKeys::new(keys.enc_key, Some(keys.irk)),
+        )]))
         .unwrap();
     let mut app = fixture.start_app().await;
 

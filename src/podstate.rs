@@ -46,12 +46,13 @@ use bluer::Address;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tracing::Instrument;
 
+use crate::KEY_LEN;
 use crate::aap::noise::{ModeState, Report};
 use crate::aap::{self, Message};
 use crate::ble::decode_model_name;
 use crate::ble::decrypt::decrypt_for_device;
 use crate::ble::parser::{PodSide, ProximityData};
-use crate::keystore::Keystore;
+use crate::keystore::{Keystore, PairKeys};
 
 /// How long the last advertisement of an identified device stays on show. Keyed
 /// by the real MAC, these do not rotate, so the map stays bounded by the number of
@@ -404,7 +405,8 @@ struct Inner {
     ble: HashMap<Address, Entry>,
     /// One per live AAP link, keyed by real MAC.
     links: HashMap<Address, Link>,
-    encryption_keys: HashMap<Address, Vec<u8>>,
+    /// Each pair's ENC_KEY, and its IRK once one has arrived.
+    keys: HashMap<Address, PairKeys>,
     device_names: HashMap<Address, String>,
 }
 
@@ -460,7 +462,7 @@ impl Inner {
     }
 
     fn snapshot(&self) -> Snapshot {
-        let mut known_keys: Vec<Address> = self.encryption_keys.keys().copied().collect();
+        let mut known_keys: Vec<Address> = self.keys.keys().copied().collect();
         known_keys.sort_unstable();
 
         let mut states: HashMap<Address, PodState> = self
@@ -509,7 +511,7 @@ impl Inner {
     }
 }
 
-/// Where `Inner::encryption_keys` is saved, and what was last saved there.
+/// Where `Inner::keys` is saved, and what was last saved there.
 struct Persistence {
     /// `None` when keys are not saved this session: the data directory could not
     /// be set up, or a key file that did not load could not be moved out of the
@@ -518,7 +520,7 @@ struct Persistence {
     /// The keys as last loaded or saved successfully. A save is due whenever
     /// memory differs from this. Judged against memory instead, a key whose save
     /// failed looked unchanged the next time it arrived, and was never written.
-    saved: HashMap<Address, Vec<u8>>,
+    saved: HashMap<Address, PairKeys>,
 }
 
 /// A device's AAP link as [`Coordinator::open_aap`] opens it, for
@@ -620,7 +622,7 @@ pub struct Coordinator {
     queues: std::sync::Mutex<HashMap<Address, LinkQueue>>,
     /// Held across a save, so saves never overlap - they share a temporary
     /// file. Owned by the save while it runs - see
-    /// `Coordinator::store_encryption_key`.
+    /// `Coordinator::store_keys`.
     keystore: Arc<Mutex<Persistence>>,
     /// The latest snapshot, which every subscriber sees - see [`Coordinator::subscribe`].
     updates: watch::Sender<Snapshot>,
@@ -691,7 +693,11 @@ impl Coordinator {
             match ks.load() {
                 Ok(keys) => {
                     if !keys.is_empty() {
-                        tracing::info!("Loaded {} encryption key(s) from disk", keys.len());
+                        let irks = keys.values().filter(|k| k.irk.is_some()).count();
+                        tracing::info!(
+                            "Loaded the keys of {} pair(s) from disk, {irks} with an IRK",
+                            keys.len()
+                        );
                     }
                     loaded = keys;
                 }
@@ -721,7 +727,7 @@ impl Coordinator {
         let inner = Inner {
             ble: HashMap::new(),
             links: HashMap::new(),
-            encryption_keys: loaded,
+            keys: loaded,
             device_names: HashMap::new(),
         };
         let (updates, _) = watch::channel(inner.snapshot());
@@ -828,10 +834,10 @@ impl Coordinator {
         ble_mac: Address,
     ) -> Option<Address> {
         let encrypted = data.encrypted_portion()?.to_vec();
-        let keys = self.inner.read().await.encryption_keys.clone();
+        let keys = self.inner.read().await.keys.clone();
 
-        for (&real_mac, key) in &keys {
-            let Ok(decrypted) = decrypt_for_device(&encrypted, key, real_mac) else {
+        for (&real_mac, pair) in &keys {
+            let Ok(decrypted) = decrypt_for_device(&encrypted, &pair.enc_key, real_mac) else {
                 continue;
             };
             if data.add_decrypted_data(&decrypted).is_ok() {
@@ -1110,7 +1116,12 @@ impl Coordinator {
                     self.handle_noise_mode(mode, mac_addr, client).await;
                 }
                 Ok(Message::Keys(keys)) => match aap::find_encryption_key(&keys) {
-                    Ok(key) => self.store_encryption_key(mac_addr, &key).await,
+                    Ok(enc_key) => {
+                        let irk = aap::find_irk(&keys)
+                            .inspect_err(|e| tracing::warn!("AAP key packet's IRK not kept: {e}"))
+                            .ok();
+                        self.store_keys(mac_addr, &enc_key, irk).await;
+                    }
                     Err(e) => tracing::warn!("AAP key packet rejected: {e}"),
                 },
                 Ok(Message::Unknown { .. }) => {}
@@ -1321,20 +1332,38 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Takes a newly received ENC_KEY into use, broadcasts the new key list, and
-    /// persists it.
+    /// Takes a newly received ENC_KEY and IRK into use, broadcasts the new key
+    /// list, and persists them.
     ///
-    /// Keys are requested on every connection, so this is usually the key already
-    /// held and already saved. That is skipped rather than rewriting the keystore
-    /// each time - which also keeps a device repeating its key packet from keeping
-    /// the disk busy. "Already saved" goes by the last save that succeeded, so a
-    /// key whose save failed is written again when it next arrives.
-    async fn store_encryption_key(&self, mac_addr: Address, key: &[u8]) {
+    /// Keys are requested on every connection, so these are usually the keys
+    /// already held and already saved. That is skipped rather than rewriting the
+    /// keystore each time - which also keeps a device repeating its key packet
+    /// from keeping the disk busy. "Already saved" goes by the last save that
+    /// succeeded, so a key whose save failed is written again when it next
+    /// arrives.
+    ///
+    /// A packet that brings no usable IRK keeps the one stored, as long as the
+    /// ENC_KEY is the one stored with it. With a new ENC_KEY - re-paired - the
+    /// old IRK goes too, as it resolves none of the new pairing's addresses:
+    /// without one, the pair is identified the old way rather than not at all.
+    async fn store_keys(
+        &self,
+        mac_addr: Address,
+        enc_key: &[u8; KEY_LEN],
+        irk: Option<[u8; KEY_LEN]>,
+    ) {
         {
             let mut inner = self.inner.write().await;
-            let previous = inner.encryption_keys.insert(mac_addr, key.to_vec());
-            // Decrypting from here on, whether or not the key reaches the disk.
-            if previous.as_deref() != Some(key) {
+            let previous = inner.keys.get(&mac_addr);
+            let irk = irk.or_else(|| {
+                previous
+                    .filter(|p| p.enc_key == enc_key)
+                    .and_then(|p| p.irk)
+            });
+            let keys = PairKeys::new(*enc_key, irk);
+            // Identifying from here on, whether or not the keys reach the disk.
+            if previous != Some(&keys) {
+                inner.keys.insert(mac_addr, keys);
                 self.broadcast(&inner);
             }
         }
@@ -1346,12 +1375,12 @@ impl Coordinator {
         // the next save ran alongside it, the older keys landing last.
         let mut persistence = self.keystore.clone().lock_owned().await;
         let Some(keystore) = persistence.keystore.clone() else {
-            tracing::debug!("Encryption key for {mac_addr} kept for this session only");
+            tracing::debug!("Keys of {mac_addr} kept for this session only");
             return;
         };
-        let keys = self.inner.read().await.encryption_keys.clone();
+        let keys = self.inner.read().await.keys.clone();
         if keys == persistence.saved {
-            tracing::debug!("Encryption key for {mac_addr} already saved");
+            tracing::debug!("Keys of {mac_addr} already saved");
             return;
         }
 
@@ -1373,10 +1402,8 @@ impl Coordinator {
         .await
         .unwrap_or_else(|e| Err(e.into()));
         match saved {
-            Ok(()) => {
-                tracing::info!("Stored encryption key for {mac_addr} ({} bytes)", key.len());
-            }
-            Err(e) => tracing::warn!("failed to save encryption key to disk: {e:#}"),
+            Ok(()) => tracing::info!("Stored the keys of {mac_addr}"),
+            Err(e) => tracing::warn!("failed to save the keys to disk: {e:#}"),
         }
     }
 }
@@ -1384,6 +1411,7 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ble::decrypt::random_key;
 
     fn entry(age: Duration) -> Entry {
         Entry {
@@ -1399,7 +1427,7 @@ mod tests {
                 .map(|(m, age)| (m, entry(age)))
                 .collect(),
             links: HashMap::new(),
-            encryption_keys: HashMap::new(),
+            keys: HashMap::new(),
             device_names: HashMap::new(),
         }
     }
@@ -1474,8 +1502,8 @@ mod tests {
         std::fs::write(dir.path().join("keys.json"), corrupt).unwrap();
 
         let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
-        assert_eq!(coordinator.inner.read().await.encryption_keys.len(), 0);
-        coordinator.store_encryption_key(MAC, &KEY).await;
+        assert_eq!(coordinator.inner.read().await.keys.len(), 0);
+        coordinator.store_keys(MAC, &KEY, None).await;
 
         let aside: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -1486,7 +1514,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), corrupt);
         assert_eq!(
             keystore_in(&dir).load().unwrap(),
-            HashMap::from([(MAC, KEY.to_vec())]),
+            HashMap::from([(MAC, PairKeys::new(KEY, None))]),
             "a fresh file in its place"
         );
     }
@@ -1506,11 +1534,11 @@ mod tests {
         // Writable again, so only the coordinator stands between the next key
         // and the file.
         chmod(dir.path(), 0o700);
-        coordinator.store_encryption_key(MAC, &KEY).await;
+        coordinator.store_keys(MAC, &KEY, None).await;
         chmod(&path, 0o600);
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
-        assert_eq!(coordinator.inner.read().await.encryption_keys.len(), 1);
+        assert_eq!(coordinator.inner.read().await.keys.len(), 1);
     }
 
     /// Regression (#38): "unchanged" was judged against memory, which already
@@ -1522,17 +1550,17 @@ mod tests {
 
         // Read-only, so the save cannot create its temporary file.
         chmod(dir.path(), 0o500);
-        coordinator.store_encryption_key(MAC, &KEY).await;
+        coordinator.store_keys(MAC, &KEY, None).await;
         chmod(dir.path(), 0o700);
         assert!(keystore_in(&dir).load().unwrap().is_empty());
         assert_eq!(
-            coordinator.inner.read().await.encryption_keys.len(),
+            coordinator.inner.read().await.keys.len(),
             1,
             "in use whether saved or not"
         );
 
-        coordinator.store_encryption_key(MAC, &KEY).await;
-        assert_eq!(keystore_in(&dir).load().unwrap()[&MAC], KEY);
+        coordinator.store_keys(MAC, &KEY, None).await;
+        assert_eq!(keystore_in(&dir).load().unwrap()[&MAC].enc_key, KEY);
     }
 
     /// A save goes through whole, and ahead of the next one, though its
@@ -1555,7 +1583,7 @@ mod tests {
 
         let first = tokio::spawn({
             let coordinator = coordinator.clone();
-            async move { coordinator.store_encryption_key(AA, &KEY).await }
+            async move { coordinator.store_keys(AA, &KEY, None).await }
         });
         at_save.await.unwrap();
         first.abort();
@@ -1563,7 +1591,7 @@ mod tests {
 
         let second = tokio::spawn({
             let coordinator = coordinator.clone();
-            async move { coordinator.store_encryption_key(BB, &OTHER_KEY).await }
+            async move { coordinator.store_keys(BB, &OTHER_KEY, None).await }
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
         let alongside = second.is_finished();
@@ -1575,7 +1603,10 @@ mod tests {
         assert!(!alongside, "saved alongside the first");
         assert_eq!(
             keystore_in(&dir).load().unwrap(),
-            HashMap::from([(AA, KEY.to_vec()), (BB, OTHER_KEY.to_vec())])
+            HashMap::from([
+                (AA, PairKeys::new(KEY, None)),
+                (BB, PairKeys::new(OTHER_KEY, None))
+            ])
         );
     }
 
@@ -1585,11 +1616,11 @@ mod tests {
     async fn a_saved_key_is_not_written_again() {
         let (coordinator, dir) = coordinator_with(inner_with(vec![]));
         let path = dir.path().join("keys.json");
-        coordinator.store_encryption_key(MAC, &KEY).await;
+        coordinator.store_keys(MAC, &KEY, None).await;
         assert!(path.exists());
 
         std::fs::remove_file(&path).unwrap();
-        coordinator.store_encryption_key(MAC, &KEY).await;
+        coordinator.store_keys(MAC, &KEY, None).await;
         assert!(!path.exists(), "the same key again is no reason to write");
     }
 
@@ -1639,7 +1670,7 @@ mod tests {
 
         let mut inner = inner_with(vec![]);
         for i in 0..1000 {
-            inner.encryption_keys = HashMap::from([(nth(i), KEY.to_vec())]);
+            inner.keys = HashMap::from([(nth(i), PairKeys::new(KEY, None))]);
             coordinator.broadcast(&inner);
         }
 
@@ -1696,7 +1727,7 @@ mod tests {
     async fn subscribe_delivers_current_state_immediately() {
         let dir = tempfile::tempdir().unwrap();
         keystore_in(&dir)
-            .save(&HashMap::from([(MAC, KEY.to_vec())]))
+            .save(&HashMap::from([(MAC, PairKeys::new(KEY, None))]))
             .unwrap();
         let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
         let rx = coordinator.subscribe();
@@ -1987,7 +2018,7 @@ mod tests {
     /// link's client.
     fn linked() -> (Arc<Coordinator>, Arc<aap::Client>, tempfile::TempDir) {
         let mut inner = inner_with(vec![]);
-        inner.encryption_keys.insert(MAC, KEY.to_vec());
+        inner.keys.insert(MAC, PairKeys::new(KEY, None));
         let l = link(None);
         let client = l.client.clone();
         inner.links.insert(MAC, l);
@@ -2153,7 +2184,7 @@ mod tests {
     #[tokio::test]
     async fn a_worn_pod_keeps_the_lid_its_partner_in_the_case_reported() {
         let mut inner = inner_with(vec![]);
-        inner.encryption_keys.insert(MAC, KEY.to_vec());
+        inner.keys.insert(MAC, PairKeys::new(KEY, None));
         let (coordinator, _dir) = coordinator_with(inner);
         let rx = coordinator.subscribe();
         let lid = || rx.borrow().states[&MAC].lid_open;
@@ -2255,9 +2286,54 @@ mod tests {
         );
 
         // Keys are requested on every connection.
-        coordinator.store_encryption_key(reported, &KEY).await;
-        assert_eq!(coordinator.inner.read().await.encryption_keys.len(), 1);
+        coordinator.store_keys(reported, &KEY, None).await;
+        assert_eq!(coordinator.inner.read().await.keys.len(), 1);
         assert_eq!(coordinator.subscribe().borrow().devices(), [reported]);
+    }
+
+    /// A coordinator holding KEY for MAC with `irk`, and nothing else.
+    fn keyed(irk: Option<[u8; KEY_LEN]>) -> (Arc<Coordinator>, tempfile::TempDir) {
+        let mut inner = inner_with(vec![]);
+        inner.keys.insert(MAC, PairKeys::new(KEY, irk));
+        coordinator_with(inner)
+    }
+
+    /// The IRK is stored with the ENC_KEY, and goes to disk with it; a packet
+    /// that brings the same keys again writes nothing.
+    #[tokio::test]
+    async fn an_irk_is_stored_and_saved_with_the_key() {
+        let irk = random_key();
+        let (coordinator, dir) = coordinator_with(inner_with(vec![]));
+        coordinator.store_keys(MAC, &KEY, Some(irk)).await;
+        let expected = HashMap::from([(MAC, PairKeys::new(KEY, Some(irk)))]);
+        assert_eq!(coordinator.inner.read().await.keys, expected);
+        assert_eq!(keystore_in(&dir).load().unwrap(), expected);
+
+        let path = dir.path().join("keys.json");
+        std::fs::remove_file(&path).unwrap();
+        coordinator.store_keys(MAC, &KEY, Some(irk)).await;
+        assert!(!path.exists(), "the same keys again are no reason to write");
+    }
+
+    /// A key packet without a usable IRK keeps the one stored, while the
+    /// ENC_KEY is the same pairing's. A new ENC_KEY - re-paired - takes the
+    /// old IRK with it, as it resolves none of the new pairing's addresses.
+    #[tokio::test]
+    async fn a_packet_without_an_irk_keeps_the_stored_one_for_the_same_key_only() {
+        let irk = random_key();
+        let (coordinator, dir) = keyed(Some(irk));
+
+        coordinator.store_keys(MAC, &KEY, None).await;
+        assert_eq!(
+            coordinator.inner.read().await.keys[&MAC],
+            PairKeys::new(KEY, Some(irk))
+        );
+
+        let new_key = random_key();
+        coordinator.store_keys(MAC, &new_key, None).await;
+        let expected = PairKeys::new(new_key, None);
+        assert_eq!(coordinator.inner.read().await.keys[&MAC], expected);
+        assert_eq!(keystore_in(&dir).load().unwrap()[&MAC], expected);
     }
 
     /// A command to a device with no link fails, and says so to its caller.

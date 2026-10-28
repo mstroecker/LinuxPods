@@ -70,6 +70,10 @@ pub enum KeyParseError {
     NoEncryptionKey,
     #[error("ENC_KEY must be {KEY_LEN} bytes, got {0}")]
     BadEncryptionKeyLen(usize),
+    #[error("no IRK in key packet")]
+    NoIrk,
+    #[error("IRK must be {KEY_LEN} bytes, got {0}")]
+    BadIrkLen(usize),
 }
 
 /// The key packet's opcode, the key marker.
@@ -147,6 +151,23 @@ pub fn find_encryption_key(keys: &[ProximityKey]) -> Result<[u8; KEY_LEN], KeyPa
         .as_slice()
         .try_into()
         .map_err(|_| KeyParseError::BadEncryptionKeyLen(key.data.len()))
+}
+
+/// The IRK, which resolves the addresses the pair advertises from
+/// (`ble::rpa`). As the packet carries it: least significant byte first, the
+/// reverse of how the Bluetooth specification writes a key.
+///
+/// The length is checked here for the reason [`find_encryption_key`] checks
+/// it: the key is persisted.
+pub fn find_irk(keys: &[ProximityKey]) -> Result<[u8; KEY_LEN], KeyParseError> {
+    let key = keys
+        .iter()
+        .find(|k| k.key_type == KeyType::Irk)
+        .ok_or(KeyParseError::NoIrk)?;
+    key.data
+        .as_slice()
+        .try_into()
+        .map_err(|_| KeyParseError::BadIrkLen(key.data.len()))
 }
 
 /// How many bytes a key packet starts with ahead of its first key: the header,
@@ -272,6 +293,24 @@ mod tests {
         assert_eq!(keys[0].data, irk);
         assert_eq!(keys[1].key_type, KeyType::EncKey);
         assert_eq!(find_encryption_key(&keys), Ok(enc));
+        assert_eq!(find_irk(&keys), Ok(irk));
+    }
+
+    #[test]
+    fn reports_a_missing_irk() {
+        let keys = parse_proximity_keys(&packet(&[(0x04, &[0xBBu8; 16])])).unwrap();
+        assert_eq!(find_irk(&keys), Err(KeyParseError::NoIrk));
+    }
+
+    /// As with the ENC_KEY: stored, an IRK of any other length would replace
+    /// a working one.
+    #[test]
+    fn rejects_an_irk_of_the_wrong_length() {
+        for len in [0, 15, 17, 32] {
+            let data = vec![0xAA; len];
+            let keys = parse_proximity_keys(&packet(&[(0x01, data.as_slice())])).unwrap();
+            assert_eq!(find_irk(&keys), Err(KeyParseError::BadIrkLen(len)));
+        }
     }
 
     #[test]

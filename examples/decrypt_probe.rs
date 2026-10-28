@@ -34,7 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keys = Keystore::new()?.load()?;
     println!("stored keys: {:?}\n", keys.keys().collect::<Vec<_>>());
 
-    for (mac, key) in &keys {
+    for (mac, pair) in &keys {
+        let key = &pair.enc_key;
         println!("=== key for {mac} ({} bytes) ===", key.len());
 
         for raw in CAPTURED {
