@@ -63,21 +63,29 @@ carries a GTK object toward tokio.
 - any global flag or pause where one device's state should be - the `supersedes_ble` bug;
 - new per-device state on the coordinator outside `Link` (goes with the link) or
   `Inner::ble` (cached). A separate map outlives the link: that is how a reconnect once
-  showed the previous session's noise mode (1fa1632). The exception is
+  showed the previous session's noise mode (1fa1632). The exceptions are
   `Coordinator::queues`, changed only together with `Inner::links` under its write lock
-  and removed only past the client check in `drop_link`;
+  and removed only past the client check in `drop_link`, and `Coordinator::resolved`
+  (`rpa::ResolvedAddresses`), which maps advertising addresses to pairs: bounded,
+  expiring, only addresses that resolved, each with the IRK that resolved it and
+  re-checked against the stored IRK on every hit, taken alone and never across an await;
 - a read loop or command that finds its link by MAC alone. Writes from a loop or a
   command go through `live_link` or an `Arc::ptr_eq` check on the client, or a stale
   session writes into its replacement. `Coordinator::command` routes by MAC on purpose;
   what a command writes still goes through `live_link`;
 - an `Inner` change that alters what `snapshot()` shows but returns without broadcasting;
-- BLE data stored or broadcast before a key has identified it.
+- BLE data stored or broadcast before it is identified: its address resolved by a stored
+  IRK and that pair's ENC_KEY decrypting it, or for a pair with no IRK yet, its key
+  alone. Also flag a key tried on an address that resolves to another pair, or a pair's
+  key tried on an address its stored IRK does not resolve.
 
 **Protocol.** Flag a diff that:
 - validates a decryption with magic bytes (byte 0 nibble, byte 4 `0x2D`) instead of the MAC
   suffix, or stops accepting `00 00 00`;
-- requests keys only when none is stored, or stores a returned key without the 16-byte
-  length check;
+- requests keys only when none is stored, or stores a returned ENC_KEY or IRK without
+  the 16-byte length check;
+- uses the IRK in the order the key packet carries it: `ah()` takes it byte-reversed,
+  which `ble::rpa::resolves` does;
 - sends `0x34 01` anywhere other than immediately before Off;
 - waits for a `0x0D` echo after setting the noise mode, instead of recording it
   optimistically;
@@ -86,12 +94,13 @@ carries a GTK object toward tokio.
 - uses a sentinel (0, 255, -1) for an unknown battery instead of `None`, or lets a level
   above 100, or the level beside an AAP status Disconnected (`0x04`), through as a reading.
 
-**Parsing and tests.** `aap::battery`, `aap::keys`, `aap::noise`, `aap::message`, `ble::parser` and
-`ble::decrypt` take bytes and return values - flag I/O, global state or coordinator access
+**Parsing and tests.** `aap::battery`, `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`,
+`ble::decrypt` and `ble::rpa` take bytes and return values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
 literals; flag what it cannot: a test reading the real keystore (`~/.local/share/linuxpods`,
 `$HOME`, `XDG_DATA_HOME` unset), a `gitleaks:allow` on a value that is not obviously
-synthetic, or a captured advertisement committed together with the key that decrypts it.
+synthetic (the Core spec's public RPA sample, Vol 3 Part H Appendix D.7, is the one
+accepted exception), or a captured advertisement committed together with the key that decrypts it.
 
 **UI.**
 - A widget updated from anywhere but the snapshot stream - a button handler setting a
