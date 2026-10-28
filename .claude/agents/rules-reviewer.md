@@ -90,7 +90,12 @@ carries a GTK object toward tokio.
 - waits for a `0x0D` echo after setting the noise mode, instead of recording it
   optimistically;
 - parses a noise report without checking both byte 4 and byte 6;
-- reuses an L2CAP socket whose `cid` was zero right after connect, rather than discarding it;
+- drops an L2CAP socket while its connect is pending (zero `cid`, `L2CAP_CONNINFO` not
+  yet readable), or retries a connect on a zero `cid`: closed in `BT_CONNECT`, the
+  channel is deleted here and completed on the pods, and a retry shares its local
+  channel with that orphan (#136). The wait belongs in `Client::connect`'s own task, out
+  of reach of the caller's abort or timeout, and `AAP_CONNECT_TIMEOUT` must outlast
+  `CONNECT_LIMIT` plus the handshake's;
 - uses a sentinel (0, 255, -1) for an unknown battery instead of `None`, or lets a level
   above 100, or the level beside an AAP status Disconnected (`0x04`), through as a reading.
 
