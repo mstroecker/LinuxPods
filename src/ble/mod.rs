@@ -2,6 +2,7 @@
 
 pub mod decrypt;
 pub mod parser;
+pub mod rpa;
 pub mod scanner;
 
 pub use decrypt::{decrypt_for_device, matches_device};
