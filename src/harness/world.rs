@@ -11,8 +11,8 @@
 //!
 //! - **BLE.** Every [`ADVERTISING_INTERVAL`] each pair's advertisement goes to
 //!   the fake BlueZ, which signals it while the app discovers - from the
-//!   random address the model rotates, so a new device object every ten
-//!   seconds. Every adapter that discovers hears it, whichever the pair is
+//!   resolvable private address the model makes from the pair's IRK and
+//!   rotates, so a new device object every ten seconds. Every adapter that discovers hears it, whichever the pair is
 //!   paired with, as radios in one room do, so with two adapters each
 //!   advertisement is signaled twice, from a device under each.
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
@@ -43,7 +43,7 @@
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
 //! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, `echo_delay_ms`, `report_delay_ms` and `stale_report_ms` in milliseconds, a `stale_report_ms` of 0 for none |
-//! | `Flood(u count)` | That many advertisers no key decrypts, each from an address of its own |
+//! | `Flood(u count)` | That many advertisers no key decrypts and no IRK resolves, each from an address of its own |
 //! | `Received(s mac) → aay` | Every AAP packet the app sent the pair, in order |
 //! | `Batteries() → a{sy}` | What GNOME Settings shows: the level a battery provider gave each device, by MAC |
 //!
@@ -51,9 +51,10 @@
 //! request the world cannot carry out - a MAC it has no pair at, a hang-up
 //! with no connection - is `org.freedesktop.DBus.Error.Failed`.
 //!
-//! Time is real: a pair rotates its address every ten seconds and the fake
-//! BlueZ forgets an address after thirty. The model's clock starts with the
-//! world.
+//! Time is real: a pair rotates its address every ten seconds - far more
+//! often than real AirPods, every 4 to 8 minutes, so that tests meet rotation -
+//! and the fake BlueZ forgets an address after thirty. The model's clock
+//! starts with the world.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::Shutdown;
@@ -419,7 +420,8 @@ impl World {
 
     /// `count` advertisers no key decrypts, as a BLE spam flood brings: each a
     /// pair with keys nobody holds, so its advertisement parses but stays
-    /// closed, advertising once, from an address of its own. A new address is
+    /// closed, and its address resolves with no IRK the app holds,
+    /// advertising once, from an address of its own. A new address is
     /// signaled only as it appears, with `InterfacesAdded`: the scanner reads
     /// it, attachment's connection watch does not. Gone after the fake
     /// BlueZ's timeout.
@@ -427,7 +429,8 @@ impl World {
         self.spam(count, 1).await
     }
 
-    /// `count` advertisers no key decrypts, as [`World::flood`] brings, each
+    /// `count` advertisers no key decrypts and no IRK resolves, as
+    /// [`World::flood`] brings, each
     /// advertising `times` times from one address. Every advertisement after
     /// an advertiser's first is signaled as a change, with
     /// `PropertiesChanged`, which attachment's connection watch subscribes to
@@ -789,6 +792,7 @@ mod tests {
     use crate::aap::noise::{self, NoiseMode};
     use crate::aap::{Client, parse_battery_packet};
     use crate::ble::decrypt::decrypt_for_device;
+    use crate::ble::rpa::resolves;
     use crate::ble::scanner::Scanner;
     use crate::bluez::BLUEZ_SERVICE;
     use crate::harness::PrivateBus;
@@ -1004,8 +1008,8 @@ mod tests {
         );
     }
 
-    /// Every pair advertises while the app discovers, and its key decrypts
-    /// what it sends.
+    /// Every pair advertises while the app discovers, from an address its
+    /// IRK resolves, and its key decrypts what it sends.
     #[tokio::test]
     async fn every_pair_advertises() {
         let (bus, world, _dir) = world().await;
@@ -1025,7 +1029,10 @@ mod tests {
                 let advert = adverts.next().await.unwrap();
                 let encrypted = advert.data.encrypted_portion().unwrap();
                 for (mac, keys) in &keys {
-                    if decrypt_for_device(encrypted, &keys.enc_key, *mac).is_ok() {
+                    let resolved = resolves(&keys.irk, advert.ble_mac);
+                    let decrypted = decrypt_for_device(encrypted, &keys.enc_key, *mac).is_ok();
+                    assert_eq!(resolved, decrypted, "{mac}'s IRK and key disagree");
+                    if decrypted {
                         heard.insert(*mac);
                     }
                 }
@@ -1036,7 +1043,8 @@ mod tests {
     }
 
     /// A flood's advertisers parse, come each from an address of its own, and
-    /// the pair's key decrypts none of them.
+    /// the pair's key decrypts none of them, nor does its IRK resolve their
+    /// addresses.
     #[tokio::test]
     async fn a_flood_decrypts_with_no_key() {
         let (bus, world, _dir) = world().await;
@@ -1044,7 +1052,7 @@ mod tests {
         let adverts = scanner.advertisements().await.unwrap();
         tokio::pin!(adverts);
         scanner.start_discovery().await.unwrap();
-        let key = world.keys(MAC).await.unwrap().enc_key;
+        let keys = world.keys(MAC).await.unwrap();
 
         world.flood(3).await.unwrap();
         let mut addresses = HashSet::new();
@@ -1053,7 +1061,8 @@ mod tests {
             while addresses.len() < 3 {
                 let advert = adverts.next().await.unwrap();
                 let encrypted = advert.data.encrypted_portion().unwrap();
-                if decrypt_for_device(encrypted, &key, MAC).is_err() {
+                if decrypt_for_device(encrypted, &keys.enc_key, MAC).is_err() {
+                    assert!(!resolves(&keys.irk, advert.ble_mac));
                     addresses.insert(advert.ble_mac);
                 }
             }

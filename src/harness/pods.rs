@@ -13,7 +13,8 @@
 //! A pair talks on two channels, as real AirPods do:
 //!
 //! - **BLE.** [`Pods::advertisement`] is what the pair broadcasts at a moment:
-//!   the Apple manufacturer data, from a random address that rotates.
+//!   the Apple manufacturer data, from a resolvable private address that its
+//!   IRK resolves, and that rotates.
 //! - **AAP.** The world hands the model what the app sends
 //!   ([`Pods::receive`]) and carries out whatever [`Pods::poll`] returns.
 //!   Replies, notifications and the timed quirks all come out of `poll`.
@@ -31,6 +32,7 @@ use crate::aap::keys::{KeyType, ProximityKey, key_packet};
 use crate::aap::noise::{self, NoiseMode};
 use crate::ble::decrypt::{KEY_LEN, Plaintext, ZEROED_SUFFIX, encrypt, random_key};
 use crate::ble::parser::{Cleartext, PodSide, proximity_message};
+use crate::ble::rpa::resolvable_address;
 
 /// AirPods Pro 3, by the product ID `parse_proximity_data` reads.
 pub const PRO_3: u16 = 0x2027;
@@ -38,8 +40,10 @@ pub const PRO_3: u16 = 0x2027;
 pub const PRO_2_USB_C: u16 = 0x2024;
 
 /// How long the fake advertises from one address. Real AirPods advertise from
-/// an address per pod, which in the #71 captures changed across a closed lid
-/// and never on a timer; #115 brings the fake in line.
+/// an address per pod, which in the #71 captures lasted 4 to 8 minutes,
+/// connected or not, and changed across a closed lid as well. The fake
+/// rotates far faster on purpose: it is there to put rotation through its
+/// paces in tests.
 pub const ADDRESS_ROTATION: Duration = Duration::from_secs(10);
 
 /// How long a pair with the silent quirk holds a connection before hanging up,
@@ -123,8 +127,9 @@ pub enum Part {
 /// echoes every change about 1 s later and sends no 0x4B. And
 /// [`Quirks::zero_suffix_when_connected`] zeroes the suffix while connected,
 /// where a Pro 3 zeroes it whenever a pod is out of the case. #115 brings
-/// those in line, along with two things that are not quirks: the address
-/// rotation, [`ADDRESS_ROTATION`], and the features answer, `FEATURES_ACK`.
+/// those in line, along with the features answer, `FEATURES_ACK`, which is
+/// not a quirk. The address rotation, [`ADDRESS_ROTATION`], is faster than
+/// the hardware's on purpose.
 ///
 /// Each one is read when it applies, so a change takes effect from the next
 /// packet, advertisement or connection.
@@ -202,7 +207,7 @@ impl Default for Quirks {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advertisement {
     /// The random address it comes from: a `Device1` of its own, not the pair's
-    /// real address.
+    /// real address. A resolvable private address, made from the pair's IRK.
     pub address: Address,
     /// The value of the Apple (0x004C) entry in that device's
     /// `ManufacturerData` - the message type, length and payload that
@@ -519,17 +524,13 @@ impl Pods {
     /// The random address the pair advertises from at `now`. It changes every
     /// [`ADDRESS_ROTATION`], and with the keys.
     ///
-    /// It has the top bits, 01, of a resolvable private address - the kind
-    /// the IRK exists to resolve - but is not derived the way the Bluetooth
-    /// specification derives one, so the IRK does not resolve it. The app never
-    /// tries.
+    /// A resolvable private address, as real AirPods advertise from: its hash
+    /// is `ah` of its `prand` under the pair's IRK, so the IRK the key packet
+    /// carries resolves it as it resolves the hardware's (#134).
     pub fn address_at(&self, now: Duration) -> Address {
         let period = (now.as_millis() / ADDRESS_ROTATION.as_millis()) as u64;
         let bytes = self.derive(b'A', period);
-        let mut address = [0u8; 6];
-        address.copy_from_slice(&bytes[..6]);
-        address[0] = address[0] & 0x3F | 0x40;
-        Address::new(address)
+        resolvable_address(&self.keys.irk, [bytes[0], bytes[1], bytes[2]])
     }
 
     /// The app opened an AAP connection at `now`. There is no AAP without a
@@ -795,6 +796,7 @@ mod tests {
     };
     use crate::ble::decrypt::{decrypt_for_device, decrypt_raw, matches_device};
     use crate::ble::parser::{ProximityData, parse_proximity_data};
+    use crate::ble::rpa::resolves;
 
     const MAC: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
@@ -962,20 +964,22 @@ mod tests {
         }
     }
 
+    /// Every address resolves with the IRK the key packet carries, as the
+    /// hardware's do, and with no other pair's.
     #[test]
-    fn the_address_rotates() {
+    fn the_address_rotates_and_resolves_with_the_irk() {
         let pods = Pods::new(PRO_3, MAC);
         let first = pods.address_at(ms(0));
         assert_eq!(pods.address_at(ADDRESS_ROTATION - ms(1)), first);
         let second = pods.address_at(ADDRESS_ROTATION);
         assert_ne!(second, first);
         assert_eq!(pods.advertisement(ADDRESS_ROTATION).address, second);
+        let other = Pods::new(PRO_3, MAC);
         for address in [first, second] {
             assert_ne!(address, MAC);
-            assert_eq!(address[0] >> 6, 0b01, "{address}");
+            assert!(resolves(&pods.keys().irk, address), "{address}");
+            assert!(!resolves(&other.keys().irk, address), "{address}");
         }
-
-        let other = Pods::new(PRO_3, MAC);
         assert_ne!(other.address_at(ms(0)), first, "every pair has its own");
     }
 
@@ -998,6 +1002,7 @@ mod tests {
         assert_ne!(pods.keys().enc_key, keys.enc_key);
         assert_ne!(pods.keys().irk, keys.irk);
         assert_ne!(pods.address_at(ms(0)), address);
+        assert!(!resolves(&keys.irk, pods.address_at(ms(0))));
         read(&pods, ms(0));
 
         let fixed = Keys::generate();
