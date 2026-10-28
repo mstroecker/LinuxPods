@@ -15,7 +15,9 @@
 //! Nothing that identifies a device or a key is printed: the output is meant
 //! to be pasted into an issue. Pairs are numbered in the order given, addresses
 //! in the order heard. Only the cleartext status bytes 3-8 are shown, which
-//! carry no address.
+//! carry no address. An error names the pair by its number, and the pair's
+//! address is cut out of its causes. That holds at the default log level;
+//! `RUST_LOG` set to debug logs the library's lines, addresses and all.
 //!
 //! A line typed while it runs is printed as a timestamped marker, to tie a
 //! phase (lid closed, disconnected) to the output. `q` prints a summary and
@@ -31,10 +33,9 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, bail};
+use anyhow::{anyhow, bail};
 use bluer::Address;
-use linuxpods::aap::keys::KeyType;
-use linuxpods::aap::{Client, Message, decode, find_encryption_key};
+use linuxpods::aap::{Client, Message, decode, find_encryption_key, find_irk};
 use linuxpods::ble::decrypt::decrypt_raw;
 use linuxpods::ble::matches_device;
 use linuxpods::ble::rpa;
@@ -148,8 +149,24 @@ fn pair_list(indices: &[usize]) -> String {
     }
 }
 
-/// Asks a connected pair for its keys over AAP and waits for the reply.
-async fn fetch_keys(mac: Address) -> anyhow::Result<Pair> {
+/// Asks a connected pair, number `n`, for its keys over AAP and waits for the
+/// reply. A failure names the pair by `n`: the client's errors carry its
+/// address, which is replaced in their text.
+async fn fetch_keys(n: usize, mac: Address) -> anyhow::Result<Pair> {
+    keys_of(mac)
+        .await
+        .map_err(|e| anyhow!("pair {n}: {}", without_address(&format!("{e:#}"), mac)))
+}
+
+/// `text` with `mac` cut out, however it is cased.
+fn without_address(text: &str, mac: Address) -> String {
+    let address = mac.to_string();
+    text.replace(&address, "<address>")
+        .replace(&address.to_lowercase(), "<address>")
+}
+
+/// [`fetch_keys`], its errors as they come.
+async fn keys_of(mac: Address) -> anyhow::Result<Pair> {
     // Dropped at the end, which shuts the socket.
     let client = Client::new(mac).open().await?;
     client.request_proximity_keys().await?;
@@ -161,14 +178,7 @@ async fn fetch_keys(mac: Address) -> anyhow::Result<Pair> {
         };
         if let Ok(Message::Keys(keys)) = decode(&packet) {
             let enc_key = find_encryption_key(&keys)?;
-            let irk: [u8; 16] = keys
-                .iter()
-                .find(|k| k.key_type == KeyType::Irk)
-                .context("the key packet carries no IRK")?
-                .data
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("the IRK is not 16 bytes"))?;
+            let irk = find_irk(&keys)?;
             break Pair { mac, irk, enc_key };
         }
     };
@@ -211,11 +221,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // An argument that does not parse may still be most of an address, so
+    // it is named by its position.
     let macs = std::env::args()
         .skip(1)
-        .map(|arg| {
+        .enumerate()
+        .map(|(i, arg)| {
             arg.parse::<Address>()
-                .with_context(|| format!("not a MAC address: {arg}"))
+                .map_err(|_| anyhow!("argument {} is not a MAC address", i + 1))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     if macs.is_empty() {
@@ -225,9 +238,7 @@ async fn main() -> anyhow::Result<()> {
     let mut pairs = Vec::new();
     for (i, mac) in macs.into_iter().enumerate() {
         println!("pair {}: asking for its keys over AAP...", i + 1);
-        let pair = fetch_keys(mac)
-            .await
-            .with_context(|| format!("pair {}", i + 1))?;
+        let pair = fetch_keys(i + 1, mac).await?;
         println!("pair {}: IRK and ENC_KEY in (16 bytes each)", i + 1);
         pairs.push(pair);
     }
@@ -338,6 +349,21 @@ mod tests {
         as_sent.reverse();
         assert_eq!(resolves(&as_sent, SPEC_ADDRESS), Some(Order::App));
         assert_eq!(resolves(&SPEC_IRK, SPEC_ADDRESS), Some(Order::Unreversed));
+    }
+
+    /// The client's connect error names the address; the probe's does not.
+    #[test]
+    fn an_error_is_printed_without_the_address() {
+        let mac = Address::new([0x00, 0x00, 0x5e, 0x00, 0x53, 0x01]);
+        let error = format!(
+            "failed to connect to AirPods at {mac}: Host is down; {mac:?} 00:00:5e:00:53:01"
+        );
+        let printed = without_address(&error, mac);
+        assert!(
+            !printed.to_lowercase().contains("00:00:5e:00:53:01"),
+            "{printed}"
+        );
+        assert!(printed.starts_with("failed to connect to AirPods at <address>: Host is down"));
     }
 
     #[test]

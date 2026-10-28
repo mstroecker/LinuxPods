@@ -28,7 +28,7 @@ use bluer::Address;
 use linuxpods::harness::World;
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3};
 use linuxpods::harness::world::DEFAULT_ADAPTER;
-use linuxpods::keystore::{self, KEYS_FILE, Keystore};
+use linuxpods::keystore::{self, KEYS_FILE, Keystore, PairKeys};
 
 const USAGE: &str = "\
 usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--adapter NAME]
@@ -204,7 +204,8 @@ async fn run(args: Args) -> Result<()> {
     if let Some(dir) = &args.keystore {
         let mut keys = HashMap::new();
         for &mac in &macs {
-            keys.insert(mac, world.keys(mac).await?.enc_key.to_vec());
+            let pair = world.keys(mac).await?;
+            keys.insert(mac, PairKeys::new(pair.enc_key, Some(pair.irk)));
         }
         Keystore::with_dir(dir.clone())
             .and_then(|keystore| keystore.save(&keys))
