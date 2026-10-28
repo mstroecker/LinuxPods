@@ -343,7 +343,7 @@ pub fn proximity_message(cleartext: &[u8], encrypted: &[u8]) -> Vec<u8> {
     data
 }
 
-pub fn decode_color(color: u8) -> String {
+pub(crate) fn decode_color(color: u8) -> String {
     match color {
         0x00 => "White".into(),
         0x01 => "Black".into(),
@@ -358,7 +358,9 @@ pub fn decode_color(color: u8) -> String {
         0x0A => "Dark Blue".into(),
         0x0B => "Light Blue".into(),
         0x0C => "Yellow".into(),
-        other => format!("Unknown (0x{other:02X})"),
+        // Said to be a color: shown beside the model name, a bare "Unknown"
+        // would read as an unknown model.
+        other => format!("Unknown color (0x{other:02X})"),
     }
 }
 
@@ -424,7 +426,7 @@ mod tests {
             battery,  // 4: battery nibbles
             charging, // 5: charging bits + case battery
             lid,      // 6: lid state
-            0x00,     // 7: colour
+            0x00,     // 7: color
             0x05,     // 8: connection state -> Music
         ];
         // Only the first byte of the encrypted portion: the shortest payload the
@@ -798,7 +800,7 @@ mod tests {
         }
     }
 
-    /// Regression (#45): 0x2002 was labelled the 2nd generation.
+    /// Regression (#45): 0x2002 was labeled the 2nd generation.
     #[test]
     fn names_the_first_two_generations_apart() {
         assert_eq!(decode_model_name(0x2002), Some("AirPods (1st gen)"));
@@ -811,6 +813,14 @@ mod tests {
     fn an_unknown_product_id_has_no_name() {
         assert_eq!(decode_model_name(0x2720), None);
         assert_eq!(decode_model_name(0x0000), None);
+    }
+
+    /// A code the table lacks says it is a color: shown beside the model
+    /// name, a bare "Unknown" would read as an unknown model.
+    #[test]
+    fn names_colors_and_says_what_an_unknown_code_is() {
+        assert_eq!(decode_color(0x00), "White");
+        assert_eq!(decode_color(0x42), "Unknown color (0x42)");
     }
 
     #[test]

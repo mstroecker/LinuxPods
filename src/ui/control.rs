@@ -1,4 +1,4 @@
-//! The Control page: battery display, status line, device switcher, Noise
+//! The Control page: battery display, status text, device switcher, Noise
 //! Control and Features.
 
 use std::cell::RefCell;
@@ -9,7 +9,7 @@ use gtk::{gio, glib};
 
 use super::{RESOURCE_PREFIX, last_seen_text, unavailable_row};
 use crate::aap::NoiseMode;
-use crate::ble::decode_connection_state;
+use crate::ble::{decode_color, decode_connection_state};
 use crate::podstate::{DataSource, PodState, Snapshot};
 
 /// One column of the battery display: a pod, or the case.
@@ -105,7 +105,7 @@ pub struct ControlView {
 pub(super) fn create_control_view() -> ControlView {
     let page = adw::PreferencesPage::new();
 
-    // Battery display and status line. Not rows, so they share a plain box in an
+    // Battery display and status text. Not rows, so they share a plain box in an
     // untitled group rather than a boxed list.
     let control_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -168,7 +168,7 @@ pub(super) fn create_control_view() -> ControlView {
         column_box.append(&level);
 
         // The percentage, then what the pod is doing. Symbolic icons rather than
-        // emoji, so they take the theme's colour and dim along with the text.
+        // emoji, so they take the theme's color and dim along with the text.
         let label = gtk::Label::builder().name(id).label("--").build();
         let charging = gtk::Image::builder()
             .name(format!("{id}-charging"))
@@ -203,9 +203,12 @@ pub(super) fn create_control_view() -> ControlView {
 
     control_box.append(&battery_box);
 
+    // Two lines - see `status_text` - centered under one another as the label
+    // is under the batteries.
     let status_label = gtk::Label::builder()
         .name("status")
         .label("Searching for AirPods…")
+        .justify(gtk::Justification::Center)
         .build();
     status_label.add_css_class("dim-label");
     status_label.set_margin_top(10);
@@ -274,7 +277,7 @@ pub(super) fn create_control_view() -> ControlView {
     page.add(&noise_control_group);
 
     // Features. The command behind Conversation Awareness is still unknown, so
-    // its row stays greyed out whatever the connection: on AAP, a live switch
+    // its row stays grayed out whatever the connection: on AAP, a live switch
     // would claim a setting the AirPods never received.
     let features_group = adw::PreferencesGroup::builder().title("Features").build();
     features_group.add(&unavailable_row(
@@ -428,7 +431,7 @@ fn show_noise_mode(view: &ControlView, mode: Option<NoiseMode>) {
     view.noise_action.set_state(&target.to_variant());
 }
 
-/// Resets the display, with the reason shown in the status line.
+/// Resets the display, with the reason shown in the status text.
 fn clear_battery_display(w: &BatteryWidgets, status: &str) {
     for column in [&w.left, &w.right, &w.case] {
         column.show(None, false, false);
@@ -437,7 +440,7 @@ fn clear_battery_display(w: &BatteryWidgets, status: &str) {
     w.last_seen_label.set_visible(false);
 }
 
-/// Draws a reading into the battery display and the status line. A pod is
+/// Draws a reading into the battery display and the status text. A pod is
 /// drawn in an ear only while that is known: AAP alone does not say.
 fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
     w.left.show(
@@ -452,7 +455,7 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
     );
     w.case.show(state.case_battery, state.case_charging, false);
 
-    w.status_label.set_text(&status_line(state));
+    w.status_label.set_text(&status_text(state));
 
     match state.last_seen {
         Some(seen) => {
@@ -463,29 +466,39 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
     }
 }
 
-/// The one-line summary under the battery display.
-fn status_line(state: &PodState) -> String {
+/// The summary under the battery display, in two lines: the model and its
+/// color, then the lid, what the AirPods are doing and where the numbers came
+/// from. On one line it was wider than the window.
+fn status_text(state: &PodState) -> String {
+    // The decoded name, or the product ID for a model we do not recognize, and
+    // the color likewise, so a report of either says which. A bare label while
+    // nothing has identified the device; the color comes only with an identity.
+    let device = state.identity.map_or_else(
+        || "AirPods".to_string(),
+        |identity| {
+            format!(
+                "{} • {}",
+                identity.model_name(),
+                decode_color(identity.color)
+            )
+        },
+    );
+
+    let mut details = Vec::new();
     // Absent unless a pod is in the case: the pods report it, and only one in
     // the case can see it.
-    let lid = match state.lid_open {
-        Some(true) => " • Lid: Open",
-        Some(false) => " • Lid: Closed",
-        None => "",
-    };
+    if let Some(open) = state.lid_open {
+        details.push(format!("Lid: {}", if open { "Open" } else { "Closed" }));
+    }
     // What the AirPods are doing - playing, on a call - comes from advertisements
     // only: for a pair on AAP, the one cached. Absent while none is.
-    let activity = state
-        .connection_state
-        .map(|s| format!(" • {}", decode_connection_state(s)))
-        .unwrap_or_default();
-    // The decoded name, or the product ID for a model we do not recognise; a
-    // bare label while nothing has identified the device.
-    let model = state
-        .identity
-        .map_or_else(|| "AirPods".to_string(), |identity| identity.model_name());
-
+    if let Some(activity) = state.connection_state {
+        details.push(decode_connection_state(activity));
+    }
     // The source is which protocol produced these numbers.
-    format!("{model}{lid}{activity} • Source: {}", state.source)
+    details.push(format!("Source: {}", state.source));
+
+    format!("{device}\n{}", details.join(" • "))
 }
 
 #[cfg(test)]
@@ -493,7 +506,7 @@ mod tests {
     use super::*;
     use crate::podstate::Identity;
 
-    /// A reading identified by `product_id`.
+    /// A reading identified by `product_id`, in white.
     fn identified(product_id: u16, source: DataSource) -> PodState {
         PodState {
             identity: Some(Identity {
@@ -505,38 +518,59 @@ mod tests {
     }
 
     #[test]
-    fn status_line_shows_what_the_airpods_are_doing() {
+    fn status_text_shows_what_the_airpods_are_doing() {
         let state = PodState {
             lid_open: Some(true),
             connection_state: Some(0x05),
             ..identified(0x2027, DataSource::Ble)
         };
         assert_eq!(
-            status_line(&state),
-            "AirPods Pro 3 • Lid: Open • Music • Source: BLE"
+            status_text(&state),
+            "AirPods Pro 3 • White\nLid: Open • Music • Source: BLE"
         );
     }
 
     /// A pair on AAP with no advertisement cached has no connection state, and
     /// the segment is left out rather than guessed.
     #[test]
-    fn status_line_omits_what_nothing_reported() {
+    fn status_text_omits_what_nothing_reported() {
         let state = identified(0x2027, DataSource::Aap);
-        assert_eq!(status_line(&state), "AirPods Pro 3 • Source: AAP");
+        assert_eq!(status_text(&state), "AirPods Pro 3 • White\nSource: AAP");
     }
 
     /// A model we do not know goes by its product ID; a device nothing has
     /// identified yet - a pair on AAP before its first advertisement - by a
-    /// bare "AirPods".
+    /// bare "AirPods", and with no color to show.
     #[test]
-    fn status_line_names_the_model_as_far_as_it_is_known() {
+    fn status_text_names_the_model_as_far_as_it_is_known() {
         assert_eq!(
-            status_line(&identified(0xFFFF, DataSource::Ble)),
-            "Unknown (0xFFFF) • Source: BLE"
+            status_text(&identified(0xFFFF, DataSource::Ble)),
+            "Unknown (0xFFFF) • White\nSource: BLE"
         );
         assert_eq!(
-            status_line(&PodState::empty(DataSource::Aap)),
-            "AirPods • Source: AAP"
+            status_text(&PodState::empty(DataSource::Aap)),
+            "AirPods\nSource: AAP"
+        );
+    }
+
+    /// The color as advertised, by name; a code the table lacks by itself,
+    /// said to be a color so it is not taken for an unknown model.
+    #[test]
+    fn status_text_names_the_color_beside_the_model() {
+        let colored = |color| PodState {
+            identity: Some(Identity {
+                product_id: 0x2024,
+                color,
+            }),
+            ..PodState::empty(DataSource::Ble)
+        };
+        assert_eq!(
+            status_text(&colored(0x01)),
+            "AirPods Pro (2nd gen, USB-C) • Black\nSource: BLE"
+        );
+        assert_eq!(
+            status_text(&colored(0x42)),
+            "AirPods Pro (2nd gen, USB-C) • Unknown color (0x42)\nSource: BLE"
         );
     }
 

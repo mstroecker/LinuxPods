@@ -182,7 +182,7 @@ decrypted, not from reading the suffix, and the union costs one bit (2^-23 per w
 4 `0x2D`) holds on neither AirPods Pro 3 (0x2720) nor Pro Gen 2 (0x2420) - both report
 byte 4 = `0x1D` - and rejects correct decryptions, silently disabling 1% accuracy.
 
-**AAP packets carry battery only.** `Inner::snapshot` merges in the rest: model and colour
+**AAP packets carry battery only.** `Inner::snapshot` merges in the rest: model and color
 from the identity the link holds; ears, lid, activity and primary pod from the cached
 advertisement. The noise control mode is kept on the link (`Link::noise_mode`), apart
 from the reading every battery packet replaces, and goes with the link.

@@ -5,4 +5,4 @@ pub mod parser;
 pub mod scanner;
 
 pub use decrypt::{decrypt_for_device, matches_device};
-pub(crate) use parser::{decode_connection_state, decode_model_name};
+pub(crate) use parser::{decode_color, decode_connection_state, decode_model_name};

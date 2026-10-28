@@ -10,7 +10,7 @@
 A native GNOME desktop application for managing Apple AirPods on Linux.
 
 <p align="center">
-  <img src="docs/images/control-tab.png" alt="LinuxPods window: device switcher in the header bar, battery levels for both pods and the case, noise control modes and Conversation Awareness" width="360">
+  <img src="docs/images/control-tab.png" alt="LinuxPods window: device switcher in the header bar, battery levels for both pods and the case, the model and its color, noise control modes and Conversation Awareness" width="360">
 </p>
 
 > [!WARNING]
@@ -36,7 +36,7 @@ be changed, only observed.
 | In-ear detection | ✅ |
 | Case lid open/closed | ✅ |
 | Playback state - idle, music, call, ringing | ✅ |
-| Model and colour identification | ✅ |
+| Model and color identification | ✅ |
 | Identification behind a randomized BLE MAC | ✅ |
 
 Without a key the levels arrive in ~10% steps, and every 30-60 seconds rather than live.
@@ -179,10 +179,10 @@ Launch with `cargo run`, or `./target/release/linuxpods` after a release build.
 `--minimized` starts in the system tray without showing the window; the tray's
 **Open LinuxPods** brings it up.
 
-The window shows the three battery levels, charging state and in-ear detection, along
-with which source the reading came from. With more than one pair known, the header bar
-switches between them. **Preferences**, in the main menu, lists every known device with
-its encryption key status.
+The window shows the three battery levels, charging state and in-ear detection; under
+them the model and its color, and which source the reading came from. With more than
+one pair known, the header bar switches between them. **Preferences**, in the main menu,
+lists every known device with its encryption key status.
 
 Setup is connecting the AirPods to this machine once. On every connection LinuxPods asks
 them for their encryption keys and writes them to `~/.local/share/linuxpods/keys.json`,
