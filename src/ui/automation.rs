@@ -61,7 +61,7 @@
 //! | `battery-left`, `battery-right`, `battery-case` | a column's percentage, `--` when unknown |
 //! | `battery-<column>-level` | its level bar |
 //! | `battery-<column>-charging`, `battery-<column>-in-ear` | its icons, visible while they apply |
-//! | `status` | the status line under the battery display |
+//! | `status` | the status text under the battery display: model and color, then the rest |
 //! | `last-seen` | how old a BLE reading is; hidden for AAP |
 //! | `noise-control` | the Noise Control group, insensitive unless the device is on AAP |
 //! | `noise-off`, `noise-noise-cancelling`, `noise-transparency`, `noise-adaptive` | its radios |
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     /// Off screen goes first: a user could not even see whether the widget is
-    /// greyed out.
+    /// grayed out.
     #[test]
     fn presses_refuse_what_a_user_could_not_press() {
         let shown = widget("GtkCheckButton", Some("noise-off"), vec![]);
@@ -1179,12 +1179,12 @@ mod tests {
         let switch = locate(&tree, "auto-connect").unwrap().1;
         assert_eq!(toggle_state(switch, "auto-connect"), Ok(false));
 
-        let greyed = Node {
+        let grayed = Node {
             sensitive: false,
             ..switch.clone()
         };
         assert_eq!(
-            toggle_state(&greyed, "auto-connect"),
+            toggle_state(&grayed, "auto-connect"),
             Err(Error::Insensitive("auto-connect".into()))
         );
 

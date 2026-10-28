@@ -213,10 +213,14 @@ back in.
 
 ### Byte 7: Device Color
 
-✅ **Working** - See `decode_color` in `src/ble/parser.rs`:
+✅ **Working** - `decode_color` in `src/ble/parser.rs` names it, and the Control
+page shows it after the model name, as `AirPods Pro 3 • White`. A code missing
+from the table shows as `Unknown color (0x..)`. The captured
+advertisements in `examples/decrypt_probe.rs`, from the two models verified
+here, all carry `0x00`, White; the rest of the table is unverified:
 
 ```
-Colour byte -> name
+Color byte -> name
 0x00: White
 0x01: Black
 0x02: Red
@@ -445,7 +449,7 @@ fn matches_device(decrypted: &[u8; 16], mac_addr: &str) -> bool {
 
 **While connected, the suffix is zeroed.** A device connected to a host publishes
 `00 00 00` in bytes 7-9 instead of its MAC suffix - which fits the field's purpose,
-since it exists so a *disconnected* device can be recognised behind a randomized
+since it exists so a *disconnected* device can be recognized behind a randomized
 address. Observed on AirPods Pro 3 (0x2720), with the rest of the plaintext intact:
 
 ```
@@ -525,7 +529,7 @@ first AAP connection.
    constant across both models tested; bytes 12-15 change on every advertisement and are
    presumed to be a counter or MIC. None have been confirmed
 6. **Only two models tested** - AirPods Pro 3 (0x2720) and AirPods Pro Gen 2 (0x2420).
-   The MAC-suffix rule holds on both; behaviour on older hardware is unknown
+   The MAC-suffix rule holds on both; behavior on older hardware is unknown
 
 ---
 
