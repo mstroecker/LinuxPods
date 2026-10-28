@@ -244,9 +244,20 @@ connected took 1.2 s: requests sent after a fixed 500 ms were never answered, so
 connecting while the app ran showed "Connected • waiting for data" with no battery.
 `Client::handshake` returns once the answer is in.
 
-**A zero `cid` immediately after `SeqPacket::connect` means the socket is unusable** -
-connect returns `Ok` without waiting for the BR/EDR ACL link, every send then fails
-`ENOTCONN`, and the socket stays dead even once `cid` becomes nonzero. Discard and retry.
+**A zero `cid` after an L2CAP connect means the connect has not finished: never drop a
+socket while it is pending.** bluer's connect can return `Ok` with the channel still
+connecting: it waits for the socket to poll writable, and a new L2CAP socket polls
+writable before it connects. Sends fail `ENOTCONN` until the channel is up. Closed while
+connecting, a channel is deleted here without a word to the device (`l2cap_chan_close`
+in `BT_CONNECT`), which completes it anyway. Dropped and retried, the retry got the same
+local channel, and the pods held two channels to one of ours: the new link's handshake
+went unanswered, and when the pods closed the orphan, our kernel closed the live link
+(#136). `Client::connect` waits until `L2CAP_CONNINFO` reads back (`BT_CONNECTED`) or
+the channel has closed, in a task of its own that the caller's abort or timeout does not
+reach: a connect given up on runs on, and a channel that comes up then is closed with the
+device told. The task gives up at `CONNECT_LIMIT` (50 s), past the kernel's own 40 s,
+and the supervisor's `AAP_CONNECT_TIMEOUT` outlasts both connect and handshake, so its
+next attempt never opens a second channel beside a pending one.
 
 **AAP only to a pair BlueZ reports connected.** An L2CAP connect pages the device and
 brings its ACL link up, so a retry to a pair the user has just disconnected would
