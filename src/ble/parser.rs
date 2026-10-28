@@ -73,8 +73,13 @@ impl ProximityData {
         self.raw_data.get(ENCRYPTED_RANGE)
     }
 
-    /// Merges decrypted battery data, replacing the coarse 10%-granularity values
-    /// from the cleartext advertisement with exact ones.
+    /// Merges decrypted battery data, replacing the cleartext's levels in 10%
+    /// steps with exact ones.
+    ///
+    /// The app shows only advertisements a stored key decrypts, so it shows
+    /// only these. The cleartext levels are what an unidentified pair
+    /// advertises, decoded all the same: offering such a pair for pairing
+    /// would read them (#131).
     ///
     /// Decrypted layout: byte 1 = first pod, byte 2 = second pod, byte 3 = case;
     /// in each, bit 7 is charging and bits 0-6 are the level.
@@ -408,7 +413,7 @@ pub(crate) fn decode_model_name(product_id: u16) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ble::decrypt::{CONNECTED_SUFFIX, Plaintext};
+    use crate::ble::decrypt::{Plaintext, ZEROED_SUFFIX};
 
     /// Builds a minimal well-formed advertisement with a controllable status byte.
     /// The lid byte defaults to a captured lid-open value, which reads as open
@@ -473,7 +478,7 @@ mod tests {
             secondary_charging: secondary.1,
             case_battery: Some(case.0),
             case_charging: case.1,
-            mac_suffix: CONNECTED_SUFFIX,
+            mac_suffix: ZEROED_SUFFIX,
             tail: [0; 4],
         }
         .to_bytes()
@@ -891,7 +896,7 @@ mod tests {
                 secondary_charging: false,
                 case_battery: Some(100),
                 case_charging: true,
-                mac_suffix: CONNECTED_SUFFIX,
+                mac_suffix: ZEROED_SUFFIX,
                 tail: [0; 4],
             };
             pd.add_decrypted_data(&plain.to_bytes()).unwrap();

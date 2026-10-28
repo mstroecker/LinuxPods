@@ -3,8 +3,9 @@
 //! This is the tool the packet format in `docs/aap-noise-control.md` was verified
 //! with, ported from the Go original. It talks to the client directly rather than
 //! through the coordinator, so the device's answers can be read unfiltered - which
-//! is the whole point: what arrives after a mode change is a generic
-//! settings-changed notification, not a usable acknowledgement.
+//! is the whole point: what arrives after a mode change differs by model, and
+//! none of it is a usable acknowledgment - a generic settings-changed
+//! notification on AirPods 4, an echo about a second later on AirPods Pro 3.
 //!
 //! Every mode should be audible on the AirPods. Listen while it runs.
 //!
@@ -41,8 +42,8 @@ fn describe(packet: &[u8]) -> String {
         Ok(Message::NoiseMode(mode)) => format!("noise control mode report: {mode}"),
         Ok(Message::Battery(info)) => format!("battery: {info:?}"),
         Ok(Message::Keys(keys)) => format!("proximity keys: {} of them", keys.len()),
-        // The only consistent answer to a mode change, and no use as one: it is
-        // byte-identical whichever mode was set.
+        // AirPods 4's only consistent answer to a mode change, and no use as
+        // one: it is byte-identical whichever mode was set.
         Ok(Message::Unknown { opcode: Some(0x4B) }) => {
             "settings-changed notification (names no mode)".to_string()
         }

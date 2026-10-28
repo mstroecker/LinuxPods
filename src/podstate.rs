@@ -2,7 +2,8 @@
 //!
 //! Coordinates two data sources and notifies consumers:
 //!   - AAP (exact) for every device an L2CAP connection is up to - several at once
-//!   - BLE advertisements for every other device (10% steps, or exact once decrypted)
+//!   - BLE advertisements for every other device, once a stored key has decrypted
+//!     them - which identifies the device and gives its exact levels
 //!
 //! The choice is per device, not global: an AAP connection to one pair of AirPods
 //! must not stop a second pair from being tracked over BLE.
@@ -27,9 +28,10 @@
 //! Only advertisements a stored key decrypts. That identifies the device, so its
 //! state is keyed by the real MAC and the map stays bounded by the stored keys;
 //! [`Inner::prune`] drops readings after [`BLE_CACHE_TTL`]. The rest are dropped on
-//! arrival: keyed by a randomized MAC that rotates several times a minute, they
-//! could never be attributed to anything, and keeping them - an entry and a
-//! broadcast each - is exactly what a BLE spam flood feeds on.
+//! arrival: keyed by a randomized MAC - one per pod, and a new one after the
+//! lid has been closed - they could never be attributed to anything, and
+//! keeping them - an entry and a broadcast each - is exactly what a BLE spam
+//! flood feeds on.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -279,7 +281,7 @@ pub struct Snapshot {
     /// device is currently advertising or connected.
     pub known_keys: Vec<Address>,
     /// BlueZ aliases by MAC - the names the rest of the desktop shows for these
-    /// devices. Empty until the BlueZ task reports them, and it stays empty when
+    /// devices. Empty until attachment reports them, and it stays empty when
     /// BlueZ is unreachable, so consumers need a fallback.
     pub device_names: HashMap<Address, String>,
 }
@@ -641,7 +643,8 @@ impl Coordinator {
     /// Loads persisted encryption keys so BLE decryption works from first launch.
     ///
     /// Without a usable data directory it starts anyway and keeps keys in memory
-    /// only: a missing key costs BLE accuracy, nothing more.
+    /// only: a key not saved costs only the pair's BLE readings after a restart,
+    /// until its next AAP connection fetches the key again.
     ///
     /// Under the harness, `AAP_SOCKET_DIR_ENV` sends AAP to a fake instead - see
     /// `Coordinator::with_aap_socket_dir`.
@@ -740,7 +743,7 @@ impl Coordinator {
     /// Registers a new consumer, which sees the latest snapshot.
     ///
     /// A watch channel holds one value that every receiver sees, so the UI, tray
-    /// and battery provider never compete for a snapshot, and one that falls
+    /// and attachment never compete for a snapshot, and one that falls
     /// behind skips stale snapshots rather than queueing them - an unbounded queue
     /// per consumer grew without limit under a flood of advertisements. Sending
     /// never waits for a consumer to take the snapshot, so a slow one cannot
@@ -786,9 +789,9 @@ impl Coordinator {
     /// Replaces the BlueZ alias map and broadcasts if anything changed.
     ///
     /// Names are display-only, so a snapshot is only worth sending when they
-    /// actually differ - the BlueZ task re-reads them on every connection event,
-    /// and rebroadcasting an identical map would wake the UI, tray and battery
-    /// provider for nothing.
+    /// actually differ - attachment re-reads them on every connection event and
+    /// adapter change, and rebroadcasting an identical map would wake the UI,
+    /// tray and attachment for nothing.
     pub(crate) async fn set_device_names(&self, names: HashMap<Address, String>) {
         let mut inner = self.inner.write().await;
         if inner.device_names == names {
@@ -933,11 +936,11 @@ impl Coordinator {
             .is_some_and(|link| link.identity.replace(identity) != Some(identity));
         let live_changed = previous.is_none_or(|e| Live::of(&e.state) != live);
         // AAP data for this device is exact and current; its own
-        // advertisements are coarser and lag behind. Nothing a snapshot
-        // shows has changed - unless they told the link something new
-        // about the device, typically its model on the first advertisement
-        // after connecting; or changed what the snapshot takes from them,
-        // such as a pod taken out of an ear; or the prune dropped something.
+        // advertisements lag behind. Nothing a snapshot shows has changed -
+        // unless they told the link something new about the device,
+        // typically its model on the first advertisement after connecting;
+        // or changed what the snapshot takes from them, such as a pod taken
+        // out of an ear; or the prune dropped something.
         if inner.supersedes_ble(real_mac) && !identified && !live_changed && !pruned {
             return;
         }
@@ -971,10 +974,11 @@ impl Coordinator {
 
         let client = Arc::new(self.aap_client(mac_addr).open().await?);
         // Ask for the proximity keys on every connection, not only when none is
-        // stored: re-pairing regenerates them, and a stale key would silently drop
-        // BLE to 10% steps. The reply is stored by `aap_read_loop` like any key
-        // packet, and waits in the socket until that loop starts. Without a key
-        // only BLE accuracy suffers, so a failure does not fail the connection.
+        // stored: re-pairing regenerates them, and a stale key decrypts nothing,
+        // so the pair would silently vanish from BLE. The reply is stored by
+        // `aap_read_loop` like any key packet, and waits in the socket until that
+        // loop starts. Without a key only BLE suffers, so a failure does not fail
+        // the connection.
         if let Err(e) = client.request_proximity_keys().await {
             tracing::warn!("failed to request encryption keys: {e:#}");
         }
@@ -1074,7 +1078,7 @@ impl Coordinator {
                     queues.remove(&mac_addr);
                 }
             }
-            // Without this the UI, tray and battery provider never hear that the
+            // Without this the UI, tray and attachment never hear that the
             // connection ended and keep showing the last AAP reading.
             self.broadcast(&inner);
         }
@@ -1171,7 +1175,7 @@ impl Coordinator {
     /// it changed.
     ///
     /// The startup dump repeats, and an unchanged mode is not worth waking the
-    /// window, tray and battery provider for. A stale report of the mode a
+    /// window, tray and attachment for. A stale report of the mode a
     /// command just replaced is not taken - see [`ModeState`].
     async fn handle_noise_mode(
         &self,
@@ -1277,11 +1281,13 @@ impl Coordinator {
 
     /// Switches one connected device's noise control mode.
     ///
-    /// The new mode is recorded optimistically. The device answers with a
-    /// settings-changed notification that names neither the sub-command nor the
-    /// mode, and the 0x0D echo carrying it back arrives only sometimes, so
-    /// waiting for confirmation would leave the interface on the old mode for
-    /// three modes out of four. A later report confirms what we set - or,
+    /// The new mode is recorded optimistically. Nothing the device answers
+    /// confirms it on every model: AirPods 4 sent a settings-changed
+    /// notification that names neither the sub-command nor the mode, and the
+    /// 0x0D echo carrying the mode back for one change in four; AirPods Pro 3
+    /// echo every change, but only about a second later. Waiting would leave
+    /// the interface on the old mode meanwhile, or for good. A later report
+    /// confirms what we set - or,
     /// when it is of the mode replaced and comes within
     /// [`aap::noise::STALE_REPORT_WINDOW`] before the mode set is reported, is
     /// dropped as stale (#113).
@@ -1606,9 +1612,9 @@ mod tests {
         assert!(!inner.prune(Instant::now()), "nothing left to expire");
     }
 
-    /// Undecryptable advertisements are not kept: keyed by a MAC that rotates
-    /// every few minutes they can never be attributed to anything, and storing
-    /// them - an entry and a broadcast each - is what a BLE spam flood fed on.
+    /// Undecryptable advertisements are not kept: keyed by a randomized MAC
+    /// they can never be attributed to anything, and storing them - an entry
+    /// and a broadcast each - is what a BLE spam flood fed on.
     #[tokio::test]
     async fn unidentified_advertisements_are_not_stored() {
         let (coordinator, _dir) = coordinator_with(inner_with(vec![]));
@@ -1795,7 +1801,7 @@ mod tests {
         assert_eq!(snap.states[&BB].source, DataSource::Aap);
     }
 
-    /// Connection order, which `Snapshot::primary` goes by.
+    /// Connection order, which `Snapshot::default_device` goes by.
     #[test]
     fn connected_macs_follow_connection_order() {
         let now = Instant::now();
@@ -2004,7 +2010,7 @@ mod tests {
     }
 
     /// An AirPods Pro 3 advertisement that KEY decrypts, its suffix field zeroed
-    /// as a connected device sends it. Encrypted here, so no real key is needed.
+    /// as pods out of the case send it. Encrypted here, so no real key is needed.
     /// Both pods out of the ears, the left one at 80%.
     fn advertisement() -> ProximityData {
         advertisement_with_left(80)
@@ -2280,7 +2286,7 @@ mod tests {
         assert!(!inner.supersedes_ble(AA));
 
         inner.links.insert(AA, link(Some(aap_state(80))));
-        // The connected device's own advertisements are dropped...
+        // The connected device's own advertisements are superseded...
         assert!(inner.supersedes_ble(AA));
         // ...but a second pair of AirPods keeps being tracked over BLE.
         assert!(!inner.supersedes_ble(BB));

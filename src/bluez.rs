@@ -989,8 +989,10 @@ impl Devices {
     ///
     /// The stream may be read at the caller's pace, with calls to BlueZ on the
     /// same connection in between: a task of its own drains the signals as they
-    /// arrive. The rule takes in every advertisement while the app scans; left
-    /// queued in zbus for the caller, 64 of them - a second's worth in a crowd -
+    /// arrive. The rule takes in every advertisement after an address's first
+    /// while the app scans - the first comes in `InterfacesAdded`, which it does
+    /// not match, and every later one brings at least an `RSSI` change (#71);
+    /// left queued in zbus for the caller, 64 of them - a second's worth in a crowd -
     /// stopped zbus reading the connection until there was room, so a reply the
     /// caller was waiting for never arrived, and attachment hung for good. The
     /// task ends with the connection, or when the stream is dropped. The
@@ -1193,7 +1195,7 @@ fn bool_prop(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
 /// are skipped: while we scan, BlueZ keeps an object for every advertiser nearby,
 /// mostly random addresses named after themselves, and the map goes into every
 /// snapshot - unfiltered, a BLE spam flood would grow it. The switcher lists only
-/// devices whose key we hold, and getting a key takes a pairing.
+/// devices whose key we hold or that are on AAP, and both take a pairing.
 fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(Address, String)> {
     if !bool_prop(props, "Paired") {
         return None;

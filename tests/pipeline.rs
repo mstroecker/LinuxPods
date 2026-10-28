@@ -381,7 +381,7 @@ impl Fixture {
 struct App {
     world: World,
     coordinator: Arc<Coordinator>,
-    /// What the window, tray and battery provider see.
+    /// What the window, tray and attachment see.
     updates: watch::Receiver<Snapshot>,
     /// Every advertisement the coordinator has handled, once it has.
     handled: mpsc::UnboundedReceiver<Advertisement>,

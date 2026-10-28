@@ -6,16 +6,17 @@
 //! device, announced by the ObjectManager's InterfacesAdded with that first
 //! advertisement among its properties; every later one comes as a
 //! PropertiesChanged. Both are read: watching PropertiesChanged alone lost
-//! the first advertisement from every address, and AirPods rotate theirs every
-//! few seconds while disconnected (#86).
+//! the first advertisement from every address - each pod's, every new one
+//! after the lid has been closed, and every one coming back after BlueZ
+//! dropped it 30 s into a silence (#86).
 //!
 //! Discovery runs on every powered adapter, whatever it is called (#51), and
 //! starts again on each as it powers on, is plugged in, or bluetoothd restarts
 //! (#50) - see [`Scanning`]. The signals come from devices under any of them,
 //! as the subscription takes in every signal bluetoothd sends.
 //!
-//! Accuracy note carried over from the Go docs: cleartext advertisements give
-//! battery in 10% steps. Decrypting with a stored ENC_KEY yields 1% accuracy.
+//! Every advertisement that parses goes to the coordinator, which keeps only
+//! those a stored ENC_KEY decrypts: the key is what says which pair sent one.
 
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
@@ -48,7 +49,7 @@ trait Adapter1 {
 #[derive(Debug, Clone)]
 pub struct Advertisement {
     pub data: ProximityData,
-    /// BLE MAC, which rotates periodically for privacy.
+    /// The randomized BLE MAC, not the pair's real one.
     pub ble_mac: Address,
 }
 
@@ -214,8 +215,8 @@ impl Scanner {
             };
 
             // Logged here rather than downstream so it covers every advertisement
-            // that parses, including ones the coordinator later drops (for example
-            // the device currently on AAP).
+            // that parses, including ones the coordinator later drops: those no
+            // stored key decrypts.
             match parse_proximity_data(&apple_data) {
                 Ok(data) => {
                     tracing::debug!(
@@ -224,8 +225,8 @@ impl Scanner {
                         data.raw_data.len()
                     );
                     // Every parsable advertisement, including the ones the
-                    // coordinator drops as superseded by AAP - which is the only
-                    // place to see the payload of a device connected to this host.
+                    // coordinator drops as undecryptable - which is the only
+                    // place to see their payload.
                     tracing::trace!("BLE parsable raw: {ble_mac} {}", crate::hex(&data.raw_data));
                     Some(Advertisement { data, ble_mac })
                 }
