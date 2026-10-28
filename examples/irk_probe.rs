@@ -1,12 +1,16 @@
 //! Checks whether a pair's BLE advertising addresses resolve with the IRK the
-//! pair sends over AAP: the hardware check #134 rests on.
+//! pair sends over AAP: the hardware check #134 rested on, kept for the next
+//! model.
 //!
 //! It asks each pair named on the command line for its keys, as the app does,
 //! and keeps them in memory only. Then it scans. Each advertising address is
-//! checked once against every pair's IRK, as the IRK comes and byte-reversed,
-//! since which order the AirPods send it in is part of the question. Every
-//! advertisement is also tried against every pair's ENC_KEY with the app's
-//! suffix rule, so the two ways of identifying a pair can be compared.
+//! checked once against every pair's IRK with `ble::rpa::resolves`, as the app
+//! resolves it: the IRK byte-reversed from the order AAP sends it in. Should
+//! that fail, the IRK as sent is tried too, and an address it resolves is
+//! reported as such: no model seen so far does that, but a model that did
+//! would need the app changed. Every advertisement is also tried against
+//! every pair's ENC_KEY with the app's suffix rule, so the two ways of
+//! identifying a pair can be compared.
 //!
 //! Nothing that identifies a device or a key is printed: the output is meant
 //! to be pasted into an issue. Pairs are numbered in the order given, addresses
@@ -27,14 +31,13 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::time::{Duration, Instant};
 
-use aes::Aes128;
-use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
 use anyhow::{Context, bail};
 use bluer::Address;
 use linuxpods::aap::keys::KeyType;
 use linuxpods::aap::{Client, Message, decode, find_encryption_key};
 use linuxpods::ble::decrypt::decrypt_raw;
 use linuxpods::ble::matches_device;
+use linuxpods::ble::rpa;
 use linuxpods::ble::scanner::{Advertisement, Scanner};
 use linuxpods::podstate::Identity;
 
@@ -44,15 +47,18 @@ const KEY_WINDOW: Duration = Duration::from_secs(5);
 /// The order an IRK resolved an address in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Order {
-    AsSent,
-    Reversed,
+    /// The app's: byte-reversed from the order AAP sends the IRK in, as
+    /// `rpa::resolves` takes it.
+    App,
+    /// The IRK as AAP sends it, unreversed: the app's resolution misses it.
+    Unreversed,
 }
 
 impl std::fmt::Display for Order {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Order::AsSent => "IRK as sent",
-            Order::Reversed => "IRK byte-reversed",
+            Order::App => "as the app resolves it",
+            Order::Unreversed => "only with the IRK unreversed, which the app does not try",
         })
     }
 }
@@ -64,39 +70,15 @@ struct Pair {
     enc_key: [u8; 16],
 }
 
-/// The random address hash `ah(k, r)` (Core spec Vol 3 Part H 2.2.2): the low
-/// 24 bits of `e(k, 0^104 || r)`. Key, `prand` and result are most significant
-/// byte first, as an address is written.
-fn ah(irk: &[u8; 16], prand: [u8; 3]) -> [u8; 3] {
-    let cipher = Aes128::new_from_slice(irk).expect("an IRK is 16 bytes");
-    let mut plain = [0u8; 16];
-    plain[13..].copy_from_slice(&prand);
-    let mut block = Block::<Aes128>::try_from(&plain[..]).expect("a block is 16 bytes");
-    cipher.encrypt_block(&mut block);
-    [block[13], block[14], block[15]]
-}
-
-/// True for a resolvable private address: the top two bits are `01`.
-fn is_rpa(addr: Address) -> bool {
-    addr[0] >> 6 == 0b01
-}
-
-/// The order in which `irk` resolves `addr`, if it does.
+/// The order in which `irk`, as AAP sends it, resolves `addr`, if it does.
 fn resolves(irk: &[u8; 16], addr: Address) -> Option<Order> {
-    if !is_rpa(addr) {
-        return None;
+    if rpa::resolves(irk, addr) {
+        return Some(Order::App);
     }
-    let prand = [addr[0], addr[1], addr[2]];
-    let hash = [addr[3], addr[4], addr[5]];
-    let mut reversed = *irk;
-    reversed.reverse();
-    if ah(irk, prand) == hash {
-        Some(Order::AsSent)
-    } else if ah(&reversed, prand) == hash {
-        Some(Order::Reversed)
-    } else {
-        None
-    }
+    let mut unreversed = *irk;
+    unreversed.reverse();
+    // `rpa::resolves` reverses what it is given, so this is the IRK as sent.
+    rpa::resolves(&unreversed, addr).then_some(Order::Unreversed)
 }
 
 /// What the address is, without saying which it is.
@@ -339,24 +321,23 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// The sample data of Core spec Vol 3 Part H Appendix D.7.
+    /// The sample data of Core spec Vol 3 Part H Appendix D.7: the IRK as the
+    /// specification writes it, most significant byte first, which is the
+    /// reverse of how AAP sends one.
     const SPEC_IRK: [u8; 16] = [
         0xec, 0x02, 0x34, 0xa3, 0x57, 0xc8, 0xad, 0x05, 0x34, 0x10, 0x10, 0xa6, 0x0a, 0x39, 0x7d,
         0x9b,
     ]; // gitleaks:allow - public sample data, not a device key
 
-    #[test]
-    fn ah_matches_the_specification_sample() {
-        assert_eq!(ah(&SPEC_IRK, [0x70, 0x81, 0x94]), [0x0d, 0xfb, 0xaa]);
-    }
+    /// The sample's `prand` 708194 and hash 0dfbaa.
+    const SPEC_ADDRESS: Address = Address::new([0x70, 0x81, 0x94, 0x0d, 0xfb, 0xaa]);
 
     #[test]
     fn an_address_resolves_in_the_order_its_irk_was_given() {
-        let addr = Address::new([0x70, 0x81, 0x94, 0x0d, 0xfb, 0xaa]);
-        assert_eq!(resolves(&SPEC_IRK, addr), Some(Order::AsSent));
-        let mut reversed = SPEC_IRK;
-        reversed.reverse();
-        assert_eq!(resolves(&reversed, addr), Some(Order::Reversed));
+        let mut as_sent = SPEC_IRK;
+        as_sent.reverse();
+        assert_eq!(resolves(&as_sent, SPEC_ADDRESS), Some(Order::App));
+        assert_eq!(resolves(&SPEC_IRK, SPEC_ADDRESS), Some(Order::Unreversed));
     }
 
     #[test]
