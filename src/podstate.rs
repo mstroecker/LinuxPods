@@ -2,8 +2,9 @@
 //!
 //! Coordinates two data sources and notifies consumers:
 //!   - AAP (exact) for every device an L2CAP connection is up to - several at once
-//!   - BLE advertisements for every other device, once a stored key has decrypted
-//!     them - which identifies the device and gives its exact levels
+//!   - BLE advertisements for every other device, once a stored IRK has resolved
+//!     the address one comes from and the same pair's ENC_KEY has decrypted it -
+//!     which identifies the device and gives its exact levels
 //!
 //! The choice is per device, not global: an AAP connection to one pair of AirPods
 //! must not stop a second pair from being tracked over BLE.
@@ -25,13 +26,16 @@
 //!
 //! # What is kept
 //!
-//! Only advertisements a stored key decrypts. That identifies the device, so its
+//! Only advertisements identified as a pair's - see
+//! [`Coordinator::identify_and_decrypt`]. That identifies the device, so its
 //! state is keyed by the real MAC and the map stays bounded by the stored keys;
 //! [`Inner::prune`] drops readings after [`BLE_CACHE_TTL`]. The rest are dropped on
-//! arrival: keyed by a randomized MAC - one per pod, and a new one after the
-//! lid has been closed - they could never be attributed to anything, and
-//! keeping them - an entry and a broadcast each - is exactly what a BLE spam
-//! flood feeds on.
+//! arrival: keyed by a randomized MAC - one per pod, a new one every few
+//! minutes and after the lid has been closed - they could never be attributed
+//! to anything, and keeping them - an entry and a broadcast each - is exactly
+//! what a BLE spam flood feeds on. Nor is an address remembered that resolves
+//! with no stored IRK: only those that resolve, a bounded few
+//! ([`ResolvedAddresses`]).
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -52,6 +56,7 @@ use crate::aap::{self, Message};
 use crate::ble::decode_model_name;
 use crate::ble::decrypt::decrypt_for_device;
 use crate::ble::parser::{PodSide, ProximityData};
+use crate::ble::rpa::{self, ResolvedAddresses};
 use crate::keystore::{Keystore, PairKeys};
 
 /// How long the last advertisement of an identified device stays on show. Keyed
@@ -620,6 +625,9 @@ pub struct Coordinator {
     /// own link, matched by client, so a MAC has a queue exactly while it has
     /// a link and it is that link's. Never held across an await.
     queues: std::sync::Mutex<HashMap<Address, LinkQueue>>,
+    /// The advertising addresses a stored IRK resolved - see
+    /// [`Coordinator::resolve`]. Taken alone and never held across an await.
+    resolved: std::sync::Mutex<ResolvedAddresses>,
     /// Held across a save, so saves never overlap - they share a temporary
     /// file. Owned by the save while it runs - see
     /// `Coordinator::store_keys`.
@@ -735,6 +743,7 @@ impl Coordinator {
         Self {
             inner: RwLock::new(inner),
             queues: std::sync::Mutex::default(),
+            resolved: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(persistence)),
             updates,
             #[cfg(feature = "harness")]
@@ -824,10 +833,22 @@ impl Coordinator {
         }
     }
 
-    /// Tries every stored key against the advertisement's encrypted portion.
+    /// Works out which pair an advertisement is from, and decrypts it with
+    /// that pair's ENC_KEY. Returns the pair's real MAC when identified.
     ///
-    /// A key that validates identifies the device, letting us map a randomized
-    /// BLE MAC back to the real one. Returns the real MAC when identified.
+    /// The address must resolve with a stored IRK, and the same pair's
+    /// ENC_KEY decrypt the advertisement to a plaintext that passes the
+    /// suffix check (#134). One key is tried, the resolving pair's: a
+    /// decryption that passes by chance - 2^-23 per key tried - would show
+    /// random levels for one of the user's pairs, and with every key tried on
+    /// every advertisement, a crowd of foreign pairs or a spammer met that
+    /// chance within hours. Resolving is 2^-24 per address and IRK, and an
+    /// address lasts minutes ([`Coordinator::resolve`]).
+    ///
+    /// An address no stored IRK resolves counts only for a pair with no IRK
+    /// stored yet, keyed before the keystore kept IRKs: its ENC_KEY is tried,
+    /// as every key was before, until its next AAP connection brings its IRK.
+    /// Otherwise the advertisement is dropped, decrypted with nothing.
     pub(crate) async fn identify_and_decrypt(
         &self,
         data: &mut ProximityData,
@@ -836,29 +857,86 @@ impl Coordinator {
         let encrypted = data.encrypted_portion()?.to_vec();
         let keys = self.inner.read().await.keys.clone();
 
-        for (&real_mac, pair) in &keys {
+        if let Some(real_mac) = self.resolve(ble_mac, &keys, Instant::now()) {
+            let decrypted = decrypt_for_device(&encrypted, &keys[&real_mac].enc_key, real_mac);
+            if let Ok(decrypted) = decrypted
+                && data.add_decrypted_data(&decrypted).is_ok()
+            {
+                tracing::debug!("BLE decryptable: {ble_mac} -> {real_mac} (address resolved)");
+                return Some(real_mac);
+            }
+            tracing::debug!(
+                "BLE not decryptable: {ble_mac} resolves to {real_mac}, whose key does not \
+                 decrypt it"
+            );
+            return None;
+        }
+
+        // Pairs with no IRK yet, the old way.
+        let without_irk = keys.iter().filter(|(_, k)| k.irk.is_none());
+        for (&real_mac, pair) in without_irk {
             let Ok(decrypted) = decrypt_for_device(&encrypted, &pair.enc_key, real_mac) else {
                 continue;
             };
             if data.add_decrypted_data(&decrypted).is_ok() {
-                tracing::debug!("BLE decryptable: {ble_mac} -> {real_mac} (key matched)");
+                tracing::debug!("BLE decryptable: {ble_mac} -> {real_mac} (key matched, no IRK)");
                 return Some(real_mac);
             }
         }
 
         if !keys.is_empty() {
-            tracing::debug!(
-                "BLE not decryptable: {ble_mac} (tried {} stored key(s))",
-                keys.len()
-            );
+            tracing::debug!("BLE not decryptable: {ble_mac} (resolves with no stored IRK)");
         }
         None
     }
 
+    /// The pair whose stored IRK resolves `ble_mac`, if one does.
+    ///
+    /// Remembered in [`ResolvedAddresses`], so that an address costs one
+    /// resolve - an AES block per stored IRK - rather than one per
+    /// advertisement. Only an address that resolved is remembered, with the
+    /// IRK that resolved it, so a pair re-paired since is not taken for it.
+    /// One no IRK resolves is resolved again with each advertisement, as
+    /// every key used to be tried on each: remembered, a spammer rotating its
+    /// address would churn the map, and a foreign pair costs as little either
+    /// way.
+    fn resolve(
+        &self,
+        ble_mac: Address,
+        keys: &HashMap<Address, PairKeys>,
+        now: Instant,
+    ) -> Option<Address> {
+        if !rpa::is_resolvable(ble_mac) {
+            return None;
+        }
+        let known = self.resolved_addresses().get(ble_mac, now);
+        if let Some((real_mac, irk)) = known
+            && keys.get(&real_mac).is_some_and(|k| k.irk == Some(irk))
+        {
+            return Some(real_mac);
+        }
+        // Two IRKs resolving one address is a 2^-24 chance; the first is
+        // taken, and its ENC_KEY decides.
+        let (real_mac, irk) = keys.iter().find_map(|(&mac, k)| {
+            k.irk
+                .filter(|irk| rpa::resolves(irk, ble_mac))
+                .map(|irk| (mac, irk))
+        })?;
+        self.resolved_addresses()
+            .insert(ble_mac, real_mac, irk, now);
+        Some(real_mac)
+    }
+
+    /// The resolved addresses - see `Coordinator::resolved`.
+    fn resolved_addresses(&self) -> std::sync::MutexGuard<'_, ResolvedAddresses> {
+        self.resolved.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Handles one BLE advertisement.
     ///
-    /// One that no stored key decrypts is dropped here - see the module docs. The
-    /// scanner's `BLE parsable:` log still records it.
+    /// One that is not identified as a pair's - see
+    /// [`Coordinator::identify_and_decrypt`] - is dropped here: see the module
+    /// docs. The scanner's `BLE parsable:` log still records it.
     ///
     /// An AAP connection only supersedes BLE *for that one device*. Other AirPods
     /// keep advertising and must still be tracked, so the decision is made per
@@ -1455,6 +1533,7 @@ mod tests {
         let coordinator = Arc::new(Coordinator {
             inner: RwLock::new(inner),
             queues: std::sync::Mutex::default(),
+            resolved: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(Persistence {
                 keystore: Some(keystore_in(&dir)),
                 saved: HashMap::new(),
@@ -2296,6 +2375,115 @@ mod tests {
         let mut inner = inner_with(vec![]);
         inner.keys.insert(MAC, PairKeys::new(KEY, irk));
         coordinator_with(inner)
+    }
+
+    /// The address a pair holding `irk` might advertise from.
+    fn address_of(irk: &[u8; KEY_LEN]) -> Address {
+        rpa::resolvable_address(irk, [0x5C, 0x4D, 0x3F])
+    }
+
+    /// With an IRK stored, an advertisement counts from an address the IRK
+    /// resolves, and from no other, though KEY decrypts it either way (#134).
+    #[tokio::test]
+    async fn an_advertisement_counts_only_from_an_address_the_irk_resolves() {
+        let irk = random_key();
+        let (coordinator, _dir) = keyed(Some(irk));
+        let elsewhere = address_of(&random_key());
+        assert!(rpa::is_resolvable(elsewhere) && rpa::is_resolvable(BLE_MAC));
+
+        for from in [elsewhere, BLE_MAC] {
+            coordinator
+                .handle_advertisement(advertisement(), from)
+                .await;
+            assert!(coordinator.inner.read().await.ble.is_empty(), "from {from}");
+        }
+        let resolving = address_of(&irk);
+        coordinator
+            .handle_advertisement(advertisement(), resolving)
+            .await;
+        let state = coordinator.subscribe().borrow().states[&MAC].clone();
+        assert_eq!(state.left_battery, Some(80));
+        assert_eq!(state.current_ble_mac, Some(resolving));
+    }
+
+    /// An address the IRK resolves is not enough: the pair's key has to
+    /// decrypt the advertisement too.
+    #[tokio::test]
+    async fn a_resolving_address_with_another_pairs_payload_is_dropped() {
+        let irk = random_key();
+        let (coordinator, _dir) = keyed(Some(irk));
+        let mut inner = coordinator.inner.write().await;
+        inner.keys.get_mut(&MAC).unwrap().enc_key = random_key().to_vec();
+        drop(inner);
+
+        coordinator
+            .handle_advertisement(advertisement(), address_of(&irk))
+            .await;
+        assert!(coordinator.inner.read().await.ble.is_empty());
+    }
+
+    /// A pair with no IRK yet - keyed before the keystore kept IRKs - is
+    /// identified by its key alone, from any address, until its next
+    /// connection brings its IRK. A pair with an IRK is not: its key is
+    /// tried only on an address its IRK resolves.
+    #[tokio::test]
+    async fn only_a_pair_without_an_irk_is_identified_by_its_key_alone() {
+        let (coordinator, _dir) = keyed(None);
+        coordinator
+            .handle_advertisement(advertisement(), BLE_MAC)
+            .await;
+        assert!(coordinator.inner.read().await.ble.contains_key(&MAC));
+
+        let (coordinator, _dir) = keyed(Some(random_key()));
+        coordinator
+            .handle_advertisement(advertisement(), BLE_MAC)
+            .await;
+        assert!(coordinator.inner.read().await.ble.is_empty());
+    }
+
+    /// An address is resolved once, not per advertisement; and one that no
+    /// IRK resolves is not remembered at all, so a flood of them leaves
+    /// nothing behind.
+    #[tokio::test]
+    async fn only_a_resolved_address_is_remembered() {
+        let irk = random_key();
+        let (coordinator, _dir) = keyed(Some(irk));
+        for _ in 0..3 {
+            coordinator
+                .handle_advertisement(advertisement(), address_of(&irk))
+                .await;
+        }
+        assert_eq!(coordinator.resolved_addresses().len(), 1);
+
+        for i in 0..100u8 {
+            let spammer = rpa::resolvable_address(&random_key(), [i, i, i]);
+            coordinator
+                .handle_advertisement(advertisement(), spammer)
+                .await;
+        }
+        assert_eq!(coordinator.resolved_addresses().len(), 1);
+    }
+
+    /// An address remembered as resolving with an IRK the pair has since
+    /// replaced - it was re-paired - is not taken for the pair's.
+    #[tokio::test]
+    async fn an_address_resolved_with_a_replaced_irk_is_not_the_pairs() {
+        let old = random_key();
+        let (coordinator, _dir) = keyed(Some(old));
+        let address = address_of(&old);
+        coordinator
+            .handle_advertisement(advertisement(), address)
+            .await;
+        assert!(coordinator.inner.read().await.ble.contains_key(&MAC));
+
+        let mut inner = coordinator.inner.write().await;
+        inner.keys.get_mut(&MAC).unwrap().irk = Some(random_key());
+        inner.ble.clear();
+        drop(inner);
+        coordinator
+            .handle_advertisement(advertisement(), address)
+            .await;
+        assert!(coordinator.inner.read().await.ble.is_empty());
     }
 
     /// The IRK is stored with the ENC_KEY, and goes to disk with it; a packet
