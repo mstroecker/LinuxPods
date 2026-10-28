@@ -839,6 +839,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "libadwaita",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

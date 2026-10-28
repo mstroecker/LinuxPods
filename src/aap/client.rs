@@ -1,7 +1,9 @@
 //! Apple Accessory Protocol client over L2CAP.
 //!
 //! bluer provides the AF_BLUETOOTH SOCK_SEQPACKET socket as a safe, typed, async
-//! API, so no hand-laid `sockaddr_l2` or raw connect syscall is needed here.
+//! API, so no hand-laid `sockaddr_l2` or raw connect syscall is needed here. The
+//! one raw call reads `SO_ERROR`, which bluer does not offer, for why a connect
+//! failed - see [`Client::connect`].
 //!
 //! Under the `harness` feature a client can talk to a Unix SOCK_SEQPACKET socket
 //! instead, for a fake device to answer (#74). It keeps message boundaries and
@@ -20,6 +22,7 @@
 //! Based on reverse engineering from LibrePods and OpenPods.
 
 use std::io;
+use std::os::fd::AsRawFd;
 #[cfg(feature = "harness")]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -27,6 +30,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use bluer::l2cap::{SeqPacket, Socket, SocketAddr};
 use bluer::{Address, AddressType};
+use tokio::sync::oneshot;
+use tokio::time::Instant;
 #[cfg(feature = "harness")]
 use tokio_seqpacket::UnixSeqpacket;
 use tracing::Instrument;
@@ -39,13 +44,16 @@ pub(crate) const AAP_PSM: u16 = 0x1001; // 4097
 /// Max AAP packet we will read in one recv.
 const READ_BUF_LEN: usize = 1024;
 
-/// Connect attempts before giving up. The first attempt against an idle device
-/// can lose the race with ACL link setup (see [`Client::connect`]): it did in
-/// one #71 capture, and not in the other.
-const CONNECT_ATTEMPTS: usize = 6;
+/// How often a channel still connecting is looked at again, once bluer has
+/// reported its connect done (see [`Client::connect`]). A channel took 0.4 s
+/// to come up in the #136 capture.
+const CONNECT_POLL: Duration = Duration::from_millis(10);
 
-/// Backoff between connect attempts.
-const CONNECT_BACKOFF: Duration = Duration::from_millis(200);
+/// How long an L2CAP connect may take before it is given up here. The kernel
+/// gives up on a channel still connecting after 40 s (`L2CAP_CONN_TIMEOUT`, a
+/// new socket's send timeout) and closes it, so this is past that: only for a
+/// connect that somehow never ends.
+pub(crate) const CONNECT_LIMIT: Duration = Duration::from_secs(50);
 
 /// Sent immediately after connecting to enable AAP communication.
 const PACKET_HANDSHAKE: [u8; 16] = [
@@ -59,7 +67,7 @@ const HANDSHAKE_REPLY: [u8; 4] = [0x01, 0x00, 0x04, 0x00];
 
 /// How long the device has to answer the handshake. A pair that had only just
 /// connected took 1.2 s.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The span a link's log lines go under, naming the device: several links
 /// can be up at once.
@@ -100,9 +108,9 @@ pub(crate) fn is_link_gone(e: &anyhow::Error) -> bool {
 const EHOSTDOWN: i32 = 112;
 
 /// What [`Client::connect`] fails with when the socket's connect does, and
-/// the handshake when its send does - the first on the socket, which an L2CAP
-/// connect can report up when it never came up: no connection came up. Its
-/// message is the whole of what it says.
+/// the handshake when its send does - the first on the socket: a connection
+/// that cannot carry it never served as one. Its message is the whole of what
+/// it says.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub(crate) struct ConnectFailed(String);
@@ -203,7 +211,8 @@ impl Client {
     /// Fails as [`Client::connect`] and [`Client::handshake`] do, a link that
     /// came up and went told from one that never came up by
     /// [`went_during_setup`]. Dropped before it is done - timed out, say - it
-    /// closes the connection along with the client.
+    /// closes the connection along with the client, or, dropped while the
+    /// connect is pending, once that is done - see [`Client::connect`].
     pub async fn open(mut self) -> Result<Self> {
         let span = link_span(self.addr);
         async move {
@@ -224,11 +233,21 @@ impl Client {
 
     /// Opens the L2CAP connection on PSM 4097 - or, for a client made with
     /// `with_unix_socket`, connects to that socket.
+    ///
+    /// Returns once the channel is up, and fails once it has failed: a
+    /// connect still pending is never dropped. The kernel deletes a channel
+    /// closed while connecting without a word to the device, which completes
+    /// it anyway - and then holds two channels to one of ours once the next
+    /// connect gets the same local channel (#136). So the connect runs in a
+    /// task of its own: dropped before it is done - timed out, aborted - this
+    /// stops waiting, and the task runs on until the channel is up or has
+    /// failed. A channel that comes up then is closed as any connection is,
+    /// with a disconnection request the device hears. A pending one is dropped
+    /// only once [`CONNECT_LIMIT`] has passed - past the kernel's own limit -
+    /// or when the runtime shuts down or the process ends.
     pub async fn connect(&mut self) -> Result<()> {
         anyhow::ensure!(self.socket.is_none(), "already connected");
 
-        // One attempt. The retries below are for L2CAP connect returning before
-        // the ACL link is up, which a Unix socket never does.
         #[cfg(feature = "harness")]
         if let Some(path) = &self.unix_path {
             let socket = UnixSeqpacket::connect(path).await.with_context(|| {
@@ -252,58 +271,25 @@ impl Client {
             cid: 0,
         };
 
-        // The Go implementation used a blocking connect(2), which waits for the
-        // BR/EDR ACL link to come up. bluer's socket is non-blocking and its
-        // connect returns almost immediately (~30us) without waiting: when the ACL
-        // link is not yet up the call still reports Ok, but the channel was never
-        // established and every send fails with ENOTCONN. Such a socket stays dead
-        // even after its cid later becomes nonzero, so it cannot be recovered.
-        //
-        // A zero cid immediately after connect is the reliable signal for that
-        // case. Discard the socket, let the ACL link finish coming up, and retry
-        // with a fresh one - which then connects with a real cid straight away.
-        let mut last_err = None;
-
-        for attempt in 1..=CONNECT_ATTEMPTS {
-            let socket =
-                Socket::<SeqPacket>::new_seq_packet().context("failed to create L2CAP socket")?;
-
-            match socket.connect(sa).await {
-                Ok(sock) => {
-                    let cid = sock.peer_addr().map(|a| a.cid).unwrap_or(0);
-                    if cid != 0 {
-                        tracing::debug!(
-                            "AAP connected to {} (cid {cid}, attempt {attempt})",
-                            self.addr
-                        );
-                        self.socket = Some(Transport::L2cap(sock));
-                        return Ok(());
-                    }
+        let (answer, answered) = oneshot::channel();
+        let addr = self.addr;
+        tokio::spawn(
+            async move {
+                // Sent back, the socket is the client's. Unsent - nobody
+                // waits any more - it is dropped here, up or failed.
+                if let Err(Ok(_up)) = answer.send(connect_l2cap(sa).await) {
                     tracing::debug!(
-                        "AAP connect attempt {attempt}: channel not established (cid 0)"
+                        "AAP connect to {addr} came up after it was given up on; closing it"
                     );
                 }
-                Err(e) => {
-                    tracing::debug!("AAP connect attempt {attempt} failed: {e}");
-                    last_err = Some(e);
-                }
             }
-
-            if attempt < CONNECT_ATTEMPTS {
-                tokio::time::sleep(CONNECT_BACKOFF).await;
-            }
-        }
-
-        match last_err {
-            Some(e) => Err(anyhow::Error::new(e).context(ConnectFailed(format!(
-                "failed to connect to AirPods at {}",
-                self.addr
-            )))),
-            None => anyhow::bail!(
-                "failed to establish L2CAP channel to {} after {CONNECT_ATTEMPTS} attempts",
-                self.addr
-            ),
-        }
+            .in_current_span(),
+        );
+        let socket = answered
+            .await
+            .context("the L2CAP connect ended without an answer")??;
+        self.socket = Some(Transport::L2cap(socket));
+        Ok(())
     }
 
     /// Sends the handshake and waits for the device to answer it.
@@ -320,12 +306,16 @@ impl Client {
     }
 
     async fn handshake_within(&self, limit: Duration) -> Result<()> {
-        // The first send on the socket. One that fails is a connection that
-        // never came up, not one that went: an L2CAP connect can report Ok
-        // on a socket that is dead from the start - see `connect`.
+        // The first send on the socket. One that fails is counted as a
+        // connect that failed, not a link that went: nothing has been
+        // exchanged on the connection yet.
         self.send_packet(&PACKET_HANDSHAKE, "handshake")
             .await
-            .map_err(|e| e.context(ConnectFailed("the connection never came up".into())))?;
+            .map_err(|e| {
+                e.context(ConnectFailed(
+                    "the connection went before the handshake was sent".into(),
+                ))
+            })?;
         let answered = async {
             loop {
                 let packet = self.read_packet().await?;
@@ -442,6 +432,154 @@ impl Client {
     }
 }
 
+/// Connects a new L2CAP socket to `sa`, and returns it once the channel is up
+/// or fails once the channel has failed - never while it is still connecting.
+/// [`Client::connect`] runs it in a task of its own, for an abort not to drop
+/// the socket halfway.
+///
+/// bluer's connect can return `Ok` with the channel still connecting
+/// (`BT_CONNECT`, a zero `cid`). After `EINPROGRESS` it waits for the socket to
+/// poll writable, and a new L2CAP socket polls writable before it connects
+/// (`bt_sock_poll` in `BT_OPEN`): a readiness taken in then ends the wait at
+/// once. So the channel is checked once bluer returns, and waited for.
+async fn connect_l2cap(sa: SocketAddr) -> Result<SeqPacket> {
+    let addr = sa.addr;
+    let socket = Socket::<SeqPacket>::new_seq_packet().context("failed to create L2CAP socket")?;
+    let began = Instant::now();
+    let connecting = async {
+        let socket = socket.connect(sa).await?;
+        if !channel_up(&socket)? {
+            tracing::debug!(
+                "AAP connect to {addr} returned with the channel still connecting (cid {}); waiting for it",
+                peer_cid(&socket)
+            );
+            let pending = Instant::now();
+            settle(|| channel_up(&socket), CONNECT_POLL).await?;
+            tracing::debug!(
+                "AAP channel to {addr} came up after {} ms pending",
+                pending.elapsed().as_millis()
+            );
+        }
+        io::Result::Ok(socket)
+    };
+    let connected = match tokio::time::timeout(CONNECT_LIMIT, connecting).await {
+        Ok(connected) => connected,
+        Err(_) => {
+            // Dropped still connecting: the device may be left holding the channel.
+            tracing::warn!(
+                "AAP connect to {addr} still pending after {CONNECT_LIMIT:?}; closing it"
+            );
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("still connecting after {CONNECT_LIMIT:?}"),
+            ))
+        }
+    };
+    let took = began.elapsed().as_millis();
+    match connected {
+        Ok(socket) => {
+            tracing::debug!(
+                "AAP connected to {addr} (cid {}) in {took} ms",
+                peer_cid(&socket)
+            );
+            Ok(socket)
+        }
+        Err(e) => {
+            tracing::debug!("AAP connect to {addr} failed after {took} ms: {e}");
+            Err(anyhow::Error::new(e).context(ConnectFailed(format!(
+                "failed to connect to AirPods at {addr}"
+            ))))
+        }
+    }
+}
+
+/// Asks `up` every `every` until the channel is up, or fails as it does.
+async fn settle(mut up: impl FnMut() -> io::Result<bool>, every: Duration) -> io::Result<()> {
+    while !up()? {
+        tokio::time::sleep(every).await;
+    }
+    Ok(())
+}
+
+/// Whether the channel `socket` connects is up: `false` while it is still
+/// connecting, and the connect's error once the channel has closed.
+fn channel_up(socket: &SeqPacket) -> io::Result<bool> {
+    let state = ChannelState::read(
+        socket.as_ref().conn_info().map(drop),
+        socket.peer_addr().map(drop),
+    )?;
+    match state {
+        ChannelState::Up => Ok(true),
+        ChannelState::Connecting => Ok(false),
+        ChannelState::Closed => Err(take_error(socket)?.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "the channel closed before it came up",
+            )
+        })),
+    }
+}
+
+/// The channel's cid on the device's end, 0 until the device has accepted it.
+fn peer_cid(socket: &SeqPacket) -> u16 {
+    socket.peer_addr().map_or(0, |a| a.cid)
+}
+
+/// Where a connecting L2CAP channel stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChannelState {
+    /// `BT_CONNECTED`, the one state a socket sends in: anything sooner fails
+    /// `ENOTCONN` (`l2cap_sock_sendmsg`).
+    Up,
+    /// `BT_CONNECT` or `BT_CONFIG`: the device has not accepted the channel
+    /// yet, or has and is configuring it.
+    Connecting,
+    /// Closed: the connect failed, and the socket holds why.
+    Closed,
+}
+
+impl ChannelState {
+    /// Reads the state from what the socket answers to `L2CAP_CONNINFO` and
+    /// to getpeername. The first reads back only once the channel is up, the
+    /// second while it connects too, and both fail `ENOTCONN` once it has
+    /// closed (`l2cap_sock_getsockopt_old`, `l2cap_sock_getname`).
+    fn read(conn_info: io::Result<()>, peer_addr: io::Result<()>) -> io::Result<Self> {
+        let not_connected = |e: &io::Error| e.kind() == io::ErrorKind::NotConnected;
+        match conn_info {
+            Ok(()) => return Ok(Self::Up),
+            Err(e) if !not_connected(&e) => return Err(e),
+            Err(_) => {}
+        }
+        match peer_addr {
+            Ok(()) => Ok(Self::Connecting),
+            Err(e) if not_connected(&e) => Ok(Self::Closed),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Takes the socket's pending error (`SO_ERROR`): why its connect failed.
+/// bluer reads it within its connect, and has no call for it otherwise.
+fn take_error(socket: &SeqPacket) -> io::Result<Option<io::Error>> {
+    let mut err: libc::c_int = 0;
+    let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: the descriptor stays open while `socket` is borrowed, and `err`
+    // and `len` are an int and its length for the kernel to write to.
+    let read = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            (&raw mut err).cast(),
+            &raw mut len,
+        )
+    };
+    if read == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((err != 0).then(|| io::Error::from_raw_os_error(err)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +649,80 @@ mod tests {
         let c = Client::new(MAC);
         assert!(c.handshake().await.is_err());
         assert!(c.read_packet().await.is_err());
+    }
+
+    /// A channel the socket still names its peer for is connecting, not
+    /// closed, though the socket cannot send yet (#136).
+    #[test]
+    fn a_channel_is_up_only_once_it_reads_connected() {
+        let not_connected = || Err(io::Error::from(io::ErrorKind::NotConnected));
+        assert_eq!(
+            ChannelState::read(Ok(()), Ok(())).unwrap(),
+            ChannelState::Up
+        );
+        assert_eq!(
+            ChannelState::read(not_connected(), Ok(())).unwrap(),
+            ChannelState::Connecting
+        );
+        assert_eq!(
+            ChannelState::read(not_connected(), not_connected()).unwrap(),
+            ChannelState::Closed
+        );
+        // Anything else the socket fails with is no state of the channel's.
+        let bad = || Err(io::Error::from_raw_os_error(9)); // EBADF
+        assert!(ChannelState::read(bad(), Ok(())).is_err());
+        assert!(ChannelState::read(not_connected(), bad()).is_err());
+    }
+
+    /// The connect is done once the channel is up, and fails as it does -
+    /// never sooner, however long it stays pending (#136).
+    #[tokio::test]
+    async fn a_pending_connect_is_waited_for() {
+        let every = Duration::from_millis(1);
+
+        let mut asked = 0;
+        settle(
+            || {
+                asked += 1;
+                Ok(true)
+            },
+            every,
+        )
+        .await
+        .unwrap();
+        assert_eq!(asked, 1, "up at once");
+
+        let mut asked = 0;
+        settle(
+            || {
+                asked += 1;
+                Ok(asked == 4)
+            },
+            every,
+        )
+        .await
+        .unwrap();
+        assert_eq!(asked, 4, "up once the channel is");
+
+        let mut asked = 0;
+        let failed = settle(
+            || {
+                asked += 1;
+                if asked < 3 {
+                    Ok(false)
+                } else {
+                    Err(io::Error::from_raw_os_error(EHOSTDOWN))
+                }
+            },
+            every,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failed.raw_os_error(), Some(EHOSTDOWN));
+        assert_eq!(asked, 3);
+
+        let pending = tokio::time::timeout(Duration::from_millis(30), settle(|| Ok(false), every));
+        assert!(pending.await.is_err(), "still pending");
     }
 
     /// Over a Unix socket, as the harness runs AAP.
@@ -677,8 +889,7 @@ mod tests {
         }
 
         /// A connection gone before the handshake could even be sent never
-        /// came up, as a socket L2CAP reports connected while the link is not
-        /// up: a failed connect, not a link that went.
+        /// served as one: a failed connect, not a link that went.
         #[tokio::test]
         async fn a_handshake_that_cannot_be_sent_is_a_failed_connect() {
             let (client, peer, _dir) = connected().await;

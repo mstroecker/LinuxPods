@@ -1043,8 +1043,9 @@ impl Coordinator {
     /// or gets one meanwhile: that one stands.
     ///
     /// Dropped before it is done - timed out, or the pair detached - it leaves
-    /// nothing behind: the connection closes with it, and the link is recorded
-    /// only at the last step, which nothing awaits after.
+    /// no link behind: a connection that is up closes with it, one still
+    /// connecting closes once it is up (see [`aap::Client::connect`]), and the
+    /// link is recorded only at the last step, which nothing awaits after.
     pub(crate) async fn open_aap(self: &Arc<Self>, mac_addr: Address) -> Result<AapLink> {
         anyhow::ensure!(
             !self.inner.read().await.links.contains_key(&mac_addr),
