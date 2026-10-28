@@ -336,25 +336,17 @@ mod tests {
     /// The hex from `docs/aap-noise-control.md`, byte for byte.
     #[test]
     fn builds_the_documented_packets() {
-        let hex = |p: [u8; 11]| {
-            p.iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<Vec<_>>()
-                .join("")
-        };
-        assert_eq!(hex(set_packet(NoiseMode::Off)), "0400040009000d01000000");
+        let hex = |mode| crate::hex(&set_packet(mode));
+        assert_eq!(hex(NoiseMode::Off), "04 00 04 00 09 00 0d 01 00 00 00");
         assert_eq!(
-            hex(set_packet(NoiseMode::NoiseCancelling)),
-            "0400040009000d02000000"
+            hex(NoiseMode::NoiseCancelling),
+            "04 00 04 00 09 00 0d 02 00 00 00"
         );
         assert_eq!(
-            hex(set_packet(NoiseMode::Transparency)),
-            "0400040009000d03000000"
+            hex(NoiseMode::Transparency),
+            "04 00 04 00 09 00 0d 03 00 00 00"
         );
-        assert_eq!(
-            hex(set_packet(NoiseMode::Adaptive)),
-            "0400040009000d04000000"
-        );
+        assert_eq!(hex(NoiseMode::Adaptive), "04 00 04 00 09 00 0d 04 00 00 00");
     }
 
     /// From LibrePods' control command table: 0x34, enabled 0x01 / disabled 0x02.
@@ -414,11 +406,10 @@ mod tests {
     /// The hex from `docs/aap-noise-control.md`, byte for byte.
     #[test]
     fn builds_the_documented_notification() {
-        let hex: String = settings_changed_packet()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(hex, "040004004b0002000109");
+        assert_eq!(
+            crate::hex(&settings_changed_packet()),
+            "04 00 04 00 4b 00 02 00 01 09"
+        );
     }
 
     #[test]

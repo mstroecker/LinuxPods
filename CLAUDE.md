@@ -248,6 +248,9 @@ deadlocked every command sent meanwhile.
 - Log stages separately: `BLE parsable:` covers every advertisement that parses, including
   ones the coordinator later drops; `BLE decryptable:` reports identification. Noisy
   non-proximity Apple data goes to `trace`.
+- Bytes in logs and probe output go through `linuxpods::hex`, and a packet that may carry
+  keys through `aap::keys::redacted_hex`, which shows a key packet's preamble only. No log,
+  probe or example prints key bytes: their output gets pasted into issues.
 - Log text describing control flow goes stale like comments, and is more visible.
 - Tasks on the system bus (`ble_task`, `attachment::run`) never return for good: they set
   themselves up again with `bluez::Backoff`, which counts a run under a minute as a

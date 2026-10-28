@@ -16,6 +16,7 @@ use anyhow::Context;
 use bluer::Address;
 use linuxpods::aap::noise::{NoiseMode, set_packet};
 use linuxpods::aap::{Client, Message, decode, keys};
+use linuxpods::hex;
 
 /// How long to listen after each command. The 0x0D echo, when it comes at all,
 /// took seconds to arrive on the hardware this was verified against.
@@ -24,14 +25,6 @@ const RESPONSE_WINDOW: Duration = Duration::from_secs(4);
 /// Packets from the previous mode change still in flight are drained for this
 /// long, so they are not mistaken for an answer to the next one.
 const DRAIN_WINDOW: Duration = Duration::from_secs(3);
-
-fn hex(packet: &[u8]) -> String {
-    packet
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
-}
 
 /// A received packet as it is printed: whole, except a key packet, of which
 /// only the header, opcode and key count go out - see [`keys::redacted_hex`].

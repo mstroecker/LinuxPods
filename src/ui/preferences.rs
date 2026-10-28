@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use adw::prelude::*;
 use bluer::Address;
 
-use super::{RECENT, last_seen_text};
+use super::{RECENT, last_seen_text, unavailable_row};
 use crate::podstate::{PodState, Snapshot};
 
 /// The Preferences dialog, and its Development group for the update loop to
@@ -42,29 +42,6 @@ pub(super) fn create_preferences_dialog() -> (adw::PreferencesDialog, DeviceRows
         shown: RefCell::default(),
     };
     (dialog, devices)
-}
-
-/// A setting that is planned but not built, in Preferences and on the Control
-/// page. Shown so the plan is visible, but switched off and greyed out: it
-/// neither claims a state nor takes a click, and nothing listens to the switch.
-/// Once a feature lands, its state comes with the snapshot and a change goes
-/// out as a command, as noise control's does.
-///
-/// `id` names the switch, so that a test can find it and see it refuse.
-pub(super) fn unavailable_row(id: &str, title: &str) -> adw::ActionRow {
-    let row = adw::ActionRow::builder()
-        .title(title)
-        .subtitle("Not available yet")
-        .sensitive(false)
-        .build();
-    row.add_suffix(
-        &gtk::Switch::builder()
-            .name(id)
-            .active(false)
-            .valign(gtk::Align::Center)
-            .build(),
-    );
-    row
 }
 
 /// The Development group: a row per device, by real MAC.

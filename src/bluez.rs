@@ -25,7 +25,6 @@ use zbus::{Connection, MatchRule, Message, MessageStream, interface, proxy};
 
 pub const BLUEZ_SERVICE: &str = "org.bluez";
 const ADAPTER_INTERFACE: &str = "org.bluez.Adapter1";
-const PROVIDER_PATH: &str = "/com/github/mstroecker/linuxpods/battery";
 const BATTERY_NAME: &str = "airpods_battery";
 const SOURCE: &str = "LinuxPods";
 
@@ -140,10 +139,15 @@ impl std::ops::Deref for ProviderConnection {
 /// from the ObjectManager closest to an object, each root's own.
 pub async fn connection(builder: zbus::connection::Builder<'_>) -> Result<ProviderConnection> {
     let conn = builder
-        .serve_at(PROVIDER_PATH, zbus::fdo::ObjectManager)?
+        .serve_at(provider_path(), zbus::fdo::ObjectManager)?
         .build()
         .await?;
     Ok(ProviderConnection(conn))
+}
+
+/// Where every provider root goes, in the app's namespace.
+fn provider_path() -> String {
+    format!("{}/battery", crate::APP_PATH)
 }
 
 /// Where the provider for the adapter at `adapter`, served by the connection
@@ -161,7 +165,7 @@ fn provider_root(owner: &str, adapter: &str) -> Result<OwnedObjectPath> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    let path = format!("{PROVIDER_PATH}/{owner}/{name}");
+    let path = format!("{}/{owner}/{name}", provider_path());
     OwnedObjectPath::try_from(path.as_str())
         .with_context(|| format!("invalid provider root {path} for adapter {adapter}"))
 }
@@ -969,7 +973,7 @@ pub struct ConnectionEvent {
     pub device_path: String,
     /// `None` when the services changed, not the connection: a first pairing
     /// connects before service discovery fills in the UUID that marks AirPods, so
-    /// the device is not recognisable yet when `Connected` changes.
+    /// the device is not recognizable yet when `Connected` changes.
     pub connected: Option<bool>,
 }
 
@@ -1296,13 +1300,11 @@ mod tests {
     #[test]
     fn battery_paths_are_per_device_adapter_and_connection() {
         let root = provider_root(":1.42", "/org/bluez/hci1").unwrap();
-        assert_eq!(
-            root.as_str(),
-            "/com/github/mstroecker/linuxpods/battery/_1_42/hci1"
-        );
+        let app = crate::APP_PATH;
+        assert_eq!(root.as_str(), format!("{app}/battery/_1_42/hci1"));
         assert_eq!(
             battery_path(&root, MAC_A).unwrap().as_str(),
-            "/com/github/mstroecker/linuxpods/battery/_1_42/hci1/airpods_battery_AA_BB_CC_DD_EE_FF"
+            format!("{app}/battery/_1_42/hci1/airpods_battery_AA_BB_CC_DD_EE_FF")
         );
         assert_ne!(
             battery_path(&root, MAC_A).unwrap(),
@@ -1407,7 +1409,7 @@ mod tests {
         assert!(!is_airpods(&device([("UUIDs", Value::from(AIRPODS_UUID))])));
     }
 
-    /// A rename leaves the UUIDs alone, so the pair is still recognised.
+    /// A rename leaves the UUIDs alone, so the pair is still recognized.
     #[test]
     fn renamed_airpods_are_still_airpods() {
         assert!(is_airpods(&device([

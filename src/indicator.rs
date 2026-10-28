@@ -9,6 +9,7 @@ use bluer::Address;
 use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{Handle, MenuItem, Tray, TrayMethods};
 
+use crate::APP_SYMBOLIC_ICON;
 use crate::aap::NoiseMode;
 use crate::podstate::{DataSource, PodState, Snapshot};
 
@@ -16,9 +17,6 @@ use crate::podstate::{DataSource, PodState, Snapshot};
 /// `cargo run` never performs. Handing the host this directory is what keeps the
 /// tray from falling back to a missing-image glyph in a source checkout.
 const ICON_THEME_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons");
-
-/// Symbolic, so the panel recolours it to match its own foreground.
-const ICON_NAME: &str = "io.github.mstroecker.LinuxPods-symbolic";
 
 /// Actions the tray hands back to the application.
 pub trait TrayActions: Send + Sync + 'static {
@@ -33,6 +31,8 @@ pub struct Indicator {
     left: Option<u8>,
     right: Option<u8>,
     case: Option<u8>,
+    /// What the tooltip shows - see [`PodState::lowest_earbud`].
+    lowest_earbud: Option<u8>,
     left_charging: bool,
     right_charging: bool,
     case_charging: bool,
@@ -52,6 +52,7 @@ impl Indicator {
             left: None,
             right: None,
             case: None,
+            lowest_earbud: None,
             left_charging: false,
             right_charging: false,
             case_charging: false,
@@ -87,6 +88,7 @@ impl Indicator {
         self.left = state.left_battery;
         self.right = state.right_battery;
         self.case = state.case_battery;
+        self.lowest_earbud = state.lowest_earbud();
         self.left_charging = state.left_charging;
         self.right_charging = state.right_charging;
         self.case_charging = state.case_charging;
@@ -125,7 +127,7 @@ impl Tray for Indicator {
     }
 
     fn icon_name(&self) -> String {
-        ICON_NAME.into()
+        APP_SYMBOLIC_ICON.into()
     }
 
     /// Empty unless the checkout still exists. The AppIndicator extension looks
@@ -141,12 +143,7 @@ impl Tray for Indicator {
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        let lowest = match (self.left, self.right) {
-            (Some(l), Some(r)) => Some(l.min(r)),
-            (Some(v), None) | (None, Some(v)) => Some(v),
-            (None, None) => None,
-        };
-        let description = match lowest {
+        let description = match self.lowest_earbud {
             Some(v) => format!("AirPods - {v}%"),
             None => "Searching for AirPods…".to_string(),
         };
@@ -244,7 +241,7 @@ mod tests {
     fn the_tray_icon_exists_where_the_host_will_look_for_it() {
         let icon = std::path::Path::new(ICON_THEME_PATH)
             .join("hicolor/symbolic/apps")
-            .join(format!("{ICON_NAME}.svg"));
+            .join(format!("{APP_SYMBOLIC_ICON}.svg"));
         assert!(icon.exists(), "missing tray icon: {}", icon.display());
     }
 

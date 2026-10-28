@@ -158,12 +158,11 @@ pub const PREAMBLE_LEN: usize = 7;
 /// out, and a note. The keys are the pair's IRK and ENC_KEY. Any packet with
 /// the key opcode is cut short, whether it parses or not.
 pub fn redacted_hex(packet: &[u8]) -> String {
-    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
     if message::opcode(packet) == Some(KEY_MARKER) {
         let preamble = &packet[..packet.len().min(PREAMBLE_LEN)];
-        format!("{} (keys redacted)", hex(preamble))
+        format!("{} (keys redacted)", crate::hex(preamble))
     } else {
-        hex(packet)
+        crate::hex(packet)
     }
 }
 
@@ -232,13 +231,16 @@ mod tests {
     #[test]
     fn hex_leaves_the_keys_out() {
         let keys = packet(&[(0x01, &[0xAA; 16]), (0x04, &[0xBB; 16])]);
-        assert_eq!(redacted_hex(&keys), "04000400310002 (keys redacted)");
+        assert_eq!(redacted_hex(&keys), "04 00 04 00 31 00 02 (keys redacted)");
         let mut truncated = keys.clone();
         truncated.truncate(12);
-        assert_eq!(redacted_hex(&truncated), "04000400310002 (keys redacted)");
-        assert_eq!(redacted_hex(&keys[..5]), "0400040031 (keys redacted)");
+        assert_eq!(
+            redacted_hex(&truncated),
+            "04 00 04 00 31 00 02 (keys redacted)"
+        );
+        assert_eq!(redacted_hex(&keys[..5]), "04 00 04 00 31 (keys redacted)");
 
-        assert_eq!(redacted_hex(&REQUEST), "0400040030000500");
+        assert_eq!(redacted_hex(&REQUEST), "04 00 04 00 30 00 05 00");
     }
 
     #[test]

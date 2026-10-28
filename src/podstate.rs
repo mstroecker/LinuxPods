@@ -151,7 +151,7 @@ pub struct ConnectionLost {
 pub struct Identity {
     /// Apple's product ID, which names the model - see [`decode_model_name`].
     pub product_id: u16,
-    /// The colour code, as advertised.
+    /// The color code, as advertised.
     pub color: u8,
 }
 
@@ -900,14 +900,7 @@ impl Coordinator {
             data.left_in_ear,
             data.right_in_ear
         );
-        tracing::debug!(
-            "BLE {ble_mac} raw: {}",
-            data.raw_data
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+        tracing::debug!("BLE {ble_mac} raw: {}", crate::hex(&data.raw_data));
 
         let mut inner = self.inner.write().await;
         let now = Instant::now();
@@ -1103,12 +1096,7 @@ impl Coordinator {
             tracing::debug!(
                 "AAP packet ({} bytes): {}",
                 packet.len(),
-                packet
-                    .iter()
-                    .take(8)
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                crate::hex(&packet[..packet.len().min(8)])
             );
 
             match aap::decode(&packet) {

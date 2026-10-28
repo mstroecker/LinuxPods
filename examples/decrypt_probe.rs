@@ -6,6 +6,7 @@
 
 use linuxpods::ble::decrypt::decrypt_raw;
 use linuxpods::ble::matches_device;
+use linuxpods::hex;
 use linuxpods::keystore::Keystore;
 
 /// Payloads captured from the running app. Bytes 1-2 are the product ID,
@@ -23,7 +24,7 @@ const CAPTURED: &[&str] = &[
     "01 24 20 34 aa f1 51 00 00 92 f3 36 1d bd da 42 5c b3 2e da 0c 35 b2 0a 7f",
 ];
 
-fn hex(s: &str) -> Vec<u8> {
+fn bytes(s: &str) -> Vec<u8> {
     s.split_whitespace()
         .map(|b| u8::from_str_radix(b, 16).unwrap())
         .collect()
@@ -37,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("=== key for {mac} ({} bytes) ===", key.len());
 
         for raw in CAPTURED {
-            let payload = hex(raw);
+            let payload = bytes(raw);
             let ct = &payload[9..25];
             let pt = decrypt_raw(ct, key)?;
 
@@ -51,10 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "  ct[0..4]={:02x?} -> pt={} | byte0={:02x} byte4={:02x} magic={}",
                 &ct[..4],
-                pt.iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(""),
+                hex(&pt),
                 pt[0],
                 pt[4],
                 if magic_ok { "OK" } else { "FAIL" }

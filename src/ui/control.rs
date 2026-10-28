@@ -7,8 +7,7 @@ use adw::prelude::*;
 use bluer::Address;
 use gtk::{gio, glib};
 
-use super::preferences::unavailable_row;
-use super::{RESOURCE_PREFIX, last_seen_text};
+use super::{RESOURCE_PREFIX, last_seen_text, unavailable_row};
 use crate::aap::NoiseMode;
 use crate::ble::decode_connection_state;
 use crate::podstate::{DataSource, PodState, Snapshot};
@@ -68,10 +67,6 @@ fn charging_icon(level: Option<u8>) -> String {
 /// Drawn for this app and bundled: the theme has no icon for an earbud being
 /// worn, and headphones read as "audio device" rather than "in an ear".
 pub(super) const IN_EAR_ICON: &str = "linuxpods-in-ear-symbolic";
-
-/// The app icon as a symbolic, for the empty state. Bundled, so it resolves
-/// without an install.
-pub(super) const APP_SYMBOLIC_ICON: &str = "io.github.mstroecker.LinuxPods-symbolic";
 
 /// Window action for noise control. Its state names the mode shown, by
 /// `noise_target`, and is `""` while no mode has been reported.
@@ -310,7 +305,8 @@ pub(super) fn create_control_view() -> ControlView {
 fn create_empty_state() -> adw::StatusPage {
     adw::StatusPage::builder()
         .name("empty-state")
-        .icon_name(APP_SYMBOLIC_ICON)
+        // Bundled, so it resolves without an install.
+        .icon_name(crate::APP_SYMBOLIC_ICON)
         .title("Connect Your AirPods")
         .description(
             "Connect your AirPods to this computer over Bluetooth, and they will show up here",
