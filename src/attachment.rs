@@ -67,7 +67,9 @@
 //! brings the pair's Bluetooth link up with it, which would reconnect
 //! AirPods the user had just disconnected. The supervisor is dropped wherever
 //! it was - in a connect, a handshake, a wait - and the connection under way
-//! with it.
+//! with it, but for an L2CAP connect still pending: that runs on in a task of
+//! its own and closes its channel once it is up, since a channel dropped while
+//! connecting is left open on the pods (#136).
 //!
 //! An attachment that stops, as BlueZ's signals on its connection end, takes
 //! its supervisors along, and their links with them; the one that starts over
@@ -85,7 +87,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use zbus::Connection;
 
-use crate::aap::client::{is_link_gone, went_during_setup};
+use crate::aap::client::{CONNECT_LIMIT, HANDSHAKE_TIMEOUT, is_link_gone, went_during_setup};
 use crate::bluez::{
     self, AdapterSet, Backoff, BatteryAction, BatteryProvider, ConnectionEvent, Devices,
     ProviderConnection,
@@ -93,10 +95,16 @@ use crate::bluez::{
 use crate::podstate::{Coordinator, LinkEnd, Snapshot};
 
 /// How long one AAP attempt may take, from connecting to the handshake's
-/// answer and the requests after it. The L2CAP connects of
-/// `aap::Client::connect` and the 5 s the handshake gets fit in it with room
-/// to spare; past it the attempt has failed, and is tried again.
-const AAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// answer and the requests after it; past it the attempt has failed, and is
+/// tried again. It is longer than the connect and the handshake may take
+/// together: given up on, a connect still pending runs on in its own task
+/// (see `aap::Client::connect`), and the next attempt would overlap it - a
+/// second channel to the pair while the first comes up, and in #136 the pods
+/// kept the session on the first of two. Both are bounded on their own, so
+/// this is a backstop.
+const AAP_CONNECT_TIMEOUT: Duration = CONNECT_LIMIT
+    .saturating_add(HANDSHAKE_TIMEOUT)
+    .saturating_add(Duration::from_secs(10));
 
 /// Runs attachment on the system bus, where BlueZ is, for as long as the app
 /// runs. What `main.rs` spawns. When the bus cannot be reached, or BlueZ's
@@ -497,7 +505,9 @@ impl Attachment {
 
     /// Stops what [`Attachment::start`] started: the supervisor, and whatever
     /// connect is under way, then the link. Back from here, the pair has no
-    /// link, and nothing links it again - see the module docs.
+    /// link, and nothing links it again - see the module docs. An L2CAP
+    /// connect still pending is the exception: it runs on in its own task and
+    /// closes its channel once it is up (#136).
     async fn stop(&self, mac: Address, supervisor: Supervisor) {
         supervisor.stop().await;
         // The link goes with the supervisor, but not at once: its record waits

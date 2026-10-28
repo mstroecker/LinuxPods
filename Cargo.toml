@@ -39,6 +39,8 @@ futures-util = "0.3"
 
 # Bluetooth: L2CAP sockets only - no D-Bus stack pulled in (see default-features)
 bluer = { version = "0.17", default-features = false, features = ["l2cap"] }
+# SO_ERROR on an L2CAP socket, which bluer does not offer (#136); bluer uses it too
+libc = "0.2"
 
 # D-Bus: BlueZ scanning + BatteryProvider1
 zbus = { version = "5", default-features = false, features = ["tokio"] }
