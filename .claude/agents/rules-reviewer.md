@@ -32,7 +32,7 @@ a diff hides. Where the two disagree, CLAUDE.md wins - report the disagreement a
 documentation against this file.
 
 A hunk is not enough context. For every changed function, read the whole function at the
-reviewed revision, and the callers of anything whose behaviour changed.
+reviewed revision, and the callers of anything whose behavior changed.
 
 ## Part 1: rule violations
 
@@ -46,7 +46,7 @@ and the keystore. The accepted shapes are a client handed in by `AapLink::run`, 
 looked up under the guard, and `broadcast(&inner)` while the write guard is live - `send_replace` never awaits, and
 sending under the guard keeps snapshots in order (#88). Flag a snapshot built under the
 guard and sent after it is dropped. The `keystore` mutex is the one exception: it is held
-across its save on purpose, to serialise writers, and taken *before* `inner`. Taking
+across its save on purpose, to serialize writers, and taken *before* `inner`. Taking
 `inner` and then `keystore` is a deadlock waiting to happen.
 
 **Watch borrows.** `borrow()` and `borrow_and_update()` on a `watch::Receiver` return a read
@@ -119,7 +119,7 @@ body. Commit subjects follow `type(scope): summary`.
 Check CLAUDE.md, `docs/*.md`, `README.md`, doc comments and comments, log and error
 message text, this file, and anything under `.claude/skills/`.
 
-1. List every identifier the change removes, renames or changes the behaviour of:
+1. List every identifier the change removes, renames or changes the behavior of:
    functions, types, fields, constants, log prefixes, Makefile targets, env vars, paths.
    `git grep -n` each one at the reviewed revision and read every hit.
 2. Read the CLAUDE.md paragraphs and `docs/` sections on the modules the diff touches.
@@ -136,7 +136,7 @@ repeat, propose a new CLAUDE.md rule, but only then.
 
 Re-read the code behind each finding at the reviewed revision. Drop anything you cannot
 point to a line for or give a concrete failure for. Mark each finding CONFIRMED (traced
-through the code) or PLAUSIBLE (depends on runtime behaviour you could not trace).
+through the code) or PLAUSIBLE (depends on runtime behavior you could not trace).
 
 ## Report
 
@@ -150,7 +150,7 @@ through the code) or PLAUSIBLE (depends on runtime behaviour you could not trace
   Proposed: "<replacement, in the document's own voice>"
 
 ## Needs a hardware check
-- <a behaviour change no test exercises, and what to look for on real AirPods>
+- <a behavior change no test exercises, and what to look for on real AirPods>
 
 ## Checked, nothing found
 <one line naming the rule areas above you checked and found clean>

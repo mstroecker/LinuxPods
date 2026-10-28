@@ -421,7 +421,7 @@ impl AdapterSet {
 
     /// The set as read from the bluetoothd at `owner`: `adapters`, each new
     /// unless that is the bluetoothd this set was read from and the adapter
-    /// was here all along. `changes` are what each sender signalled since
+    /// was here all along. `changes` are what each sender signaled since
     /// the last time, by sender: that bluetoothd's tell what it ended in
     /// between - see [`AdapterChange`] - and the rest are not its.
     ///
@@ -556,7 +556,7 @@ pub async fn watch_adapters(conn: &Connection) -> Result<watch::Receiver<Adapter
             let mut set = sender.borrow().clone();
             // bluetoothd came or went: read again, from whichever answers -
             // keeping the tokens if that is the one read from before. What it
-            // signalled meanwhile is in what is read, but for what it ended
+            // signaled meanwhile is in what is read, but for what it ended
             // on the way, which the signals say.
             if changes.owner {
                 set = read_adapters(&conn, &set, changes.adapters, &mut tokens).await;
@@ -574,7 +574,7 @@ pub async fn watch_adapters(conn: &Connection) -> Result<watch::Receiver<Adapter
 }
 
 /// BlueZ's adapters on `conn`, as read anew by `before` - see
-/// [`AdapterSet::read`] - with `changes` what each sender signalled since.
+/// [`AdapterSet::read`] - with `changes` what each sender signaled since.
 /// None when BlueZ is not on the bus.
 async fn read_adapters(
     conn: &Connection,
@@ -617,7 +617,7 @@ async fn managed_objects_and_owner(conn: &Connection) -> Result<(ManagedObjects,
     Ok((objects, owner))
 }
 
-/// What changes BlueZ's adapters, as it is signalled, coalesced since it was
+/// What changes BlueZ's adapters, as it is signaled, coalesced since it was
 /// last taken - see [`watch_adapters`].
 async fn adapter_changes(conn: &Connection) -> Result<impl Stream<Item = AdapterChanges> + use<>> {
     // Two rules, as `NameOwnerChanged` comes from the bus, not from BlueZ.
@@ -1449,11 +1449,11 @@ mod tests {
         std::iter::from_fn(|| pending.pop()).collect()
     }
 
-    /// A device signalling its services over and over is one change while it
+    /// A device signaling its services over and over is one change while it
     /// waits, and one more once that is taken: the one taken may have been
     /// answered before the device changed again.
     #[test]
-    fn a_device_resignalling_its_services_is_one_change() {
+    fn a_device_resignaling_its_services_is_one_change() {
         let mut pending = pending(std::iter::repeat_n(services(PATH_A), 1000));
         assert_eq!(take_all(&mut pending), [services(PATH_A)]);
 
@@ -1675,7 +1675,7 @@ mod tests {
             assert_ne!(now.discovery, was.discovery);
         }
 
-        // Off and on again meanwhile, as the new one signalled; the old one's
+        // Off and on again meanwhile, as the new one signaled; the old one's
         // last word, out of order, counts for nothing.
         let meanwhile = by_sender([
             signal(NEW, HCI1, AdapterEvent::Powered(false)),
