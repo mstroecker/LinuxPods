@@ -261,7 +261,7 @@ Debug logging reports each protocol stage separately:
 ```
 BLE parsable: 5C:4D:3F:B5:41:B6 model=0x2027 payload=25B
 BLE decryptable: 5C:4D:3F:B5:41:B6 -> AA:BB:CC:DD:EE:FF (key matched)
-BLE 5C:4D:3F:B5:41:B6 [decrypted 1%]: left=Some(75) right=Some(73) case=Some(61) lid_open=None one_in_case=false in_ear=true/true
+BLE 5C:4D:3F:B5:41:B6 [decrypted]: left=Some(75) right=Some(73) case=Some(61) lid_open=None one_in_case=false in_ear=true/true
 AAP connected to AA:BB:CC:DD:EE:FF (cid 2822, attempt 1)
 ```
 

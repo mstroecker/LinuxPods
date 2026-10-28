@@ -889,12 +889,7 @@ impl Coordinator {
         };
 
         tracing::debug!(
-            "BLE {ble_mac} [{}]: left={:?} right={:?} case={:?} lid_open={:?} one_in_case={} in_ear={}/{}",
-            if data.has_decrypted {
-                "decrypted 1%"
-            } else {
-                "cleartext 10%"
-            },
+            "BLE {ble_mac} [decrypted]: left={:?} right={:?} case={:?} lid_open={:?} one_in_case={} in_ear={}/{}",
             state.left_battery,
             state.right_battery,
             state.case_battery,
@@ -1097,10 +1092,12 @@ impl Coordinator {
                 Err(e) => return e,
             };
 
+            // Redacted, as a key packet may be among them: logs get pasted
+            // into issues.
             tracing::debug!(
                 "AAP packet ({} bytes): {}",
                 packet.len(),
-                crate::hex(&packet[..packet.len().min(8)])
+                aap::keys::redacted_hex(&packet[..packet.len().min(8)])
             );
 
             match aap::decode(&packet) {
