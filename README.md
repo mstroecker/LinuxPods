@@ -153,9 +153,9 @@ Download the tarball for your architecture from
 [Releases](https://github.com/mstroecker/LinuxPods/releases), then:
 
 ```bash
-tar -xzf linuxpods-0.2.0-x86_64-linux.tar.gz
-linuxpods-0.2.0-x86_64-linux/install.sh              # same as make install below
-linuxpods-0.2.0-x86_64-linux/install.sh --uninstall
+tar -xzf linuxpods-0.3.0-x86_64-linux.tar.gz
+linuxpods-0.3.0-x86_64-linux/install.sh              # same as make install below
+linuxpods-0.3.0-x86_64-linux/install.sh --uninstall
 ```
 
 The release binaries need glibc 2.39 or newer besides the runtime libraries listed under

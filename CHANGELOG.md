@@ -2,6 +2,53 @@
 
 User-facing changes in each release.
 
+## [0.3.0] - 2026-10-29
+
+Pairs are now recognized over BLE by their own rotating addresses, AAP reconnects on its
+own, and the app keeps working through Bluetooth being switched off and on, adapters
+coming and going, and bluetoothd restarting.
+
+### Features
+
+- **Identification by address:** an advertisement counts only if its address resolves
+  with the pair's IRK and the same pair's key decrypts it. Before, every stored key was
+  tried on every advertisement, and among enough foreign AirPods or a BLE spammer a wrong
+  key could eventually show random levels for one of your pairs (#134). The IRK is
+  fetched on the next AAP connection; until then a pair is identified by its key alone,
+  as before. The keys file moves to format version 2, which older versions still read.
+- **Color:** the Control page shows the AirPods' color beside the model name, on a line
+  of its own.
+
+### Fixes
+
+- **AAP reconnects:** a pair whose AAP link failed or was dropped by the AirPods while
+  still connected stayed on BLE until it was disconnected and connected again. Each pair
+  now has its link reopened with a backoff, and only while BlueZ reports it connected,
+  so AirPods you just disconnected are never reconnected.
+- **AAP stuck after a reconnect:** a connect retried too early could leave the AirPods
+  holding a stale channel, so the new link's handshake went unanswered and the link
+  closed when the AirPods dropped the old one (#136).
+- **Bluetooth off and on:** after the first power cycle, suspend, or bluetoothd restart,
+  nothing was heard over BLE and GNOME Settings lost the battery until the app was
+  restarted. Adapters are now followed as they power off and on, are plugged in or out,
+  and bluetoothd restarts (#50). Discovery is retried when bluetoothd refuses it as busy
+  instead of silently staying off (#123).
+- **No blank moment on connect:** the BLE reading stays on show until the AAP link's
+  first battery packet, instead of blanking the window and withdrawing the GNOME Settings
+  battery for about a second on every connect (#62).
+- **Noise control:** switching modes quickly sends them in order, and the window no longer
+  flips back to the old mode for a second after a change (#113). A failed change shows a
+  notification. Mode 0x02 is called Noise Cancellation, as Apple calls it.
+- **GNOME Settings battery under load:** BlueZ's first read of the battery provider could
+  be dropped, leaving no battery in GNOME Settings (#125).
+- **Logs:** a link that goes away during setup is no longer reported as an unanswered
+  handshake, and AAP packets that may carry keys are redacted in debug logs.
+
+### Removed
+
+- The **Request Keys** button in Preferences → Development: keys are requested on every
+  AAP connection, so reconnecting does the same.
+
 ## [0.2.0] - 2026-10-25
 
 A reliability release: pairs attach and report battery in more setups, readings stay
