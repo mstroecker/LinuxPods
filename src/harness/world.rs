@@ -465,9 +465,9 @@ impl World {
     }
 
     /// `count` advertisers no key decrypts and no IRK resolves, as
-    /// [`World::flood`] brings, each
-    /// advertising `times` times from one address. Every advertisement after
-    /// an advertiser's first is signaled as a change, with
+    /// [`World::flood`] brings, each advertising the same payload `times`
+    /// times from one address. Every advertisement after an advertiser's
+    /// first is signaled as a change of strength alone, with
     /// `PropertiesChanged`, which attachment's connection watch subscribes to
     /// as well as the scanner.
     pub async fn flood_repeating(&self, count: u32, times: u32) -> Result<()> {
@@ -479,8 +479,8 @@ impl World {
         for _ in 0..count {
             let spammer = Pods::new(PRO_3, random_address());
             let address = spammer.address_at(now);
-            for i in 0..times {
-                let advert = spammer.advertisement(now + Duration::from_millis(i.into()));
+            let advert = spammer.advertisement(now);
+            for _ in 0..times {
                 self.0.bluez.advertise(address, &advert.data).await?;
             }
         }
@@ -1146,11 +1146,12 @@ mod tests {
     }
 
     /// A flood is signaled only as its addresses appear, and a repeating
-    /// flood as changes after that: what attachment's connection watch
-    /// subscribes to, and the #90 test relies on. A world with no pair in it,
-    /// so that every device signaled is an advertiser's.
+    /// flood as changes after that: of the strength alone, as an advertiser
+    /// repeating its payload is (#71). Those are what attachment's connection
+    /// watch subscribes to, and the #90 test relies on. A world with no pair
+    /// in it, so that every device signaled is an advertiser's.
     #[tokio::test]
-    async fn only_a_repeating_flood_is_signaled_as_changes() {
+    async fn a_repeating_flood_is_signaled_as_changes_of_strength() {
         let bus = PrivateBus::start().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let world = World::new(bus.address(), dir.path()).await.unwrap();
@@ -1171,12 +1172,14 @@ mod tests {
             .unwrap()
             .filter_map(|msg| async move {
                 let msg = msg.ok()?;
-                let (iface, _, _) = msg
+                let (iface, props, _) = msg
                     .body()
                     .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
                     .ok()?;
                 let path = msg.header().path()?.to_string();
-                (iface == "org.bluez.Device1").then_some(path)
+                let mut changed: Vec<String> = props.into_keys().collect();
+                changed.sort_unstable();
+                (iface == "org.bluez.Device1").then_some((path, changed))
             });
         tokio::pin!(changes);
         Scanner::with_connection(conn)
@@ -1191,7 +1194,9 @@ mod tests {
         let mut changed: HashMap<String, usize> = HashMap::new();
         timeout(TIMEOUT, async {
             for _ in 0..4 {
-                *changed.entry(changes.next().await.unwrap()).or_default() += 1;
+                let (device, properties) = changes.next().await.unwrap();
+                assert_eq!(properties, ["RSSI"], "{device}: the payload repeated");
+                *changed.entry(device).or_default() += 1;
             }
         })
         .await
