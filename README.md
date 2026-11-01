@@ -75,7 +75,7 @@ own. This is the only channel that can *send* commands.
 | Several pairs tracked at once, with a switcher | ✅ |
 | Keys stored under the XDG data directory and reused across sessions | ✅ |
 | Native libadwaita interface following the GNOME HIG | ✅ |
-| Low battery notifications | 📋 |
+| Low battery notifications, at 20% and 5% as UPower's defaults, with a switch in Preferences | ✅ |
 | Persisted UI preferences | 📋 |
 
 ### Unexplored
@@ -189,7 +189,10 @@ The window shows the three battery levels, charging state and in-ear detection; 
 them the model and its color, and which source the reading came from. With more than
 one pair to show - each one it holds a key for, and each one connected over AAP - the
 header bar switches between them. **Preferences**, in the main menu, lists every one of
-them with its encryption key status.
+them with its encryption key status, and turns low battery notifications off and on. The
+switch is not saved yet, so it is on whenever the app starts. Low battery notifications
+need the launcher entry that `make install` writes: GNOME Shell shows none for an app it
+has no desktop entry for.
 
 Setup is connecting the AirPods to this machine once. On every connection LinuxPods asks
 them for their keys - the IRK and the encryption key - and writes them to
@@ -290,17 +293,18 @@ src/
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # Key storage under XDG data dir
 ├── indicator.rs   # System tray (StatusNotifierItem)
-├── ui/            # GTK4/libadwaita: window, Control page, Preferences; automation.rs, harness only
+├── notify.rs      # Low battery notifications: what to warn about, once per crossing
+├── ui/            # GTK4/libadwaita: window, Control page, Preferences, notifications; automation.rs, harness only
 ├── harness/       # harness only: fake AirPods (pods.rs), fake BlueZ (bluez.rs), the world (world.rs)
 └── bin/           # harness only: fakepods.rs, the fake world make fake-world runs
 ```
 
 GTK owns the main thread; tokio carries BLE, AAP and D-Bus work. The two meet over
 channels, since GTK types are `!Send`: snapshots reach the window and tray on a `watch`
-channel, the tray's window commands reach the window on an `async-channel`, and a
-command to the AirPods - a noise control mode - goes on the queue of that pair's AAP
-link, which carries its commands out in the order they were sent and hands each result
-back to its caller.
+channel, the tray's window commands and the low battery notifications reach the main
+context on an `async-channel`, and a command to the AirPods - a noise control mode -
+goes on the queue of that pair's AAP link, which carries its commands out in the order
+they were sent and hands each result back to its caller.
 
 ## Contributing
 
