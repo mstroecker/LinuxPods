@@ -25,6 +25,7 @@ src/
 ├── bluez.rs       # Adapters, devices, connection watch; a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # ENC_KEY and IRK per pair at ~/.local/share/linuxpods/keys.json (0600)
+├── settings.rs    # Preferences' settings at ~/.config/linuxpods/settings.json
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
 ├── ui/            # GTK4/libadwaita: window, Control page, Preferences, notifications, automation
@@ -321,7 +322,7 @@ deadlocked every command sent meanwhile.
   otherwise (`LINUXPODS_AAP_SOCKET_DIR`, `LINUXPODS_HARNESS_AUTOMATION=1`, set only by
   `scripts/fake-world.sh`): `make test` and `make fake-world` leave it at
   `target/debug/linuxpods`, where it meets real AirPods and the user's session. Nothing in
-  the harness writes to the app's real data directory.
+  the harness writes to the app's real data or config directory.
 
 **UI.** Widget updates arrive only from the snapshot stream. The one exception is a
 command that fails: its result comes back to the main context and goes up as a toast, an
@@ -340,7 +341,11 @@ from a fresh reading - AAP, or BLE heard within `notify::FRESH`: the BLE cache o
 a pair that has gone by half an hour (#126). The Preferences switch is the app action
 `app.battery-notifications`, read by the delivery loop on the main context, not the
 notifier: off withdraws what is on show and on shows it again, while `notify::Alerts` goes
-on tracking crossings. It is not saved yet (#146).
+on tracking crossings. Its state is saved: `settings::open` loads the settings at startup,
+before the action is created, so a switch saved off starts off and sends nothing, and
+`settings::Saver` writes each change on tokio's blocking pool, never the main loop - the
+latest settings, whatever order the saves run in. A file that does not parse is set aside
+and the defaults used; a save that fails keeps the change in memory.
 Artwork and the app icon are compiled into a GResource by `build.rs`
 (`assets/resources.gresource.xml`); a missing resource fails silently, so a test asserts
 every name the UI loads is in the bundle. The tray still points the shell at

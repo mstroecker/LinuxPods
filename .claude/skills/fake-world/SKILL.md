@@ -144,8 +144,10 @@ sent. `Settle` does not wait for a notification: read again until it is there.
 
 The Preferences switch `battery-notifications` turns them off and on, once Preferences is
 open (see below): `app SetActive battery-notifications false` withdraws what is on show
-and sends nothing more, and `true` shows again what is low. It is on whenever the app
-starts.
+and sends nothing more, and `true` shows again what is low. The app saves the switch in
+the fake world's own config directory, never the user's -
+`$XDG_RUNTIME_DIR/linuxpods-harness/world/home/config/linuxpods/settings.json` - and
+`stop` deletes it with the rest of the world, so every `start` begins with it on.
 
 ## Practical notes
 
