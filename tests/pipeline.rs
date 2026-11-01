@@ -1989,19 +1989,33 @@ async fn reads_by(bus: &PrivateBus, conn: &Connection) -> impl Fn() -> usize + u
     .await
 }
 
-/// Which calls [`calls_by`] counts.
+/// Which calls [`calls_by`] counts, or signals [`signals_by`].
 type Pick = Box<dyn Fn(&zbus::message::Header<'_>) -> bool + Send>;
 
 /// Counts the method calls `conn` makes on `bus` that `pick` picks out, as a
 /// monitor sees them: in the order `conn` made them. Returns the count so
 /// far, on each call.
 async fn calls_by(bus: &PrivateBus, conn: &Connection, pick: Pick) -> impl Fn() -> usize + use<> {
+    messages_by(bus, conn, zbus::message::Type::MethodCall, pick).await
+}
+
+/// [`calls_by`], for the signals `conn` sends.
+async fn signals_by(bus: &PrivateBus, conn: &Connection, pick: Pick) -> impl Fn() -> usize + use<> {
+    messages_by(bus, conn, zbus::message::Type::Signal, pick).await
+}
+
+/// Counts the messages of type `kind` that `conn` sends on `bus` and `pick`
+/// picks out - see [`calls_by`].
+async fn messages_by(
+    bus: &PrivateBus,
+    conn: &Connection,
+    kind: zbus::message::Type,
+    pick: Pick,
+) -> impl Fn() -> usize + use<> {
     let caller = conn.unique_name().unwrap().to_string();
     let monitor = bus.connect().await.unwrap();
     let mut messages = zbus::MessageStream::from(&monitor);
-    let rule = zbus::MatchRule::builder()
-        .msg_type(zbus::message::Type::MethodCall)
-        .build();
+    let rule = zbus::MatchRule::builder().msg_type(kind).build();
     zbus::fdo::MonitoringProxy::new(&monitor)
         .await
         .unwrap()
@@ -2391,4 +2405,158 @@ async fn an_adapter_powered_off_stops_aap_until_the_pair_connects_again() {
     app.attach(PAIR).await;
     fixture.until_batteries(&battery).await;
     assert_eq!(fixture.aap_attempts(PAIR).await, 2);
+}
+
+/// Signals on `forger`, a client on the bus that is not BlueZ, that the pair
+/// at `mac` on `hci0` changed `Connected` to `connected`: the signal
+/// bluetoothd sends, on the pair's path, but not from bluetoothd. The bus
+/// lets any client send it, and the connection watch's rule names no sender.
+async fn forge_connected(forger: &Connection, mac: Address, connected: bool) {
+    let changed = HashMap::from([("Connected", zbus::zvariant::Value::from(connected))]);
+    forger
+        .emit_signal(
+            None::<&str>,
+            device_path(HCI0, mac),
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            &("org.bluez.Device1", changed, Vec::<String>::new()),
+        )
+        .await
+        .unwrap();
+}
+
+/// A `Connected=true` from anyone but BlueZ, on the path of a pair that is
+/// paired and disconnected, attaches nothing: attachment asks BlueZ, which
+/// reports the pair disconnected, and nothing pages the pair with an AAP
+/// connection. Regression (#132): the event was taken as given, the pair
+/// attached, and its supervisor's first connect - which asks BlueZ nothing,
+/// as attaching has asked - reconnected AirPods the user had disconnected.
+///
+/// Attachment's call on the pair's path shows it has taken the event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_connection_attaches_nothing() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let attachment = fixture.bus.connect_for_providers().await.unwrap();
+    let on_pair = calls_by(&fixture.bus, &attachment, on_path(device_path(HCI0, PAIR))).await;
+    let app = fixture.start_app_on(attachment).await;
+    let forger = fixture.bus.connect().await.unwrap();
+
+    forge_connected(&forger, PAIR, true).await;
+    let on_pair = &on_pair;
+    eventually("attachment to ask about the pair", move || async move {
+        on_pair() > 0
+    })
+    .await;
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(on_pair(), 1, "calls on the pair");
+    assert_eq!(fixture.aap_attempts(PAIR).await, 0, "AAP to the pair");
+    let connected = fixture.world.with_pods(PAIR, |pods| pods.is_connected());
+    assert!(!connected.await.unwrap(), "the pair was reconnected");
+    assert!(!app.updates.borrow().is_connected(PAIR), "a link");
+}
+
+/// A `Connected=false` from anyone but BlueZ, on the path of a pair that is
+/// attached and connected, detaches nothing: attachment asks BlueZ, which
+/// reports the pair connected, and the pair keeps its link and its GNOME
+/// Settings battery. Regression (#132): the event was taken as given, the
+/// pair detached and its battery withdrawn.
+///
+/// The other pair, connecting once attachment has asked about the first, is
+/// taken after the forged event: once it is on AAP with its battery shown, a
+/// detach would have shown too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_disconnection_detaches_nothing() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    let attachment = fixture.bus.connect_for_providers().await.unwrap();
+    let on_pair = calls_by(&fixture.bus, &attachment, on_path(device_path(HCI0, PAIR))).await;
+    let mut app = fixture.start_app_on(attachment).await;
+    app.attach(PAIR).await;
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+    let forger = fixture.bus.connect().await.unwrap();
+
+    let before = on_pair();
+    forge_connected(&forger, PAIR, false).await;
+    let on_pair = &on_pair;
+    eventually("attachment to ask about the pair", move || async move {
+        on_pair() > before
+    })
+    .await;
+    app.attach(OTHER).await;
+    let world = &fixture.world;
+    eventually("the other pair's battery", move || async move {
+        world.batteries().contains_key(&OTHER)
+    })
+    .await;
+    assert!(app.updates.borrow().is_connected(PAIR), "the link went");
+    assert_eq!(fixture.aap_attempts(PAIR).await, 1);
+    assert_eq!(
+        fixture.world.batteries(),
+        HashMap::from([(PAIR, lowest(PAIR_LEVELS)), (OTHER, lowest(OTHER_LEVELS)),])
+    );
+    let bluez = fixture.world.bluez();
+    assert!(
+        bluez.withdrawn_batteries().is_empty(),
+        "withdrawn: {:?}",
+        bluez.withdrawn_batteries()
+    );
+}
+
+/// While BlueZ is off the bus, a `Connected` change is not its own - forged,
+/// or from the bluetoothd that left - and attachment neither asks BlueZ
+/// about it nor acts on it: on a bus that activates bluetoothd, systemd's,
+/// asking would start it again. A connection on a pair's path costs no call,
+/// and a disconnection on the attached pair's detaches nothing, though BlueZ
+/// is not there to say the pair is still connected.
+///
+/// Attachment withdraws the pair's battery as it learns BlueZ has left, in
+/// the loop that takes connection events: once the battery is withdrawn,
+/// every event after is taken knowing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_event_while_bluez_is_away_is_not_asked_about() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    let attachment = fixture.bus.connect_for_providers().await.unwrap();
+    let withdrawn = signals_by(
+        &fixture.bus,
+        &attachment,
+        Box::new(|header| header.member().is_some_and(|m| m == "InterfacesRemoved")),
+    )
+    .await;
+    let on_pair = calls_by(&fixture.bus, &attachment, on_path(device_path(HCI0, PAIR))).await;
+    let on_other = calls_by(&fixture.bus, &attachment, on_path(device_path(HCI0, OTHER))).await;
+    let mut app = fixture.start_app_on(attachment).await;
+    app.attach(PAIR).await;
+    fixture
+        .until_batteries(&HashMap::from([(PAIR, lowest(PAIR_LEVELS))]))
+        .await;
+    let forger = fixture.bus.connect().await.unwrap();
+
+    fixture.world.bluez().stop().await.unwrap();
+    let withdrawn = &withdrawn;
+    eventually(
+        "attachment to withdraw the battery as BlueZ leaves",
+        move || async move { withdrawn() > 0 },
+    )
+    .await;
+    let (pair_before, other_before) = (on_pair(), on_other());
+    forge_connected(&forger, OTHER, true).await;
+    forge_connected(&forger, PAIR, false).await;
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(on_other(), other_before, "asked BlueZ about the other pair");
+    assert_eq!(on_pair(), pair_before, "asked BlueZ about the pair");
+    assert_eq!(
+        fixture.aap_attempts(OTHER).await,
+        0,
+        "AAP to the other pair"
+    );
+    assert!(app.updates.borrow().is_connected(PAIR), "the link went");
 }

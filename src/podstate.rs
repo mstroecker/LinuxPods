@@ -804,8 +804,9 @@ impl Coordinator {
     /// Replaces the BlueZ alias map and broadcasts if anything changed.
     ///
     /// Names are display-only, so a snapshot is only worth sending when they
-    /// actually differ - attachment re-reads them on every connection event and
-    /// adapter change, and rebroadcasting an identical map would wake the UI,
+    /// actually differ - attachment re-reads them on every connection event
+    /// BlueZ confirms and every adapter change while BlueZ is on the bus, and
+    /// rebroadcasting an identical map would wake the UI,
     /// tray and attachment for nothing.
     pub(crate) async fn set_device_names(&self, names: HashMap<Address, String>) {
         let mut inner = self.inner.write().await;

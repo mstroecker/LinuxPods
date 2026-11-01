@@ -139,9 +139,15 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
   cannot check a well-known sender, and the connection watch's rule names no sender at
   all. A BlueZ signal counts only from the unique name the state was read from (the
   `GetManagedObjects` reply's sender), and `NameOwnerChanged` only from
-  `org.freedesktop.DBus`; the connection watch does not check yet (#132). Applied as they
-  came, an old bluetoothd's last `Powered`, or any local process's, left a phantom
-  adapter behind (#50).
+  `org.freedesktop.DBus`. Applied as they came, an old bluetoothd's last `Powered`, or
+  any local process's, left a phantom adapter behind (#50). A `Connected` change is only
+  a hint: attachment asks BlueZ for `Device1.Connected` and acts only if the answer
+  agrees - no answer reads as disconnected, which never attaches but does detach - and
+  `attach` reads it once more, last, before the supervisor starts. Attachment's
+  connection handling asks nothing while it knows BlueZ is off the bus, asks with
+  `NoAutoStart` for the moment before it knows, and makes no other call for an event
+  BlueZ did not confirm, so no such event starts bluetoothd. Taken as given, a forged
+  `Connected=true` would have a pair the user disconnected paged and reconnected (#132).
 - Signals whose order matters come from one match rule, one stream: zbus queues each
   subscription apart, and `select!` over several picks among ready ones at random.
   `adapter_changes` reads all of bluetoothd's that way; the fake BlueZ, reading a
@@ -261,8 +267,10 @@ next attempt never opens a second channel beside a pending one.
 
 **AAP only to a pair BlueZ reports connected.** An L2CAP connect pages the device and
 brings its ACL link up, so a retry to a pair the user has just disconnected would
-reconnect it. The supervisor asks `Device1.Connected` before every attempt but the first,
-and asks nothing while BlueZ is off the bus: under systemd the call starts it again.
+reconnect it. The supervisor asks `Device1.Connected` before every attempt but the first -
+`attach` starts it only on BlueZ's own word that the pair is connected, never a signal's,
+read last - and asks nothing while BlueZ is off the bus: under systemd a call starts it
+again.
 
 **Never hold the `inner` lock across a read or a send on the socket.** `AapLink::run`
 hands the link's client to the read loop and the command loop, and neither looks it up
