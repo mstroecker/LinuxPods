@@ -269,11 +269,15 @@ let keys = tokio::time::timeout(Duration::from_secs(5), async {
 ### Key Persistence
 
 Keys are device-specific and persistent:
-- **Same keys** for the lifetime of the AirPods pairing
+- The same keys come back on every connection. Re-pairing does not necessarily change
+  them: on 2026-11-01, an AirPods Pro 2 (USB-C) forgotten in GNOME Settings and paired
+  again with the same computer sent the same ENC_KEY and IRK as before. Whether
+  anything changes them - a reset, a pairing with another Apple account, more time -
+  is untested
 - Can be cached and reused
-- Request them on every connection anyway: re-pairing, from any of the user's devices,
-  regenerates them. A stale IRK resolves none of the pair's new addresses, and a stale
-  key fails suffix validation, both without a word
+- Request them on every connection anyway: should they change, a stale IRK resolves
+  none of the pair's new addresses and a stale key fails suffix validation, both
+  without a word. Unchanged keys cost nothing: they are not written again
 - Store securely (keyring, encrypted config file). LinuxPods keeps them in
   `~/.local/share/linuxpods/keys.json`, mode 0600: the ENC_KEY and, since format
   version 2, the IRK, as AAP sends it
@@ -295,9 +299,10 @@ key. A packet without a 16-byte ENC_KEY is rejected; one without a 16-byte IRK k
 the IRK stored, as long as the ENC_KEY is the one stored with it. The keys go into
 use at once, and are written to the keystore whenever the keys in memory differ from
 those last saved successfully - so a save that failed is tried again when the keys
-next arrive. A re-paired pair's new keys therefore arrive with the next connection,
-and a request that went unanswered is sent again by reconnecting. Run the app with
-the AirPods connected; keys it had not saved yet are logged as they are written:
+next arrive. If a pair's keys have changed, the new ones therefore arrive with the
+next connection, and a request that went unanswered is sent again by reconnecting. Run
+the app with the AirPods connected; keys it had not saved yet are logged as they are
+written:
 ```
 Stored the keys of <MAC>
 ```
@@ -375,10 +380,10 @@ Likely works with:
   upper nibble `0x0`, byte 4 `0x2D`) rejects correct decryptions on current models
 
 ### "Keys change after re-pairing"
-- Expected behavior
-- Keys are regenerated when AirPods are re-paired
-- Re-retrieve keys after pairing: the IRK changes too, so the old one resolves none
-  of the new addresses
+- Not a given: a pair forgotten and paired again kept its keys (see
+  [Key Persistence](#key-persistence))
+- If the keys do change, reconnect over AAP: the app asks again on every connection,
+  and an old IRK resolves none of the pair's new addresses
 
 ## References
 

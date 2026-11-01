@@ -195,9 +195,9 @@ them for their keys - the IRK and the encryption key - and writes them to
 `~/.local/share/linuxpods/keys.json`,
 which is what identifies them over BLE: until then the app has no way to tell their
 advertisements from any other pair's, and shows nothing for them there. From then on the
-app reads exact levels even when the AirPods are connected elsewhere. Asking again on
-each connection picks up the new keys after a re-pair: reconnecting the AirPods is all
-it takes.
+app reads exact levels even when the AirPods are connected elsewhere. Should the keys
+ever change, asking again on each connection picks up the new ones: reconnecting the
+AirPods is all it takes.
 
 ## How it works
 
