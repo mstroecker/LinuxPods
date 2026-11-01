@@ -26,6 +26,7 @@
 //! | `Select(s widget, u position)` | Selects a dropdown's item through `set_selected`, so `selected-notify` fires as for a user |
 //! | `Screenshot(s widget) → s path` | Draws the widget to a PNG in `$XDG_RUNTIME_DIR/linuxpods-harness/` |
 //! | `Settle(u timeout_ms)` | Returns once the window has taken in the latest snapshot, and what was opened is on screen |
+//! | `Notifications() → s` | Every notification sent and withdrawn so far, as JSON |
 //!
 //! The menu's entries are actions, which GApplication already serves on
 //! `org.gtk.Actions`: `app.quit` at the application's path, and on Wayland and
@@ -132,6 +133,18 @@
 //! they are when called. A popover is drawn on a surface of its own, so a
 //! screenshot of the window leaves it out; take one of the popover itself.
 //!
+//! ## Notifications
+//!
+//! `Notifications` returns a JSON array of what the app has done with its
+//! notifications since automation was registered, oldest first. A
+//! notification sent is `{"action": "send", "id", "title", "body",
+//! "priority"}`, `priority` being `normal` or `high`; one withdrawn is
+//! `{"action": "withdraw", "id"}`. Each pair's low battery notification has
+//! the ID `low-battery-<MAC>`, and the last entry with it says whether it is
+//! on show. Recorded as the app hands each one to GIO, whether or not a
+//! notification server is there to show it: the fake world's session bus
+//! has none.
+//!
 //! ## Errors
 //!
 //! Under `io.github.mstroecker.LinuxPods.Automation1.Error.`: `NotFound`;
@@ -149,6 +162,8 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
 use serde::Serialize;
+
+use crate::notify::Action;
 
 const INTERFACE_NAME: &str = "io.github.mstroecker.LinuxPods.Automation1";
 const OBJECT_PATH: &str = "/io/github/mstroecker/LinuxPods/Automation";
@@ -181,6 +196,9 @@ const INTERFACE_XML: &str = r#"<node>
     <method name="Settle">
       <arg name="timeout_ms" type="u" direction="in"/>
     </method>
+    <method name="Notifications">
+      <arg name="json" type="s" direction="out"/>
+    </method>
   </interface>
 </node>"#;
 
@@ -204,6 +222,10 @@ thread_local! {
     /// Whether a snapshot is waiting for the window's render loop, as
     /// `window::activate` reports it. Empty until the window is built.
     static SNAPSHOT_WAITING: RefCell<Option<Box<dyn Fn() -> bool>>> = const { RefCell::new(None) };
+
+    /// What `Notifications` returns. `None` until the interface is served, so
+    /// that a harness build serving none records nothing.
+    static NOTIFICATIONS: RefCell<Option<Vec<Notified>>> = const { RefCell::new(None) };
 }
 
 /// Registers the interface on the application's own D-Bus connection, when
@@ -230,7 +252,10 @@ pub fn register(app: &impl IsA<gio::Application>) {
         .invoke(|_, _, call, invocation| dispatch(call, invocation))
         .build();
     match registered {
-        Ok(_) => tracing::info!("UI automation serving {INTERFACE_NAME} at {OBJECT_PATH}"),
+        Ok(_) => {
+            tracing::info!("UI automation serving {INTERFACE_NAME} at {OBJECT_PATH}");
+            NOTIFICATIONS.with_borrow_mut(|sent| *sent = Some(Vec::new()));
+        }
         Err(e) => {
             tracing::warn!("failed to register UI automation: {e}");
             return;
@@ -257,6 +282,54 @@ pub(super) fn watch_render_loop(waiting: impl Fn() -> bool + 'static) {
     SNAPSHOT_WAITING.with_borrow_mut(|slot| *slot = Some(Box::new(waiting)));
 }
 
+/// Records what was done with a notification, for `Notifications`. Called by
+/// `notifications::deliver` as it hands each one to GIO; records nothing
+/// unless the interface is served.
+pub(super) fn record_notification(action: &Action) {
+    NOTIFICATIONS.with_borrow_mut(|sent| {
+        if let Some(sent) = sent {
+            sent.push(Notified::from(action));
+        }
+    });
+}
+
+/// A notification sent or withdrawn, as `Notifications` lists it - see the
+/// module docs.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+enum Notified {
+    Send {
+        id: String,
+        title: String,
+        body: String,
+        priority: &'static str,
+    },
+    Withdraw {
+        id: String,
+    },
+}
+
+impl From<&Action> for Notified {
+    fn from(action: &Action) -> Self {
+        match action {
+            Action::Show(notice) => Notified::Send {
+                id: notice.id.clone(),
+                title: notice.title.clone(),
+                body: notice.body.clone(),
+                priority: if notice.critical { "high" } else { "normal" },
+            },
+            Action::Withdraw(id) => Notified::Withdraw { id: id.clone() },
+        }
+    }
+}
+
+fn notifications() -> Result<String, Error> {
+    NOTIFICATIONS.with_borrow(|sent| {
+        serde_json::to_string(sent.as_deref().unwrap_or_default())
+            .map_err(|e| Error::Failed(e.to_string()))
+    })
+}
+
 /// A method call, parsed from its arguments.
 #[derive(Debug, PartialEq)]
 enum Call {
@@ -266,6 +339,7 @@ enum Call {
     Select(String, u32),
     Screenshot(String),
     Settle(u32),
+    Notifications,
 }
 
 impl gio::prelude::DBusMethodCall for Call {
@@ -288,6 +362,7 @@ impl gio::prelude::DBusMethodCall for Call {
                 .map(|(widget, position)| Call::Select(widget, position)),
             "Screenshot" => params.get().map(|(widget,)| Call::Screenshot(widget)),
             "Settle" => params.get().map(|(timeout_ms,)| Call::Settle(timeout_ms)),
+            "Notifications" => Some(Call::Notifications),
             _ => {
                 return Err(glib::Error::new(
                     gio::DBusError::UnknownMethod,
@@ -309,6 +384,10 @@ fn dispatch(call: Call, invocation: gio::DBusMethodInvocation) {
     tracing::debug!("automation: {call:?}");
     match call {
         Call::Tree => reply(invocation, tree().map(|json| Some(json.to_variant()))),
+        Call::Notifications => reply(
+            invocation,
+            notifications().map(|json| Some(json.to_variant())),
+        ),
         Call::Click(target) => reply(invocation, click(&target).map(|()| None)),
         Call::SetActive(target, active) => {
             reply(invocation, set_active(&target, active).map(|()| None));
@@ -1008,6 +1087,7 @@ mod tests {
             "Select",
             "Screenshot",
             "Settle",
+            "Notifications",
         ] {
             assert!(
                 interface.lookup_method(method).is_some(),
@@ -1035,6 +1115,10 @@ mod tests {
             Call::parse_call(OBJECT_PATH, Some(INTERFACE_NAME), method, params)
         };
         assert_eq!(parse("Tree", ().to_variant()).unwrap(), Call::Tree);
+        assert_eq!(
+            parse("Notifications", ().to_variant()).unwrap(),
+            Call::Notifications
+        );
         assert_eq!(
             parse("SetActive", ("noise-off", true).to_variant()).unwrap(),
             Call::SetActive("noise-off".into(), true)
@@ -1146,6 +1230,51 @@ mod tests {
         let level = serde_json::to_value(&level).unwrap();
         assert_eq!(level["value"], json!(0.5));
         assert_eq!(level["label"], json!("50%"));
+    }
+
+    /// Nothing is recorded until the interface is served; from then on, each
+    /// notification as the app handed it to GIO. The thread-local is per test
+    /// thread, so this test has it to itself.
+    #[test]
+    fn notifications_are_recorded_once_served() {
+        let notice = crate::notify::Notice {
+            mac: bluer::Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x01]),
+            id: "low-battery-00:00:5E:00:53:01".into(),
+            title: "AirPods battery low".into(),
+            body: "Left 9%, Right 12%".into(),
+            critical: false,
+        };
+        record_notification(&Action::Show(notice.clone()));
+        assert_eq!(notifications().unwrap(), "[]");
+
+        NOTIFICATIONS.with_borrow_mut(|sent| *sent = Some(Vec::new()));
+        record_notification(&Action::Show(notice.clone()));
+        record_notification(&Action::Show(crate::notify::Notice {
+            critical: true,
+            ..notice
+        }));
+        record_notification(&Action::Withdraw("low-battery-00:00:5E:00:53:01".into()));
+        let json: serde_json::Value = serde_json::from_str(&notifications().unwrap()).unwrap();
+        assert_eq!(
+            json,
+            json!([
+                {
+                    "action": "send",
+                    "id": "low-battery-00:00:5E:00:53:01",
+                    "title": "AirPods battery low",
+                    "body": "Left 9%, Right 12%",
+                    "priority": "normal",
+                },
+                {
+                    "action": "send",
+                    "id": "low-battery-00:00:5E:00:53:01",
+                    "title": "AirPods battery low",
+                    "body": "Left 9%, Right 12%",
+                    "priority": "high",
+                },
+                { "action": "withdraw", "id": "low-battery-00:00:5E:00:53:01" },
+            ])
+        );
     }
 
     /// Off screen goes first: a user could not even see whether the widget is
