@@ -10,9 +10,9 @@
 //!   client and needs the adapter powered, and a `BatteryProviderManager1` of
 //!   its own
 //! - a `Device1` for each paired pair, under the adapter it is paired with, at
-//!   its real address: `Address`, `Adapter`, `Alias`, `Connected`, `Paired`
-//!   and `UUIDs`, the AirPods service among them unless
-//!   [`FakeBluez::set_airpods_service`] took it out
+//!   its real address: `Address`, `Adapter`, `Alias`, `Connected`,
+//!   `ServicesResolved`, `Paired` and `UUIDs`, the AirPods service among them
+//!   unless [`FakeBluez::set_airpods_service`] took it out
 //! - a `Device1` for each random address an adapter heard an advertisement
 //!   from, under that adapter, with its `ManufacturerData`
 //! - `Battery1` on a device once a registered provider gives it a level - the
@@ -130,6 +130,11 @@ use crate::harness::connect_serving;
 /// stops hearing it: `TemporaryTimeout` in its main.conf, 30 seconds unless
 /// set otherwise.
 pub const TEMPORARY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long after `Connected` a paired device's `ServicesResolved` follows,
+/// by default: 4.1 s and 4.5 s in the #71 captures. The real value, as
+/// nothing in the app waits on it - see [`FakeBluez::set_services_delay`].
+pub const SERVICES_RESOLVED: Duration = Duration::from_secs(4);
 
 /// The services a pair of AirPods lists once paired: audio sink, remote
 /// control target and controller, hands-free, PnP information, and the one
@@ -256,6 +261,11 @@ pub struct FakeBluez {
     /// Held while a device's `Battery1` is brought in line with its battery,
     /// so two updates cannot interleave.
     exports: Arc<tokio::sync::Mutex<()>>,
+    /// Held while a restart carries the paired devices over to its new
+    /// connection, and while a device's services are resolved: so a
+    /// resolve lands either on the object carried over before it is read, or
+    /// on its copy, never on one left behind.
+    carrying: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -294,12 +304,20 @@ struct State {
     ignored: Vec<(String, OwnedObjectPath)>,
     /// The device of every battery a provider withdrew, in the order it did.
     withdrawn: Vec<Address>,
+    /// How long after a connect services are resolved; `None` for
+    /// [`SERVICES_RESOLVED`].
+    services_delay: Option<Duration>,
 }
 
 /// A paired device's pairing: the adapter it is with, and its name.
 struct Pairing {
     adapter: String,
     alias: String,
+    /// How many times it has connected, so that services resolved late are
+    /// resolved for the connection they were for. Kept here, as the
+    /// pairing is, through its object going and coming with its adapter
+    /// and through a restart.
+    connections: u64,
 }
 
 /// A battery provider: the adapter whose manager took it, who registered it,
@@ -430,6 +448,7 @@ impl FakeBluez {
             conn: Arc::new(Mutex::new(conn.clone())),
             state: Arc::default(),
             exports: Arc::default(),
+            carrying: Arc::default(),
         };
         bluez.serve_on(&conn).await?;
         Ok(bluez)
@@ -691,7 +710,8 @@ impl FakeBluez {
                 .collect();
             (adapters, paired)
         };
-        // As the old one left them.
+        // As the old one left them, none resolving its services meanwhile.
+        let carrying = self.carrying.lock().await;
         let mut devices = Vec::new();
         for (adapter, address) in paired {
             let path = device_path(&adapter, address);
@@ -707,6 +727,7 @@ impl FakeBluez {
                     adapter: device.adapter.clone(),
                     alias: device.alias.clone(),
                     connected: device.connected,
+                    services_resolved: device.services_resolved,
                     airpods_service: device.airpods_service,
                 },
             ));
@@ -719,6 +740,7 @@ impl FakeBluez {
             conn.object_server().at(path, device).await?;
         }
         *self.conn.lock().unwrap_or_else(PoisonError::into_inner) = conn;
+        drop(carrying);
         self.publish().await
     }
 
@@ -782,6 +804,7 @@ impl FakeBluez {
             let pairing = Pairing {
                 adapter: adapter.to_string(),
                 alias: alias.to_string(),
+                connections: 0,
             };
             state.paired.insert(address, pairing);
         }
@@ -796,6 +819,7 @@ impl FakeBluez {
             adapter: adapter_object(adapter),
             alias,
             connected: false,
+            services_resolved: false,
             airpods_service: true,
         };
         self.conn()
@@ -808,6 +832,11 @@ impl FakeBluez {
     /// Connects or disconnects a paired device. A change is signaled, as
     /// bluetoothd signals it; setting what is already set signals nothing.
     /// Nothing connects on an adapter that is off.
+    ///
+    /// As in the #71 captures, a connection has its services resolved a while
+    /// after `Connected=true` - see [`FakeBluez::set_services_delay`] - and a
+    /// disconnect signals `ServicesResolved=false` just before
+    /// `Connected=false`, if it got that far.
     pub async fn set_connected(&self, address: Address, connected: bool) -> Result<()> {
         let path = {
             let state = self.state();
@@ -827,7 +856,8 @@ impl FakeBluez {
     }
 
     /// Sets a paired device's `Connected` on the adapter called `adapter`,
-    /// signaling a change.
+    /// signaling a change, and its `ServicesResolved` as
+    /// [`FakeBluez::set_connected`] says.
     async fn signal_connected(
         &self,
         adapter: &str,
@@ -841,11 +871,72 @@ impl FakeBluez {
             .await
             .with_context(|| format!("no paired device {address}"))?;
         let mut device = iface.get_mut().await;
-        if device.connected != connected {
-            device.connected = connected;
-            device.connected_changed(iface.signal_emitter()).await?;
+        if device.connected == connected {
+            return Ok(());
+        }
+        let emitter = iface.signal_emitter();
+        if !connected && device.services_resolved {
+            device.services_resolved = false;
+            device.services_resolved_changed(emitter).await?;
+        }
+        device.connected = connected;
+        device.connected_changed(emitter).await?;
+        if connected {
+            let (connection, delay) = {
+                let mut state = self.state();
+                let delay = state.services_delay.unwrap_or(SERVICES_RESOLVED);
+                let pairing = state
+                    .paired
+                    .get_mut(&address)
+                    .with_context(|| format!("no paired device {address}"))?;
+                pairing.connections += 1;
+                (pairing.connections, delay)
+            };
+            let bluez = self.clone();
+            let adapter = adapter.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                bluez.resolve_services(&adapter, address, connection).await;
+            });
         }
         Ok(())
+    }
+
+    /// Resolves a paired device's services, if it is still on the connection
+    /// counted `connection`, signaling `ServicesResolved`.
+    async fn resolve_services(&self, adapter: &str, address: Address, connection: u64) {
+        let _carrying = self.carrying.lock().await;
+        let current = self.state().paired.get(&address).map(|p| p.connections);
+        if current != Some(connection) {
+            return;
+        }
+        let path = device_path(adapter, address);
+        let conn = self.conn();
+        // Gone with its adapter in the meantime.
+        let Ok(iface) = conn
+            .object_server()
+            .interface::<_, PairedDevice>(path)
+            .await
+        else {
+            return;
+        };
+        let mut device = iface.get_mut().await;
+        if !device.connected || device.services_resolved {
+            return;
+        }
+        device.services_resolved = true;
+        if let Err(e) = device
+            .services_resolved_changed(iface.signal_emitter())
+            .await
+        {
+            tracing::warn!("fake BlueZ: failed to resolve the services of {address}: {e}");
+        }
+    }
+
+    /// Sets how long after a connect a paired device's services are resolved,
+    /// for the connections from here on: [`SERVICES_RESOLVED`] unless set.
+    pub fn set_services_delay(&self, delay: Duration) {
+        self.state().services_delay = Some(delay);
     }
 
     /// Lists the AirPods service among a paired device's services, or takes it
@@ -1523,6 +1614,7 @@ struct PairedDevice {
     adapter: OwnedObjectPath,
     alias: String,
     connected: bool,
+    services_resolved: bool,
     /// Whether `UUIDs` lists the AirPods service.
     airpods_service: bool,
 }
@@ -1572,6 +1664,11 @@ impl PairedDevice {
     #[zbus(property)]
     fn connected(&self) -> bool {
         self.connected
+    }
+
+    #[zbus(property)]
+    fn services_resolved(&self) -> bool {
+        self.services_resolved
     }
 
     #[zbus(property, name = "UUIDs")]
@@ -2037,6 +2134,108 @@ mod tests {
             assert_eq!(event.device_path, device_path(ADAPTER, PAIR).as_str());
             assert_eq!(event.connected, Some(connected));
         }
+    }
+
+    /// A connection has its services resolved a while after `Connected=true`,
+    /// and they go just before `Connected=false`, each in a signal of its own,
+    /// as in the #71 captures. A connection that goes before its services are
+    /// resolved never has them: the next one waits its own delay.
+    /// The changes the pair's device signals, each one property and its new
+    /// value, from a connection to the bus at `bus`.
+    async fn device_changes(bus: &PrivateBus) -> impl futures_util::Stream<Item = (String, bool)> {
+        let client = bus.connect().await.unwrap();
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface("org.freedesktop.DBus.Properties")
+            .unwrap()
+            .member("PropertiesChanged")
+            .unwrap()
+            .path(device_path(ADAPTER, PAIR))
+            .unwrap()
+            .build();
+        let signals = MessageStream::for_match_rule(rule, &client, None)
+            .await
+            .unwrap();
+        signals.map(|msg| {
+            let (_, props, _) = msg
+                .unwrap()
+                .body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                .unwrap();
+            assert_eq!(props.len(), 1, "{props:?}");
+            let (name, value) = props.into_iter().next().unwrap();
+            (name, bool::try_from(value).unwrap())
+        })
+    }
+
+    fn changed(name: &str, value: bool) -> (String, bool) {
+        (name.to_string(), value)
+    }
+
+    /// A connection has its services resolved a while after `Connected=true`,
+    /// and they go just before `Connected=false`, each in a signal of its own,
+    /// as in the #71 captures. A connection that goes before its services are
+    /// resolved never has them: the next one waits its own delay, longer
+    /// than the first's, so that a timer resolving the wrong connection would
+    /// show by coming first.
+    #[tokio::test]
+    async fn services_are_resolved_a_while_after_a_connect() {
+        const DELAY: Duration = Duration::from_millis(100);
+        // Long enough that the quick connection is gone before it is over.
+        const QUICK: Duration = Duration::from_secs(1);
+        const LAST: Duration = Duration::from_millis(1500);
+        let (bus, bluez) = served().await;
+        bluez.set_services_delay(DELAY);
+        let changes = device_changes(&bus).await;
+        tokio::pin!(changes);
+        let mut next = async || timeout(TIMEOUT, changes.next()).await.unwrap().unwrap();
+
+        let connected = Instant::now();
+        bluez.set_connected(PAIR, true).await.unwrap();
+        assert_eq!(next().await, changed("Connected", true));
+        assert_eq!(next().await, changed("ServicesResolved", true));
+        assert!(connected.elapsed() >= DELAY);
+        bluez.set_connected(PAIR, false).await.unwrap();
+        assert_eq!(next().await, changed("ServicesResolved", false));
+        assert_eq!(next().await, changed("Connected", false));
+
+        bluez.set_services_delay(QUICK);
+        bluez.set_connected(PAIR, true).await.unwrap();
+        bluez.set_connected(PAIR, false).await.unwrap();
+        bluez.set_services_delay(LAST);
+        let connected = Instant::now();
+        bluez.set_connected(PAIR, true).await.unwrap();
+        for value in [true, false, true] {
+            assert_eq!(next().await, changed("Connected", value));
+        }
+        assert_eq!(next().await, changed("ServicesResolved", true));
+        assert!(connected.elapsed() >= LAST, "the quick connection's");
+    }
+
+    /// A connection's timer outlives its device's object going with an
+    /// unplugged adapter and coming back with it, and resolves nothing for
+    /// the next connection: that one waits its own, longer delay.
+    #[tokio::test]
+    async fn services_resolve_for_their_own_connection_across_an_unplug() {
+        const FIRST: Duration = Duration::from_secs(1);
+        const NEXT: Duration = Duration::from_millis(1500);
+        let (bus, bluez) = served().await;
+        let changes = device_changes(&bus).await;
+        tokio::pin!(changes);
+        let mut next = async || timeout(TIMEOUT, changes.next()).await.unwrap().unwrap();
+
+        bluez.set_services_delay(FIRST);
+        bluez.set_connected(PAIR, true).await.unwrap();
+        bluez.remove_adapter(ADAPTER).await.unwrap();
+        bluez.add_adapter(ADAPTER, true).await.unwrap();
+        bluez.set_services_delay(NEXT);
+        let connected = Instant::now();
+        bluez.set_connected(PAIR, true).await.unwrap();
+        for value in [true, false, true] {
+            assert_eq!(next().await, changed("Connected", value));
+        }
+        assert_eq!(next().await, changed("ServicesResolved", true));
+        assert!(connected.elapsed() >= NEXT, "the first connection's");
     }
 
     /// Without the AirPods service a pair is not AirPods to the app, connected
