@@ -3,10 +3,10 @@
 //! GTK owns the main thread; a multi-threaded tokio runtime carries the BLE, AAP
 //! and D-Bus work, and the two meet over channels: snapshots come to the UI on a
 //! watch channel, commands go to the AirPods on their link's queue - see
-//! `Coordinator::command` - and the tray's window commands to the GTK main
-//! context on an async channel.
+//! `Coordinator::command` - and the tray's window commands and the low battery
+//! notifications to the GTK main context on async channels.
 
-use linuxpods::{APP_ID, attachment, ble, indicator, podstate, ui};
+use linuxpods::{APP_ID, attachment, ble, indicator, notify, podstate, ui};
 
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
@@ -97,13 +97,23 @@ struct Primary {
 impl Primary {
     /// Starts the background workers. Between them they reach well outside the
     /// process - BLE discovery, the BlueZ battery provider, an AAP link to every
-    /// connected pair, the tray icon - so there must only ever be one set.
-    fn start(coordinator: Arc<Coordinator>, runtime: tokio::runtime::Handle) -> Self {
+    /// connected pair, the tray icon, the low battery notifications - so there
+    /// must only ever be one set.
+    fn start(
+        app: &adw::Application,
+        coordinator: Arc<Coordinator>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
         let (window_tx, window_rx) = async_channel::unbounded::<WindowCommand>();
 
         runtime.spawn(ble_task(coordinator.clone()));
         runtime.spawn(attachment::run(coordinator.clone()));
         runtime.spawn(expiry_task(coordinator.clone()));
+        // Worked out on the runtime, beside the tray, and sent from the main
+        // context, where the application is.
+        let (notices_tx, notices_rx) = async_channel::unbounded();
+        runtime.spawn(notify::run(coordinator.clone(), notices_tx));
+        ui::deliver_notifications(app, notices_rx);
         runtime.spawn(tray_task(
             coordinator.clone(),
             Arc::new(AppActions {
@@ -195,7 +205,7 @@ fn main() -> glib::ExitCode {
 
     let started = primary.clone();
     let handle = runtime.handle().clone();
-    app.connect_startup(move |_| {
+    app.connect_startup(move |app| {
         // The window's artwork and the About dialog's icon load from the bundle.
         ui::register_resources();
 
@@ -208,7 +218,7 @@ fn main() -> glib::ExitCode {
             }
         };
         // Startup runs once, so the cell is still empty.
-        let _ = started.set(Primary::start(coordinator, handle.clone()));
+        let _ = started.set(Primary::start(app, coordinator, handle.clone()));
     });
 
     let launched = primary.clone();

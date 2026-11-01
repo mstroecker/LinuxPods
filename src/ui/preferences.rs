@@ -14,15 +14,10 @@ use crate::podstate::{PodState, Snapshot};
 pub(super) fn create_preferences_dialog() -> (adw::PreferencesDialog, DeviceRows) {
     let page = adw::PreferencesPage::new();
 
-    // Neither setting exists yet: the app always connects, and nothing watches
-    // for a low battery.
+    // Auto-connect does not exist yet: the app always connects.
     let settings_group = adw::PreferencesGroup::builder().title("General").build();
-    for (id, title) in [
-        ("auto-connect", "Auto-connect"),
-        ("battery-notifications", "Battery notifications"),
-    ] {
-        settings_group.add(&unavailable_row(id, title));
-    }
+    settings_group.add(&unavailable_row("auto-connect", "Auto-connect"));
+    settings_group.add(&battery_notifications_row());
     page.add(&settings_group);
 
     let dev_group = adw::PreferencesGroup::builder()
@@ -42,6 +37,27 @@ pub(super) fn create_preferences_dialog() -> (adw::PreferencesDialog, DeviceRows
         shown: RefCell::default(),
     };
     (dialog, devices)
+}
+
+/// The switch for low battery notifications, bound to the application action
+/// that `notifications::deliver` adds: it shows the action's state, and turning
+/// it turns that. On whenever the app starts, as nothing saves it (#146).
+fn battery_notifications_row() -> adw::ActionRow {
+    let switch = gtk::Switch::builder()
+        .name("battery-notifications")
+        .action_name(format!("app.{}", super::notifications::ACTION))
+        .valign(gtk::Align::Center)
+        .build();
+    let row = adw::ActionRow::builder()
+        .title("Battery notifications")
+        .subtitle(format!(
+            "Warn when a battery is at {}% or below",
+            crate::notify::LOW
+        ))
+        .activatable_widget(&switch)
+        .build();
+    row.add_suffix(&switch);
+    row
 }
 
 /// The Development group: a row per device, by real MAC.

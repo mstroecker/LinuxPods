@@ -1,10 +1,13 @@
 //! GTK4/libadwaita interface.
 //!
 //! Updates arrive from the coordinator over a watch channel consumed on the GTK
-//! main context. That is the only path into the UI's state: GTK types are
-//! !Send, so a background task can never touch a widget directly. Commands go
+//! main context. That is the only path into the device state the UI shows:
+//! GTK types are !Send, so a background task can never touch a widget
+//! directly. Commands go
 //! out with `Coordinator::command`, and each one's result comes back to the main
-//! context too, where a failure goes to a toast.
+//! context too, where a failure goes to a toast. Low battery notifications
+//! are worked out from the same snapshots on the tokio side, by
+//! `crate::notify`, and come to the main context to be sent.
 //!
 //! The controls, and the labels a test reads, carry an ID set with
 //! `set_widget_name`, for the test harness (#74) to find them by; `automation`
@@ -21,11 +24,13 @@ use gtk::gio;
 #[cfg(feature = "harness")]
 mod automation;
 mod control;
+mod notifications;
 mod preferences;
 mod window;
 
 #[cfg(feature = "harness")]
 pub use automation::register as register_automation;
+pub use notifications::deliver as deliver_notifications;
 pub use window::activate;
 
 /// Anything heard within this long counts as advertising now.
@@ -54,8 +59,9 @@ fn last_seen_text(age: Duration) -> String {
 /// A setting that is planned but not built, in Preferences and on the Control
 /// page. Shown so the plan is visible, but switched off and grayed out: it
 /// neither claims a state nor takes a click, and nothing listens to the switch.
-/// Once a feature lands, its state comes with the snapshot and a change goes
-/// out as a command, as noise control's does.
+/// Once it lands, a device feature's state comes with the snapshot and a
+/// change goes out as a command, as noise control's does; an app setting
+/// becomes an app action, as Battery notifications did.
 ///
 /// `id` names the switch, so that a test can find it and see it refuse.
 fn unavailable_row(id: &str, title: &str) -> adw::ActionRow {
