@@ -275,7 +275,18 @@ impl World {
         self.set_connected(mac, true).await
     }
 
-    /// Disconnects a pair, and with it the AAP connection.
+    /// Disconnects a pair, and with it the AAP connection - this host's link
+    /// going, or another host taking the pair over. On the hardware AAP dies
+    /// with the link, in the same millisecond as BlueZ's `Connected=false`
+    /// and in either order: after it on a local disconnect, ahead of it when
+    /// another host took the pair over (#71). The fake picks BlueZ first, then
+    /// the AAP connection closes.
+    ///
+    /// The hardware's AAP ends with a read error, `Connection reset by peer`.
+    /// Over the fake's Unix socket the app reads a close instead: a Unix
+    /// socket resets its peer only when it closes with something of the
+    /// peer's unread, and the app sends nothing unasked. The app takes the
+    /// two alike, as the link gone (`aap::client::is_link_gone`).
     pub async fn disconnect(&self, mac: Address) -> Result<()> {
         self.set_connected(mac, false).await
     }
@@ -289,10 +300,11 @@ impl World {
             pair.pods.set_connected(true);
             self.flush(mac, pair, self.now()).await;
         } else {
+            // BlueZ first, then AAP: see `World::disconnect`.
+            self.0.bluez.set_connected(mac, false).await?;
             pair.pods.set_connected(false);
             // Disconnected, the model hangs up an open connection.
             self.flush(mac, pair, self.now()).await;
-            self.0.bluez.set_connected(mac, false).await?;
         }
         tracing::info!(
             "fake world: {mac} {}",
@@ -317,8 +329,10 @@ impl World {
     /// lose their link, and AAP with it, and stay in range.
     pub async fn remove_adapter(&self, name: &str) -> Result<()> {
         let mut pairs = self.0.pairs.lock().await;
-        self.drop_links(&mut pairs, name).await;
+        // BlueZ first, then AAP, as on a disconnect.
         self.0.bluez.remove_adapter(name).await?;
+        let paired = self.0.bluez.paired_with(name);
+        self.drop_links(&mut pairs, &paired).await;
         tracing::info!("fake world: adapter {name} unplugged");
         Ok(())
     }
@@ -328,10 +342,12 @@ impl World {
     /// disconnected until connected.
     pub async fn set_powered(&self, name: &str, powered: bool) -> Result<()> {
         let mut pairs = self.0.pairs.lock().await;
-        if !powered {
-            self.drop_links(&mut pairs, name).await;
-        }
+        // BlueZ first, then AAP, as on a disconnect.
         self.0.bluez.set_powered(name, powered).await?;
+        if !powered {
+            let paired = self.0.bluez.paired_with(name);
+            self.drop_links(&mut pairs, &paired).await;
+        }
         tracing::debug!("fake world: adapter {name} {}", power(powered));
         Ok(())
     }
@@ -345,11 +361,11 @@ impl World {
         Ok(())
     }
 
-    /// Disconnects the models of the pairs on the adapter called `adapter`,
-    /// which hangs up their AAP connections. BlueZ is the caller's to tell.
-    async fn drop_links(&self, pairs: &mut BTreeMap<Address, Pair>, adapter: &str) {
+    /// Disconnects the models of the pairs at `macs`, which hangs up their
+    /// AAP connections. BlueZ is the caller's to tell, first.
+    async fn drop_links(&self, pairs: &mut BTreeMap<Address, Pair>, macs: &[Address]) {
         let now = self.now();
-        for mac in self.0.bluez.paired_with(adapter) {
+        for &mac in macs {
             if let Some(pair) = pairs.get_mut(&mac)
                 && pair.pods.is_connected()
             {
@@ -939,7 +955,9 @@ mod tests {
         assert!(world.hang_up(MAC).await.is_err(), "nothing left to hang up");
     }
 
-    /// Disconnecting takes the AAP connection along, and BlueZ says so.
+    /// Disconnecting takes the AAP connection along, and BlueZ says so first:
+    /// once the connection has closed, BlueZ has the pair disconnected, though
+    /// the disconnect is not done.
     #[tokio::test]
     async fn disconnecting_closes_the_connection() {
         let (bus, world, dir) = world().await;
@@ -947,9 +965,13 @@ mod tests {
         let client = aap(&dir, MAC).await;
         handshake(&client).await;
 
-        world.disconnect(MAC).await.unwrap();
+        let disconnecting = tokio::spawn({
+            let world = world.clone();
+            async move { world.disconnect(MAC).await }
+        });
         assert!(next_packet(&client).await.is_err());
-        assert!(!bluez_connected(&bus, MAC).await);
+        assert!(!bluez_connected(&bus, MAC).await, "closed ahead of BlueZ");
+        disconnecting.await.unwrap().unwrap();
     }
 
     /// Both pods in the closed case: the pair drops its link, and BlueZ says
