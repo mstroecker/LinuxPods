@@ -2143,8 +2143,9 @@ async fn a_flood_while_a_pair_attaches_does_not_stall_attachment() {
     let mut app = fixture.start_app().await;
 
     // Repeated from one address, every advertisement after an advertiser's
-    // first is a `PropertiesChanged`, the one signal the connection watch
-    // subscribes to: ten advertisers bring it 100 before the second pair's
+    // first is a `PropertiesChanged` - of `RSSI` alone, as the payload is the
+    // same, as bluetoothd signals a repeat - the one signal the connection
+    // watch subscribes to: ten advertisers bring it 100 before the second pair's
     // connection and 200 after, each more than zbus's 64-message queue holds.
     // Few addresses, so that few signals are `InterfacesAdded`, which only the
     // scanner reads.

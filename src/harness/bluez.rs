@@ -63,18 +63,24 @@
 //!
 //! # Advertisements
 //!
-//! Signaled as bluetoothd's source has it, until the captures of #71 confirm
-//! or correct that:
+//! Signaled as bluetoothd signals them in the #71 captures, which agree with
+//! its source (`btd_adapter_device_found` in `src/adapter.c`):
 //!
 //! - An address an adapter hears for the first time becomes a device object
 //!   under that adapter, announced by `InterfacesAdded` with its properties,
-//!   `ManufacturerData` among them. bluetoothd fills the object in before it
-//!   announces it, so no `PropertiesChanged` follows for that first
+//!   `ManufacturerData` and `RSSI` among them. bluetoothd fills the object in
+//!   before it announces it, so no `PropertiesChanged` follows for that first
 //!   advertisement.
-//! - Each later advertisement from the address is a `PropertiesChanged` of
-//!   `ManufacturerData` on `org.bluez.Device1`.
+//! - Each later advertisement from the address is one `PropertiesChanged` on
+//!   `org.bluez.Device1`: `RSSI` every time, changed or not, and
+//!   `ManufacturerData` in the same signal only when its bytes changed. Real
+//!   AirPods repeat a payload for hundreds of advertisements, so most of
+//!   what they bring is `RSSI` alone - 95% of the signals in the first
+//!   capture - and every one of them reaches whoever subscribes to
+//!   `PropertiesChanged`, attachment's connection watch among them.
 //! - An address not heard for [`TEMPORARY_TIMEOUT`] goes with
-//!   `InterfacesRemoved`.
+//!   `InterfacesRemoved`: 29.8-30.7 s after its last advertisement in the
+//!   captures, and an address heard again after that is announced afresh.
 //!
 //! An adapter hears advertisements only while some client has discovery on
 //! there, as it hears them only while it scans. Every adapter that does hears
@@ -101,6 +107,7 @@
 //! all - or if another provider got there first. A client that leaves the bus
 //! takes its providers' batteries along, and its discovery stops.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -110,7 +117,7 @@ use bluer::Address;
 use futures_util::StreamExt;
 use tokio::task::AbortHandle;
 use zbus::message::Header;
-use zbus::names::{BusName, OwnedUniqueName};
+use zbus::names::{BusName, InterfaceName, OwnedUniqueName};
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, MatchRule, MessageStream, interface};
@@ -136,8 +143,11 @@ const PAIR_UUIDS: [&str; 6] = [
     AIRPODS_UUID,
 ];
 
-/// The signal strength every advertisement arrives at. Nothing reads it.
+/// The signal strength every advertisement arrives at. Nothing reads it, but
+/// every advertisement signals it.
 const RSSI: i16 = -60;
+
+const DEVICE_INTERFACE: &str = "org.bluez.Device1";
 
 const PROVIDER_INTERFACE: &str = "org.bluez.BatteryProvider1";
 
@@ -931,8 +941,8 @@ impl FakeBluez {
     }
 
     /// Signals what the adapter called `adapter` heard from `address`: the
-    /// device it makes of a new address, or the change to one it heard
-    /// before.
+    /// device it makes of a new address, or, for one it heard before, its
+    /// `RSSI` and whatever else changed - see the module docs.
     async fn heard(
         &self,
         adapter: &str,
@@ -955,10 +965,21 @@ impl FakeBluez {
         match server.interface::<_, Advertiser>(&path).await {
             Ok(iface) => {
                 let mut advertiser = iface.get_mut().await;
-                advertiser.apple_data = apple_data.to_vec();
-                advertiser
-                    .manufacturer_data_changed(iface.signal_emitter())
-                    .await?;
+                // One signal, as bluetoothd sends it: the strength every time,
+                // and the data with it if it changed.
+                let mut changed = HashMap::from([("RSSI", Value::from(advertiser.rssi()))]);
+                if advertiser.apple_data != apple_data {
+                    advertiser.apple_data = apple_data.to_vec();
+                    let data = Value::from(advertiser.manufacturer_data());
+                    changed.insert("ManufacturerData", data);
+                }
+                zbus::fdo::Properties::properties_changed(
+                    iface.signal_emitter(),
+                    InterfaceName::from_static_str_unchecked(DEVICE_INTERFACE),
+                    changed,
+                    Cow::Borrowed(&[]),
+                )
+                .await?;
             }
             // Pruned in between, so it is new again.
             Err(_) => {
@@ -1659,7 +1680,7 @@ mod tests {
     use crate::ble::scanner::Scanner;
     use crate::bluez::{self, BatteryAction, BatteryProvider, Devices};
     use crate::harness::PrivateBus;
-    use crate::harness::pods::{PRO_3, Pods};
+    use crate::harness::pods::{PRO_3, Part, Pods};
 
     /// Plenty for any of these, and a hang fails the test instead of CI.
     const TIMEOUT: Duration = Duration::from_secs(5);
@@ -2042,9 +2063,9 @@ mod tests {
         }
     }
 
-    /// A new address appears with its data, the next advertisement changes
-    /// it, and an address gone quiet goes - and nothing is heard while no one
-    /// discovers.
+    /// A new address appears with its data; each later advertisement brings
+    /// its strength, and its data with it only when that changed; and an
+    /// address gone quiet goes - and nothing is heard while no one discovers.
     #[tokio::test]
     async fn advertisements_are_signaled_as_bluetoothd_does() {
         let (bus, bluez) = served().await;
@@ -2068,13 +2089,14 @@ mod tests {
             .unwrap();
         assert!(bluez.advertise(RANDOM, &[0x02, 0x03]).await.unwrap());
         assert!(bluez.advertise(RANDOM, &[0x04, 0x05]).await.unwrap());
+        assert!(bluez.advertise(RANDOM, &[0x04, 0x05]).await.unwrap());
         bluez.prune(Instant::now()).await;
         bluez.prune(Instant::now() + TEMPORARY_TIMEOUT).await;
 
         let path = device_path(ADAPTER, RANDOM);
         let adapter = adapter_path(ADAPTER);
         let mut device_signals = Vec::new();
-        while device_signals.len() < 3 {
+        while device_signals.len() < 4 {
             let msg = timeout(TIMEOUT, signals.next())
                 .await
                 .unwrap()
@@ -2097,6 +2119,7 @@ mod tests {
         assert_eq!(object, path);
         let device = &interfaces["org.bluez.Device1"];
         assert_eq!(apple_data(device), [0x02, 0x03], "the first advertisement");
+        assert_eq!(i16::try_from(device["RSSI"].clone()).unwrap(), RSSI);
         assert_eq!(
             String::try_from(device["Address"].clone()).unwrap(),
             RANDOM.to_string()
@@ -2112,20 +2135,27 @@ mod tests {
             adapter
         );
 
-        let changed = &device_signals[1];
+        let changed = |msg: &zbus::message::Message| {
+            assert_eq!(msg.header().member().unwrap().as_str(), "PropertiesChanged");
+            assert_eq!(msg.header().path().unwrap().as_str(), path.as_str());
+            let (iface, props, _) = msg
+                .body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                .unwrap();
+            assert_eq!(iface, DEVICE_INTERFACE);
+            assert_eq!(i16::try_from(props["RSSI"].clone()).unwrap(), RSSI);
+            props
+        };
+        let new_data = changed(&device_signals[1]);
+        assert_eq!(apple_data(&new_data), [0x04, 0x05]);
+        let repeated = changed(&device_signals[2]);
         assert_eq!(
-            changed.header().member().unwrap().as_str(),
-            "PropertiesChanged"
+            repeated.keys().collect::<Vec<_>>(),
+            ["RSSI"],
+            "the same data again"
         );
-        assert_eq!(changed.header().path().unwrap().as_str(), path.as_str());
-        let (iface, props, _) = changed
-            .body()
-            .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
-            .unwrap();
-        assert_eq!(iface, "org.bluez.Device1");
-        assert_eq!(apple_data(&props), [0x04, 0x05]);
 
-        let removed = &device_signals[2];
+        let removed = &device_signals[3];
         assert_eq!(
             removed.header().member().unwrap().as_str(),
             "InterfacesRemoved"
@@ -2183,8 +2213,8 @@ mod tests {
         assert_eq!(heard(SECOND, PAIR).await, None, "paired with the first");
     }
 
-    /// The scanner takes what the fake signals: the plumbing the pipeline
-    /// tests (#73) build on.
+    /// The scanner takes what the fake signals, every payload that changed
+    /// and none that did not: the plumbing the pipeline tests (#73) build on.
     #[tokio::test]
     async fn the_scanner_reads_its_advertisements() {
         let (bus, bluez) = served().await;
@@ -2193,18 +2223,25 @@ mod tests {
         tokio::pin!(adverts);
         scanner.start_discovery().await.unwrap();
 
-        // Twice from the one address, once as the object appears and once as a
-        // change: the scanner reads both, in order, or the second alone when
-        // its reader is behind.
-        let pods = Pods::new(PRO_3, PAIR);
+        // From the one address: as the object appears, the same again - the
+        // strength alone - and a change. The scanner reads the first and the
+        // change, in order, or the change alone when its reader is behind.
+        let mut pods = Pods::new(PRO_3, PAIR);
         let address = pods.address_at(Duration::ZERO);
-        for ms in [0, 1] {
-            let ad = pods.advertisement(Duration::from_millis(ms));
+        let first = pods.advertisement(Duration::ZERO);
+        pods.set_battery(Part::Left, Some(10));
+        let changed = pods.advertisement(Duration::ZERO);
+        for ad in [&first, &first, &changed] {
             bluez.advertise(address, &ad.data).await.unwrap();
         }
-        let advert = timeout(TIMEOUT, adverts.next()).await.unwrap().unwrap();
+        let mut next = async || timeout(TIMEOUT, adverts.next()).await.unwrap().unwrap();
+        let mut advert = next().await;
         assert_eq!(advert.ble_mac, address);
         assert_eq!(advert.data.product_id, PRO_3);
+        if advert.data.left_battery == Some(80) {
+            advert = next().await;
+        }
+        assert_eq!(advert.data.left_battery, Some(10), "the change");
     }
 
     /// Discovery is per client: each starts and stops its own, and one that
