@@ -41,7 +41,7 @@ pub(super) fn create_preferences_dialog() -> (adw::PreferencesDialog, DeviceRows
 
 /// The switch for low battery notifications, bound to the application action
 /// that `notifications::deliver` adds: it shows the action's state, and turning
-/// it turns that. On whenever the app starts, as nothing saves it (#146).
+/// it turns that. The action starts as the setting was saved, and saves it.
 fn battery_notifications_row() -> adw::ActionRow {
     let switch = gtk::Switch::builder()
         .name("battery-notifications")

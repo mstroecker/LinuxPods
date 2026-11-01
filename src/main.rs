@@ -6,7 +6,7 @@
 //! `Coordinator::command` - and the tray's window commands and the low battery
 //! notifications to the GTK main context on async channels.
 
-use linuxpods::{APP_ID, attachment, ble, indicator, notify, podstate, ui};
+use linuxpods::{APP_ID, attachment, ble, indicator, notify, podstate, settings, ui};
 
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
@@ -102,6 +102,7 @@ impl Primary {
     fn start(
         app: &adw::Application,
         coordinator: Arc<Coordinator>,
+        settings: settings::Saver,
         runtime: tokio::runtime::Handle,
     ) -> Self {
         let (window_tx, window_rx) = async_channel::unbounded::<WindowCommand>();
@@ -113,7 +114,7 @@ impl Primary {
         // context, where the application is.
         let (notices_tx, notices_rx) = async_channel::unbounded();
         runtime.spawn(notify::run(coordinator.clone(), notices_tx));
-        ui::deliver_notifications(app, notices_rx);
+        ui::deliver_notifications(app, notices_rx, settings);
         runtime.spawn(tray_task(
             coordinator.clone(),
             Arc::new(AppActions {
@@ -217,8 +218,11 @@ fn main() -> glib::ExitCode {
                 return;
             }
         };
+        // Loaded before anything that uses a setting is set up, so each starts
+        // as saved; saved on the runtime's blocking pool.
+        let settings = settings::open(handle.clone());
         // Startup runs once, so the cell is still empty.
-        let _ = started.set(Primary::start(app, coordinator, handle.clone()));
+        let _ = started.set(Primary::start(app, coordinator, settings, handle.clone()));
     });
 
     let launched = primary.clone();

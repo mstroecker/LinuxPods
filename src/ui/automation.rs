@@ -69,7 +69,7 @@
 //! | `conversation-awareness` | the Features switch, always insensitive |
 //! | `preferences` | the Preferences dialog, while open |
 //! | `auto-connect` | its switch, always insensitive |
-//! | `battery-notifications` | its switch for low battery notifications, on whenever the app starts |
+//! | `battery-notifications` | its switch for low battery notifications, as saved: on unless turned off |
 //! | `device-<MAC>` | a device's row in the Development group |
 //! | `device-status-<MAC>` | its status: Connected, Advertising, ... |
 //! | `about` | the About dialog, while open |
