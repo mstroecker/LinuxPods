@@ -308,13 +308,17 @@ impl Cleartext {
             | u8::from(bit4_charging) << 4
             | encode_battery(self.case_battery);
 
-        // Bit 3 set for a closed lid; the rest as AirPods Pro 3 sends it: 0x11
-        // out of the case, 0x31 from the open case and 0x39 from the closed one.
-        // Nobody has explained bits 4-7 or the low bits.
+        // Bit 3 set for a closed lid; the rest as AirPods Pro 3 sends it (#71):
+        // 0x11 from a pod out of the case, 0x31 from one in a case that is not
+        // charging and 0x51 from one in a charging case, 0x39 and 0x59 with the
+        // lid closed. Nobody has explained bit 7. The low bits are 1 here; the
+        // hardware's go to 2 once the pods have been put back in the case.
         let lid = match self.lid_open {
             None => 0x11,
-            Some(true) => 0x31,
-            Some(false) => 0x39,
+            Some(open) => {
+                let in_case = if self.case_charging { 0x51 } else { 0x31 };
+                if open { in_case } else { in_case | 0x08 }
+            }
         };
 
         let [product_low, product_high] = self.product_id.to_le_bytes();
@@ -552,11 +556,13 @@ mod tests {
 
     /// The builder against hardware: the cleartext of captured advertisements -
     /// the ones in `examples/decrypt_probe.rs` - parsed and rebuilt comes back
-    /// byte for byte, but for the bits nobody has explained: status bits 0 and
-    /// 7, charging bit 7 and every bit of the lid byte but bit 3.
+    /// byte for byte, but for the bits nobody has explained or the builder
+    /// leaves alone: status bits 0 and 7, charging bit 7, and bits 0-2 and 7
+    /// of the lid byte. Its bits 4-6 follow the case's charging, all on the
+    /// charger in these.
     #[test]
     fn rebuilds_captured_advertisements() {
-        const KNOWN: [u8; 9] = [0xFF, 0xFF, 0xFF, 0x7E, 0xFF, 0x7F, 0x08, 0xFF, 0xFF];
+        const KNOWN: [u8; 9] = [0xFF, 0xFF, 0xFF, 0x7E, 0xFF, 0x7F, 0x78, 0xFF, 0xFF];
         for captured in [
             [0x01, 0x27, 0x20, 0x05, 0x66, 0xf3, 0x51, 0x00, 0x00],
             [0x01, 0x27, 0x20, 0x14, 0x77, 0xf5, 0x59, 0x00, 0x00],

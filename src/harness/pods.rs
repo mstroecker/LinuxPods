@@ -1555,6 +1555,26 @@ mod tests {
         }
     }
 
+    /// Byte 6 as capture 4 of #71 has it: `0x11` from a pod out of the case,
+    /// whether the case charges or not; `0x31` from one in a case that does
+    /// not, `0x51` from one in a case that does; bit 3 for a closed lid.
+    #[test]
+    fn byte_6_follows_the_pod_and_the_case_charging() {
+        // The type and length, then bytes 0-6 of the payload.
+        let byte_6 = |pods: &Pods, side| pods.advertisement(side, ms(0)).data[8];
+        let mut pods = Pods::new(PRO_3, MAC);
+        pods.set_in_ear(PodSide::Left, true);
+        for (charging, in_case) in [(false, 0x31), (true, 0x51)] {
+            pods.set_charging(Part::Case, charging);
+            pods.set_lid(true);
+            assert_eq!(byte_6(&pods, PodSide::Right), in_case, "{charging}");
+            assert_eq!(byte_6(&pods, PodSide::Left), 0x11, "{charging}: worn");
+            pods.set_lid(false);
+            assert_eq!(byte_6(&pods, PodSide::Right), in_case | 0x08);
+            assert_eq!(byte_6(&pods, PodSide::Left), 0x11);
+        }
+    }
+
     /// Pods in the closed case go quiet [`LID_SILENCE`] after it closes - from
     /// when the model saw it close - and once it opens they come back under
     /// new addresses, the right pod after [`RIGHT_RESUMES`], the left after
