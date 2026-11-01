@@ -3,8 +3,8 @@
 //! context, where the application can send it.
 //!
 //! The Preferences switch turns them off and on, through the application's
-//! stateful action [`ACTION`]. It is not saved: it is on whenever the app
-//! starts (#146).
+//! stateful action [`ACTION`]. It starts as `crate::settings` saved it, and a
+//! change to it is saved there.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -15,6 +15,7 @@ use gtk::{gio, glib};
 use gio::prelude::*;
 
 use crate::notify::{Action, Notice};
+use crate::settings::Saver;
 
 /// The application action that turns low battery notifications on and off,
 /// with a boolean state. The Preferences switch is bound to `app.` and this.
@@ -41,16 +42,15 @@ struct Shelf {
     shown: BTreeMap<String, Notice>,
 }
 
-impl Default for Shelf {
-    fn default() -> Self {
+impl Shelf {
+    /// With the switch on or off, and nothing shown yet.
+    fn new(enabled: bool) -> Self {
         Self {
-            enabled: true,
+            enabled,
             shown: BTreeMap::new(),
         }
     }
-}
 
-impl Shelf {
     /// Takes what the notifier asks for, and returns it if it is to be carried
     /// out now: while the switch is on.
     fn take(&mut self, action: Action) -> Option<Action> {
@@ -83,13 +83,24 @@ impl Shelf {
 /// Carries out what `notices` brings, on the main context, for as long as the
 /// channel stays open, and adds [`ACTION`] to `app` to turn that off and on.
 ///
+/// The switch starts as `settings` holds it, before anything is delivered:
+/// saved off, nothing is sent. Each change goes to `settings`, which saves it.
+///
 /// A notification has no default action, so clicking it activates the app,
 /// which brings up the window.
-pub fn deliver(app: &impl IsA<gio::Application>, notices: async_channel::Receiver<Action>) {
+pub fn deliver(
+    app: &impl IsA<gio::Application>,
+    notices: async_channel::Receiver<Action>,
+    settings: Saver,
+) {
     let app = app.clone().upcast::<gio::Application>();
-    let shelf = Rc::new(RefCell::new(Shelf::default()));
+    let enabled = settings.get().battery_notifications;
+    if !enabled {
+        tracing::info!("low battery notifications off, as saved");
+    }
+    let shelf = Rc::new(RefCell::new(Shelf::new(enabled)));
 
-    let action = gio::SimpleAction::new_stateful(ACTION, None, &true.to_variant());
+    let action = gio::SimpleAction::new_stateful(ACTION, None, &enabled.to_variant());
     action.connect_change_state(glib::clone!(
         #[strong]
         shelf,
@@ -104,6 +115,7 @@ pub fn deliver(app: &impl IsA<gio::Application>, notices: async_channel::Receive
                 "low battery notifications {}",
                 if enabled { "on" } else { "off" }
             );
+            settings.change(|s| s.battery_notifications = enabled);
             let todo = shelf.borrow_mut().set_enabled(enabled);
             for action in todo {
                 carry_out(&app, action);
@@ -164,17 +176,30 @@ mod tests {
     }
 
     #[test]
-    fn on_by_default_everything_goes_through() {
-        let mut shelf = Shelf::default();
+    fn on_everything_goes_through() {
+        let mut shelf = Shelf::new(true);
         let show = Action::Show(notice(PAIR, "Left 15%"));
         assert_eq!(shelf.take(show.clone()), Some(show));
         let withdraw = Action::Withdraw(notification_id(PAIR));
         assert_eq!(shelf.take(withdraw.clone()), Some(withdraw));
     }
 
+    /// Saved off, the switch starts off: nothing is sent from the start, and
+    /// turning it on shows what is low.
+    #[test]
+    fn off_from_the_start_sends_nothing() {
+        let mut shelf = Shelf::new(false);
+        assert_eq!(shelf.take(Action::Show(notice(PAIR, "Left 15%"))), None);
+        assert_eq!(shelf.set_enabled(false), []);
+        assert_eq!(
+            shelf.set_enabled(true),
+            [Action::Show(notice(PAIR, "Left 15%"))]
+        );
+    }
+
     #[test]
     fn off_withdraws_what_is_on_show_and_sends_nothing() {
-        let mut shelf = Shelf::default();
+        let mut shelf = Shelf::new(true);
         shelf.take(Action::Show(notice(PAIR, "Left 15%")));
         shelf.take(Action::Show(notice(OTHER, "Case 9%")));
         shelf.take(Action::Withdraw(notification_id(OTHER)));
@@ -194,7 +219,7 @@ mod tests {
     fn on_does_not_bring_back_a_pair_that_has_gone() {
         let now = Instant::now();
         let mut alerts = Alerts::default();
-        let mut shelf = Shelf::default();
+        let mut shelf = Shelf::new(true);
         let feed = |alerts: &mut Alerts, shelf: &mut Shelf, snapshot: &Snapshot| {
             for action in alerts.update(snapshot, now) {
                 shelf.take(action);
@@ -222,7 +247,7 @@ mod tests {
     /// all.
     #[test]
     fn on_shows_what_would_be_on_show() {
-        let mut shelf = Shelf::default();
+        let mut shelf = Shelf::new(true);
         shelf.take(Action::Show(notice(PAIR, "Left 15%")));
         shelf.set_enabled(false);
         shelf.take(Action::Show(notice(PAIR, "Left 15%, Right 12%")));
