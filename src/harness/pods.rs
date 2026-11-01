@@ -440,6 +440,11 @@ pub enum Action {
     Send(Vec<u8>),
     /// Close the connection. Nothing follows it.
     HangUp,
+    /// Drop the Bluetooth link, as the pods do once both are in the closed
+    /// case: BlueZ reports the pair disconnected, and an AAP connection goes
+    /// with the link. Nothing follows it, and the pair is disconnected from
+    /// here on.
+    Disconnect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -667,7 +672,9 @@ impl Pods {
     }
 
     /// Puts a pod in the case, or takes it out. A pod in the case is out of
-    /// the ear. Over AAP, the next [`Pods::poll`] sends an ear report.
+    /// the ear. Over AAP, the next [`Pods::poll`] sends an ear report; and
+    /// with the lid closed and the other pod in the case too, the pair drops
+    /// its link.
     pub fn set_in_case(&mut self, side: PodSide, in_case: bool) {
         let pod = self.pod_mut(side);
         pod.in_case = in_case;
@@ -678,7 +685,8 @@ impl Pods {
     /// the pod that sends it is in the case, or both are. With the sending pod
     /// worn and the other in the case, it says only that a pod is in the case,
     /// and the app keeps the lid it last heard. Over AAP, a pod in the case
-    /// is in the closed case at once - see [`Pods::poll`].
+    /// is in the closed case at once - see [`Pods::poll`] - and with both
+    /// pods in it, the pair drops its link at the next poll, as the pods do.
     pub fn set_lid(&mut self, open: bool) {
         self.lid_open = open;
     }
@@ -887,19 +895,30 @@ impl Pods {
 
     /// What is due on the AAP connection by `now`, in order: replies and timed
     /// actions as they fall due, then a report of each change the app has not
-    /// been told of - batteries and charging in one battery packet, the mode in
-    /// a 0x0D report, the pods' places in an ear report. Taken once; a second
+    /// been told of - the pods' places, then batteries and charging in one
+    /// battery packet, then the mode in a 0x0D report. Taken once; a second
     /// call at the same time returns nothing new.
     ///
     /// A new primary pod comes as the hardware's does: the ear report in the
     /// new order now, then two primary pod packets, the first
     /// [`PRIMARY_AFTER_EAR`] later and marked as a switch, the second
     /// [`SECOND_PRIMARY`] after that. A pod in the case is in the closed case
-    /// the moment the lid closes, where the hardware took about 4 s, and
-    /// then the primary pod packet says the secondary cannot be reached.
+    /// the moment the lid closes, on purpose, where the hardware took about
+    /// 4.5 s: the primary pod packet says the secondary cannot be reached,
+    /// then the ear report has it in the closed case, then the battery has it
+    /// and the case Disconnected, as capture 4 of #71 has them, and the same
+    /// three as the lid opens.
     ///
     /// A [`Action::HangUp`] ends the connection, and nothing comes after it.
+    /// With both pods in the closed case the pair drops its link, AAP or not:
+    /// [`Action::Disconnect`], alone.
     pub fn poll(&mut self, now: Duration) -> Vec<Action> {
+        if self.connected && self.left.in_case && self.right.in_case && !self.lid_open {
+            // Both pods in the closed case: the pods drop the link (#142).
+            self.connected = false;
+            self.session = None;
+            return vec![Action::Disconnect];
+        }
         let batteries = self.aap_batteries();
         let mode = self.noise_mode;
         let ears = self.ears();
@@ -938,6 +957,30 @@ impl Pods {
             }
         }
 
+        // Where the pods are, first: the hardware sends the battery after it.
+        if let Some(reported) = &mut session.ears_reported
+            && *reported != ears
+        {
+            let reported = std::mem::replace(reported, ears);
+            if reported.primary != ears.primary {
+                // A role switch: the ear report in the new order first.
+                if reported.report != ears.report {
+                    actions.push(Action::Send(ear_packet(ears.report).to_vec()));
+                }
+                let first = now + PRIMARY_AFTER_EAR;
+                session.send(first, ears.primary_packet(true));
+                session.send(first + SECOND_PRIMARY, ears.primary_packet(false));
+            } else {
+                // The lid closing or opening on a pod: the primary pod's say
+                // on the secondary first.
+                if reported.secondary_reachable() != ears.secondary_reachable() {
+                    actions.push(Action::Send(ears.primary_packet(false)));
+                }
+                if reported.report != ears.report {
+                    actions.push(Action::Send(ear_packet(ears.report).to_vec()));
+                }
+            }
+        }
         if let Some(reported) = &mut session.batteries
             && *reported != batteries
         {
@@ -949,21 +992,6 @@ impl Pods {
         {
             actions.push(Action::Send(noise::set_packet(mode).to_vec()));
             *reported = mode;
-        }
-        if let Some(reported) = &mut session.ears_reported
-            && *reported != ears
-        {
-            let reported = std::mem::replace(reported, ears);
-            if reported.report != ears.report {
-                actions.push(Action::Send(ear_packet(ears.report).to_vec()));
-            }
-            if reported.primary != ears.primary {
-                let first = now + PRIMARY_AFTER_EAR;
-                session.send(first, ears.primary_packet(true));
-                session.send(first + SECOND_PRIMARY, ears.primary_packet(false));
-            } else if reported.secondary_reachable() != ears.secondary_reachable() {
-                actions.push(Action::Send(ears.primary_packet(false)));
-            }
         }
         actions
     }
@@ -1235,7 +1263,7 @@ mod tests {
             .iter()
             .map(|a| match a {
                 Action::Send(p) => p.clone(),
-                Action::HangUp => panic!("hung up among {actions:?}"),
+                Action::HangUp | Action::Disconnect => panic!("hung up among {actions:?}"),
             })
             .collect()
     }
@@ -1788,8 +1816,8 @@ mod tests {
         assert_eq!(
             sent(&pods.poll(switched)),
             [
+                ears(Place::InEar, Place::Out),
                 battery_packet(&pods.aap_batteries()),
-                ears(Place::InEar, Place::Out)
             ],
             "the battery too, the new primary first"
         );
@@ -1827,10 +1855,10 @@ mod tests {
         );
     }
 
-    /// The secondary pod in the case as the lid closes and opens: the place,
-    /// the primary pod packet's say on whether it can be reached, and the
-    /// battery, which reports that pod and the case Disconnected while the lid
-    /// is closed.
+    /// The secondary pod in the case as the lid closes and opens, in the order
+    /// of capture 4 of #71: the primary pod packet's say on whether it can be
+    /// reached, the place, and the battery, which reports that pod and the
+    /// case Disconnected while the lid is closed.
     #[test]
     fn the_closed_case_is_reported() {
         let mut pods = subscribed();
@@ -1845,9 +1873,9 @@ mod tests {
         assert_eq!(
             sent(&pods.poll(ms(10))),
             [
-                battery_packet(&away),
-                ears(Place::InEar, Place::InClosedCase),
                 primary_packet(PodSide::Left, false, false).to_vec(),
+                ears(Place::InEar, Place::InClosedCase),
+                battery_packet(&away),
             ]
         );
         pods.set_lid(true);
@@ -1859,11 +1887,37 @@ mod tests {
         assert_eq!(
             sent(&pods.poll(ms(20))),
             [
-                battery_packet(&back),
-                ears(Place::InEar, Place::InCase),
                 primary_packet(PodSide::Left, true, false).to_vec(),
+                ears(Place::InEar, Place::InCase),
+                battery_packet(&back),
             ]
         );
+    }
+
+    /// Both pods in the closed case: the pods drop the link, AAP with it, and
+    /// nothing is sent first. The lid closing is one way there, a pod going
+    /// into the closed case another, and a pair connected without AAP drops
+    /// its link the same.
+    #[test]
+    fn both_pods_in_the_closed_case_drop_the_link() {
+        let mut pods = subscribed();
+        pods.set_lid(false);
+        assert_eq!(pods.poll(ms(10)), [Action::Disconnect]);
+        assert!(!pods.is_connected() && !pods.has_aap());
+        assert!(pods.poll(ms(20)).is_empty());
+
+        let mut pods = subscribed();
+        pods.set_in_ear(PodSide::Left, true);
+        pods.set_lid(false);
+        assert_eq!(pods.poll(ms(10)).len(), 3, "one pod in the closed case");
+        pods.set_in_case(PodSide::Left, true);
+        assert_eq!(pods.poll(ms(20)), [Action::Disconnect]);
+
+        let mut pods = Pods::new(PRO_3, MAC);
+        pods.set_connected(true);
+        pods.set_lid(false);
+        assert_eq!(pods.poll(ms(0)), [Action::Disconnect]);
+        assert!(!pods.is_connected());
     }
 
     fn battery(component: Component, level: Option<u8>, status: Status) -> Battery {

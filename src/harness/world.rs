@@ -132,15 +132,14 @@ struct Link {
 }
 
 impl Pair {
-    /// Carries out what the model has due by `now`.
-    fn flush(&mut self, now: Duration) {
-        for action in self.pods.poll(now) {
-            let Some(link) = &self.link else { break };
-            let hang_up = action == Action::HangUp;
-            let _ = link.actions.send(action);
-            if hang_up {
-                self.link = None;
-            }
+    /// Hands `action` to the AAP connection's writer, if there is one. A
+    /// hang-up ends the connection.
+    fn carry_out(&mut self, action: Action) {
+        let Some(link) = &self.link else { return };
+        let hang_up = action == Action::HangUp;
+        let _ = link.actions.send(action);
+        if hang_up {
+            self.link = None;
         }
     }
 }
@@ -288,11 +287,11 @@ impl World {
             // BlueZ first, as it turns away a pair whose adapter is off.
             self.0.bluez.set_connected(mac, true).await?;
             pair.pods.set_connected(true);
-            pair.flush(self.now());
+            self.flush(mac, pair, self.now()).await;
         } else {
             pair.pods.set_connected(false);
             // Disconnected, the model hangs up an open connection.
-            pair.flush(self.now());
+            self.flush(mac, pair, self.now()).await;
             self.0.bluez.set_connected(mac, false).await?;
         }
         tracing::info!(
@@ -318,7 +317,7 @@ impl World {
     /// lose their link, and AAP with it, and stay in range.
     pub async fn remove_adapter(&self, name: &str) -> Result<()> {
         let mut pairs = self.0.pairs.lock().await;
-        self.drop_links(&mut pairs, name);
+        self.drop_links(&mut pairs, name).await;
         self.0.bluez.remove_adapter(name).await?;
         tracing::info!("fake world: adapter {name} unplugged");
         Ok(())
@@ -330,7 +329,7 @@ impl World {
     pub async fn set_powered(&self, name: &str, powered: bool) -> Result<()> {
         let mut pairs = self.0.pairs.lock().await;
         if !powered {
-            self.drop_links(&mut pairs, name);
+            self.drop_links(&mut pairs, name).await;
         }
         self.0.bluez.set_powered(name, powered).await?;
         tracing::debug!("fake world: adapter {name} {}", power(powered));
@@ -348,15 +347,32 @@ impl World {
 
     /// Disconnects the models of the pairs on the adapter called `adapter`,
     /// which hangs up their AAP connections. BlueZ is the caller's to tell.
-    fn drop_links(&self, pairs: &mut BTreeMap<Address, Pair>, adapter: &str) {
+    async fn drop_links(&self, pairs: &mut BTreeMap<Address, Pair>, adapter: &str) {
         let now = self.now();
         for mac in self.0.bluez.paired_with(adapter) {
             if let Some(pair) = pairs.get_mut(&mac)
                 && pair.pods.is_connected()
             {
                 pair.pods.set_connected(false);
-                pair.flush(now);
+                self.flush(mac, pair, now).await;
             }
+        }
+    }
+
+    /// Carries out what a pair's model has due by `now`: packets and a
+    /// hang-up on its AAP connection, and a link it drops - BlueZ told of it,
+    /// then the connection closed.
+    async fn flush(&self, mac: Address, pair: &mut Pair, now: Duration) {
+        for action in pair.pods.poll(now) {
+            if action != Action::Disconnect {
+                pair.carry_out(action);
+                continue;
+            }
+            if let Err(e) = self.0.bluez.set_connected(mac, false).await {
+                tracing::warn!("fake world: failed to mark {mac} disconnected: {e:#}");
+            }
+            pair.carry_out(Action::HangUp);
+            tracing::info!("fake world: {mac} dropped its link, both pods in the closed case");
         }
     }
 
@@ -390,7 +406,7 @@ impl World {
         let mut pairs = self.0.pairs.lock().await;
         let pair = pairs.get_mut(&mac).ok_or_else(|| no_pair(mac))?;
         let result = change(&mut pair.pods);
-        pair.flush(self.now());
+        self.flush(mac, pair, self.now()).await;
         self.0.due.notify_one();
         Ok(result)
     }
@@ -506,8 +522,8 @@ impl World {
             }
             let mut pairs = self.0.pairs.lock().await;
             let now = self.now();
-            for pair in pairs.values_mut() {
-                pair.flush(now);
+            for (mac, pair) in pairs.iter_mut() {
+                self.flush(*mac, pair, now).await;
             }
         }
     }
@@ -556,15 +572,16 @@ impl World {
         pair.link = Some(Link { id, actions });
         tokio::spawn(write_link(socket.clone(), queue));
         tokio::spawn(self.clone().read_link(mac, id, socket));
-        pair.flush(now);
-        self.0.due.notify_one();
         tracing::info!("fake world: AAP connected to {mac}");
 
         // There is no AAP without a Bluetooth link, so the connection brought
-        // one up, as an L2CAP connect does.
+        // one up, as an L2CAP connect does. Ahead of what the model has due,
+        // which may be to drop it again.
         if !was_connected && let Err(e) = self.0.bluez.set_connected(mac, true).await {
             tracing::warn!("fake world: failed to mark {mac} connected: {e:#}");
         }
+        self.flush(mac, pair, now).await;
+        self.0.due.notify_one();
     }
 
     /// Hands the model what the app sends on one connection, until it closes.
@@ -585,7 +602,7 @@ impl World {
             match read {
                 Ok(n) if n > 0 => {
                     pair.pods.receive(&buf[..n], now);
-                    pair.flush(now);
+                    self.flush(mac, pair, now).await;
                     self.0.due.notify_one();
                 }
                 _ => {
@@ -933,6 +950,29 @@ mod tests {
         world.disconnect(MAC).await.unwrap();
         assert!(next_packet(&client).await.is_err());
         assert!(!bluez_connected(&bus, MAC).await);
+    }
+
+    /// Both pods in the closed case: the pair drops its link, and BlueZ says
+    /// so, as the AAP connection goes with it.
+    #[tokio::test]
+    async fn the_closed_case_drops_the_link() {
+        let (bus, world, dir) = world().await;
+        world.connect(MAC).await.unwrap();
+        let client = aap(&dir, MAC).await;
+        handshake(&client).await;
+
+        world
+            .with_pods(MAC, |pods| pods.set_lid(false))
+            .await
+            .unwrap();
+        assert!(next_packet(&client).await.is_err());
+        assert!(!bluez_connected(&bus, MAC).await);
+        assert!(
+            !world
+                .with_pods(MAC, |pods| pods.is_connected() || pods.has_aap())
+                .await
+                .unwrap()
+        );
     }
 
     /// An adapter powering off takes its pairs' links, and AAP with them, and
