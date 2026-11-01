@@ -48,7 +48,7 @@
 //! | `Connect(s mac)` | Connects them to the host, which the app takes up |
 //! | `Disconnect(s mac)` | Disconnects them, which takes the AAP connection along, after BlueZ's `Connected=false` |
 //! | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case`; a level above 100 is unknown |
-//! | `SetLid(s mac, b open)` | Opens or closes the case; closed on both pods, it drops their link |
+//! | `SetLid(s mac, b open)` | Opens or closes the case; closed on both pods, it drops their link. The pods in the closed case stop advertising 4 s later, and come back under new addresses once it opens, the right pod 1 s later, the left 5.5 s |
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
 //! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, the durations by theirs with `_ms` - `echo_delay_ms`, `handshake_delay_ms`, `report_delay_ms`, `dump_delay_ms`, `stale_report_ms` - in milliseconds, a `stale_report_ms` of 0 for none |
@@ -228,9 +228,10 @@ impl World {
         &self.0.bluez
     }
 
-    /// The models' time. Read with the pairs locked, so that no model sees
-    /// time run backwards.
-    fn now(&self) -> Duration {
+    /// The models' time: what [`Pods`] takes as `now`, counted from the
+    /// world's start. The world reads it with the pairs locked, so that no
+    /// model sees time run backwards.
+    pub fn now(&self) -> Duration {
         self.0.epoch.elapsed()
     }
 
@@ -456,6 +457,15 @@ impl World {
         Ok(pair.aap_attempts)
     }
 
+    /// The addresses a pair advertises from now, one for each pod that
+    /// advertises: none while its pods are quiet in the closed case.
+    pub async fn advertising(&self, mac: Address) -> Result<Vec<Address>> {
+        let mut pairs = self.0.pairs.lock().await;
+        let pair = pairs.get_mut(&mac).ok_or_else(|| no_pair(mac))?;
+        let adverts = pair.pods.advertisements(self.now());
+        Ok(adverts.into_iter().map(|advert| advert.address).collect())
+    }
+
     /// What GNOME Settings shows: each device's level, by MAC.
     pub fn batteries(&self) -> HashMap<Address, u8> {
         self.0.bluez.batteries()
@@ -503,10 +513,10 @@ impl World {
         loop {
             tick.tick().await;
             let adverts: Vec<_> = {
-                let pairs = self.0.pairs.lock().await;
+                let mut pairs = self.0.pairs.lock().await;
                 let now = self.now();
                 pairs
-                    .iter()
+                    .iter_mut()
                     .flat_map(|(mac, pair)| {
                         let adverts = pair.pods.advertisements(now);
                         adverts.into_iter().map(|advert| (*mac, advert))
@@ -703,7 +713,6 @@ fn set_quirk(quirks: &mut Quirks, name: &str, value: &Value<'_>) -> Result<(), S
         "settings_changed" => quirks.settings_changed = flag()?,
         "echo_every" => quirks.echo_every = count()?,
         "echo_delay_ms" => quirks.echo_delay = Duration::from_millis(count()?.into()),
-        "zero_suffix_when_connected" => quirks.zero_suffix_when_connected = flag()?,
         "silent_handshake" => quirks.silent_handshake = flag()?,
         "refuse_aap" => quirks.refuse_aap = count()?,
         "handshake_delay_ms" => quirks.handshake_delay = Duration::from_millis(count()?.into()),

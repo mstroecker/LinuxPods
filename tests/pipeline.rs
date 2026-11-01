@@ -872,6 +872,80 @@ async fn a_pair_whose_address_resolves_is_identified_across_a_rotation() {
     assert!(resolves(&irk, heard_from));
 }
 
+/// A closed lid shows over BLE, and stays on show while the pods are quiet
+/// in the closed case, as they go 4 s after it closes: the coordinator keeps
+/// their last reading. Opened, the right pod comes back first, from a new
+/// address, and the lid shows open (#71).
+///
+/// The first advertisement with the lid open after the pods went quiet is
+/// one from after the lid opened: every one sent in the 4 s before had it
+/// closed. Its address is one the right pod took coming back, not a
+/// rotation: the pods as they were while quiet have it at no time from the
+/// lid opening to its arrival.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_lid_stays_on_show_while_the_pods_are_quiet() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let keys = fixture.pair_keys(PAIR).await;
+    let mut app = fixture.start_app().await;
+    fn lid(snapshot: &Snapshot) -> Option<bool> {
+        let state = snapshot.states.get(&PAIR)?;
+        (state.source == DataSource::Ble).then_some(state.lid_open)?
+    }
+    app.until("the lid open", |s| lid(s) == Some(true)).await;
+    let world = &fixture.world;
+    let advertising = world.advertising(PAIR).await.unwrap();
+    assert_eq!(advertising.len(), 2, "both pods, in the case");
+
+    world
+        .with_pods(PAIR, |pods| pods.set_lid(false))
+        .await
+        .unwrap();
+    app.until("the lid closed", |s| lid(s) == Some(false)).await;
+    eventually("the pods to go quiet", move || async move {
+        world.advertising(PAIR).await.unwrap().is_empty()
+    })
+    .await;
+    app.skip_handled();
+    assert_eq!(lid(&app.updates.borrow()), Some(false), "the last kept");
+
+    let quiet = world.with_pods(PAIR, |pods| pods.clone()).await.unwrap();
+    let opened = world.now();
+    world
+        .with_pods(PAIR, |pods| pods.set_lid(true))
+        .await
+        .unwrap();
+    let mut back = None;
+    app.handled("a pod back, the lid open", 1, |a| {
+        let open = sent_by(a, PAIR, &keys.enc_key) && a.data.lid_open == Some(true);
+        if open {
+            back = Some(a.clone());
+        }
+        open
+    })
+    .await;
+    let arrived = world.now();
+    let back = back.unwrap();
+    assert_eq!(
+        back.data.primary_pod(),
+        PodSide::Right,
+        "the right pod first"
+    );
+    assert!(resolves(&keys.irk.unwrap(), back.ble_mac));
+    // Every rotation period in between, as each lasts longer than a second.
+    let mut at = opened;
+    loop {
+        let rotated = quiet.address_at(PodSide::Right, at);
+        assert_ne!(rotated, back.ble_mac, "a rotation, at {at:?}");
+        if at >= arrived {
+            break;
+        }
+        at = (at + Duration::from_secs(1)).min(arrived);
+    }
+    app.until("the lid open again", |s| lid(s) == Some(true))
+        .await;
+}
+
 /// What the pair's key decrypts counts only from an address its IRK
 /// resolves: from any other address - a replay, or a spoof - it is dropped,
 /// though it decrypts. From the pair's own address the same advertisement
