@@ -51,7 +51,8 @@ Only `PP` is read. Any value goes in bytes 7-9, and a `PP` other than `01` or `0
 | `02` | In the case, lid open |
 | `03` | In the closed case |
 
-- `03` came about 4 s after the lid closed on the secondary pod; at the close itself `00 02` was sent again, unchanged. With `03` the battery packet reports that pod as Disconnected (status `04`, level `00`; #108).
+- `03` came about 4 s after the lid closed on the secondary pod (4.5 s in capture 4 of #71); at the close itself `00 02` was sent again, unchanged. With `03` the battery packet reports that pod and the case as Disconnected (status `04`, level `00`; #108).
+- At a lid change the `0x08` with `SS` changed comes first, then the `0x06`, then the battery. Capture 4 of #71 has them to the millisecond: at the closed case the `0x08` at 19:42:30.160 and the `0x06` with `03` at .192; at the lid opening the `0x08` at 19:43:16.296 and the `0x06` with `02` at .383. Only at a role switch does the `0x06` come first - see below.
 - A pod in the case never became primary. With both in the closed case, the pods drop the link.
 - Any other byte is unknown, not out: the app keeps the advertisement's in-ear for that pod.
 
@@ -89,8 +90,8 @@ Session 2 (a local build logging whole packets), pods in the case, bytes from th
 | 17:22:25.1 | `08 00 02 00 01 01`, then `… 01 00` 87 ms later | switch to right |
 | 17:22:47.4 | `06 00 00 02` | secondary (left) in the case, lid open |
 | 17:22:58.9 | `06 00 00 02` | lid closed: sent again, unchanged |
-| 17:23:02.9 | `06 00 00 03`, `08 00 02 00 00 00` | 4 s later: the secondary in the closed case |
-| 17:23:17.7 | `06 00 00 02`, `08 00 02 00 01 00` | lid open |
+| 17:23:02.9 | `08 00 02 00 00 00`, `06 00 00 03` | 4 s later: the secondary in the closed case |
+| 17:23:17.7 | `08 00 02 00 01 00`, `06 00 00 02` | lid open |
 | 17:23:18.1 | `06 00 00 01` | out of the case |
 | 17:23:41.8 | `08 00 01 00 01 01`, then `… 01 00` | switch to left |
 | 17:24:18.3 | `08 00 02 00 01 01`, then `… 01 00` | switch to right |
@@ -100,8 +101,15 @@ Session 2 (a local build logging whole packets), pods in the case, bytes from th
 
 Switch timing, `0x06` before the first `0x08`: 17:22:25.062 vs .065, 17:23:41.809 vs .834, 17:24:18.309 vs .311.
 
+The lid rows are timed to 0.1 s only, which does not settle the order of their two packets; they are listed in the order capture 4 of #71 has them, to the millisecond: the `0x08` first at a lid change (see the ear report above).
+
 The `AAP packet (N bytes):` debug line shows the first 8 bytes of a packet; at `trace`, the whole packet follows (key packets redacted).
 
 ## What the fake does
 
-The fake AirPods (`harness/pods.rs`) send `0x08` then `0x06` right after the handshake's answer, a `0x06` on every change of a pod's place, and on a switch the `0x06` in the new order, then two `0x08`s - the first 10 ms later with `TT` set, the second 60 ms after it. A pod in the case is in the closed case the moment the lid closes, where the hardware took about 4 s.
+The fake AirPods (`harness/pods.rs`) answer the notification request with the battery, then `0x08`, `0x0C`, `0x0E`, `0x2E`, `0x06` and `0x2E`, as capture 4 of #71 has them, and send a `0x06` on every change of a pod's place after that.
+
+- On a lid change: the `0x08` with `SS` changed, then the `0x06`, then the battery.
+- On a role switch: the `0x06` in the new order and the battery, then two `0x08`s - the first 10 ms later with `TT` set, the second 60 ms after it without.
+- A pod in the case is in the closed case the moment the lid closes, where the hardware took about 4.5 s.
+- With both pods in the closed case, the pods drop the link.
