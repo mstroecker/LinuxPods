@@ -12,9 +12,10 @@
 //!
 //! A pair talks on two channels, as real AirPods do:
 //!
-//! - **BLE.** [`Pods::advertisement`] is what the pair broadcasts at a moment:
-//!   the Apple manufacturer data, from a resolvable private address that its
-//!   IRK resolves, and that rotates.
+//! - **BLE.** [`Pods::advertisements`] is what the pair broadcasts at a
+//!   moment: the Apple manufacturer data from each pod that advertises, each
+//!   from a resolvable private address of its own that the pair's IRK
+//!   resolves, and that rotates.
 //! - **AAP.** The world hands the model what the app sends
 //!   ([`Pods::receive`]) and carries out whatever [`Pods::poll`] returns.
 //!   Replies, notifications and the timed quirks all come out of `poll`.
@@ -41,12 +42,24 @@ pub const PRO_3: u16 = 0x2027;
 /// AirPods Pro 2 with USB-C.
 pub const PRO_2_USB_C: u16 = 0x2024;
 
-/// How long the fake advertises from one address. Real AirPods advertise from
+/// How long a pod advertises from one address. Real AirPods advertise from
 /// an address per pod, which in the #71 captures lasted 4 to 8 minutes,
-/// connected or not, and changed across a closed lid as well. The fake
-/// rotates far faster on purpose: it is there to put rotation through its
-/// paces in tests.
+/// connected or not, each pod on a clock of its own. The fake rotates far
+/// faster on purpose: it is there to put rotation through its paces in
+/// tests. The left pod's clock runs half a rotation off the right's, so the
+/// two never change address together on the clock, only as they come back
+/// from the closed case.
 pub const ADDRESS_ROTATION: Duration = Duration::from_secs(10);
+
+/// How long a pod advertises the same payload when nothing changes. Real
+/// AirPods repeat a payload for hundreds of advertisements - about 5 a second
+/// from each pod, with bursts of 30-35 a second after the lid opens or the
+/// pods go back in the case - and change it when something happens: a
+/// battery, charging, an ear, the case, the lid, a connection. Otherwise they
+/// change it every 20-30 s (#71). The fake's payload changes as its state
+/// does, and otherwise every 25 s, the left pod's half a refresh off the
+/// right's.
+pub const PAYLOAD_REFRESH: Duration = Duration::from_secs(25);
 
 /// How long a pair with the silent quirk holds a connection before hanging up,
 /// as the one time it was seen.
@@ -278,6 +291,16 @@ fn startup_dump(mode: NoiseMode) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Which `every` the pod on `side` is in at `now`, counting from 0: the left
+/// pod's clock runs half of `every` off the right's.
+fn period(side: PodSide, now: Duration, every: Duration) -> u64 {
+    let offset = match side {
+        PodSide::Right => Duration::ZERO,
+        PodSide::Left => every / 2,
+    };
+    ((now + offset).as_millis() / every.as_millis()) as u64
+}
+
 /// Byte 8 of the advertisement, connected to a host or not.
 const CONNECTION_IDLE: u8 = 0x04;
 const CONNECTION_NONE: u8 = 0x00;
@@ -323,6 +346,8 @@ pub enum Part {
 ///   connected, where a Pro 3 zeroes it whenever a pod is out of the case -
 ///   #115 brings it in line;
 /// - the address rotation, [`ADDRESS_ROTATION`], faster on purpose;
+/// - the advertising rate, which is the world's: once a second from each pod
+///   that advertises, where real pods advertise about 5 times a second;
 /// - [`Quirks::handshake_delay`], [`Quirks::report_delay`] and
 ///   [`Quirks::dump_delay`], none or short where the hardware takes a second
 ///   or more;
@@ -728,25 +753,66 @@ impl Pods {
         self.keys = keys;
     }
 
-    /// What the pair broadcasts at `now`.
+    /// What the pair broadcasts at `now`: an advertisement from each pod that
+    /// advertises then, the right pod's first - see [`Pods::advertises`].
+    pub fn advertisements(&self, now: Duration) -> Vec<Advertisement> {
+        [PodSide::Right, PodSide::Left]
+            .into_iter()
+            .filter(|&side| self.advertises(side, now))
+            .map(|side| self.advertisement(side, now))
+            .collect()
+    }
+
+    /// Whether the pod on `side` advertises at `now`. Both pods do, each from
+    /// an address of its own, while either is in the case. With both out of
+    /// the case, worn or not, only the primary pod does, the other going quiet
+    /// the moment both are out and coming back as it goes back in the case.
+    /// Captures 1 and 2 of #71 saw the right pod alone, and it was primary
+    /// there. Each pod calls itself primary, and in session 1 of #142, both
+    /// pods worn and the left one primary at times, the advertisement's
+    /// primary agreed with AAP's 13 times out of 13
+    /// (`docs/aap-ear-detection.md`): the pod advertising was the primary.
+    pub fn advertises(&self, side: PodSide, _now: Duration) -> bool {
+        let both_out = !self.left.in_case && !self.right.in_case;
+        !both_out || side == self.primary
+    }
+
+    /// What the pod on `side` sends at `now`, whether it advertises then or
+    /// not.
+    ///
+    /// Each pod advertises as itself, as in the #71 captures: it calls itself
+    /// primary - status bit 5 set by the left pod and clear from the right,
+    /// its battery in the high nibble and first in the encrypted portion -
+    /// and its status bit 6 says whether it is in the case. So each pod's
+    /// advertisement decodes to the same left and right as the other's. The
+    /// primary pod AAP reports decides only which pod advertises when one
+    /// does - see [`Pods::advertisements`] - and, with both pods in the case,
+    /// which one sets bit 6. In capture 2 only one pod set it then, the left
+    /// before the pods were taken out and the right after they were put back:
+    /// the fake simplifies that to the primary.
     ///
     /// The cleartext gives the batteries in 10% steps. The encrypted portion,
-    /// under the pair's ENC_KEY, gives them exact, with the real address's last
-    /// three bytes in bytes 7-9 - zeroed while connected, see
-    /// [`Quirks::zero_suffix_when_connected`] - and a tail that
-    /// changes with `now`.
-    pub fn advertisement(&self, now: Duration) -> Advertisement {
-        let (primary, secondary) = match self.primary {
+    /// under the pair's ENC_KEY, gives them exact, with the real address's
+    /// last three bytes in bytes 7-9 - zeroed while connected, see
+    /// [`Quirks::zero_suffix_when_connected`] - and a tail that changes every
+    /// [`PAYLOAD_REFRESH`]. Its byte 0 is cleartext byte 8, the connection
+    /// state, as in all 111 payloads of the second capture.
+    pub fn advertisement(&self, side: PodSide, now: Duration) -> Advertisement {
+        let (this, other) = match side {
             PodSide::Left => (&self.left, &self.right),
             PodSide::Right => (&self.right, &self.left),
         };
-        // The primary pod is the one that does the talking.
-        let this_in_case = primary.in_case;
         let both_in_case = self.left.in_case && self.right.in_case;
+        let this_in_case = this.in_case && (!both_in_case || side == self.primary);
         let one_in_case = self.left.in_case || self.right.in_case;
+        let connection_state = if self.connected {
+            CONNECTION_IDLE
+        } else {
+            CONNECTION_NONE
+        };
         let cleartext = Cleartext {
             product_id: self.product_id,
-            primary: self.primary,
+            primary: side,
             this_in_case,
             both_in_case,
             one_in_case,
@@ -759,16 +825,11 @@ impl Pods {
             left_in_ear: self.left.in_ear,
             right_in_ear: self.right.in_ear,
             // With one pod in the case and one worn, the #71 captures have the
-            // pod in the case report the lid and the worn one only status bit 4.
-            // Only the primary pod talks here, so a worn primary leaves the
-            // app the lid it last heard.
+            // pod in the case report the lid and the worn one only status bit 4,
+            // which leaves the app the lid it last heard.
             lid_open: (this_in_case || both_in_case).then_some(self.lid_open),
             color: self.color,
-            connection_state: if self.connected {
-                CONNECTION_IDLE
-            } else {
-                CONNECTION_NONE
-            },
+            connection_state,
         };
 
         let mac_suffix = if self.connected && self.quirks.zero_suffix_when_connected {
@@ -776,13 +837,13 @@ impl Pods {
         } else {
             [self.mac[3], self.mac[4], self.mac[5]]
         };
-        let tail = self.derive(b'T', now.as_nanos() as u64);
+        let tail = self.derive(b'T', side, period(side, now, PAYLOAD_REFRESH));
         let plaintext = Plaintext {
-            header: self.plaintext_header(),
-            primary_battery: primary.battery,
-            primary_charging: primary.charging,
-            secondary_battery: secondary.battery,
-            secondary_charging: secondary.charging,
+            header: connection_state,
+            primary_battery: this.battery,
+            primary_charging: this.charging,
+            secondary_battery: other.battery,
+            secondary_charging: other.charging,
             case_battery: self.case_battery,
             case_charging: self.case_charging,
             mac_suffix,
@@ -791,20 +852,20 @@ impl Pods {
         let encrypted = encrypt(&plaintext.to_bytes(), &self.keys.enc_key);
 
         Advertisement {
-            address: self.address_at(now),
+            address: self.address_at(side, now),
             data: proximity_message(&cleartext.to_bytes(), &encrypted),
         }
     }
 
-    /// The random address the pair advertises from at `now`. It changes every
-    /// [`ADDRESS_ROTATION`], and with the keys.
+    /// The random address the pod on `side` advertises from at `now`. It
+    /// changes every [`ADDRESS_ROTATION`], on the pod's own clock, and with
+    /// the keys.
     ///
     /// A resolvable private address, as real AirPods advertise from: its hash
     /// is `ah` of its `prand` under the pair's IRK, so the IRK the key packet
     /// carries resolves it as it resolves the hardware's (#134).
-    pub fn address_at(&self, now: Duration) -> Address {
-        let period = (now.as_millis() / ADDRESS_ROTATION.as_millis()) as u64;
-        let bytes = self.derive(b'A', period);
+    pub fn address_at(&self, side: PodSide, now: Duration) -> Address {
+        let bytes = self.derive(b'A', side, period(side, now, ADDRESS_ROTATION));
         resolvable_address(&self.keys.irk, [bytes[0], bytes[1], bytes[2]])
     }
 
@@ -1052,19 +1113,14 @@ impl Pods {
         }
     }
 
-    /// Byte 0 of the plaintext: 0x10 as Pro 3 sends it, 0x00 as Pro 2 does -
-    /// and as the fake sends it for every other model. Its meaning is unknown,
-    /// and nothing reads it.
-    fn plaintext_header(&self) -> u8 {
-        if self.product_id == PRO_3 { 0x10 } else { 0x00 }
-    }
-
-    /// Sixteen bytes that look random but follow from the IRK, a purpose and a
-    /// number, so the rotating address and the advertisement's changing tail
-    /// are a function of state and time like everything else here.
-    fn derive(&self, purpose: u8, n: u64) -> [u8; 16] {
+    /// Sixteen bytes that look random but follow from the IRK, a purpose, a
+    /// pod and a number, so the rotating addresses and the advertisements'
+    /// changing tails are a function of state and time like everything else
+    /// here.
+    fn derive(&self, purpose: u8, side: PodSide, n: u64) -> [u8; 16] {
         let mut block = [0u8; 16];
         block[0] = purpose;
+        block[1] = u8::from(side == PodSide::Right);
         block[8..].copy_from_slice(&n.to_be_bytes());
         encrypt(&block, &self.keys.irk)
     }
@@ -1241,9 +1297,10 @@ mod tests {
         Duration::from_millis(ms)
     }
 
-    /// The advertisement at `now`, parsed and decrypted as the app does it.
-    fn read(pods: &Pods, now: Duration) -> ProximityData {
-        let ad = pods.advertisement(now);
+    /// What the pod on `side` sends at `now`, parsed and decrypted as the app
+    /// does it.
+    fn read(pods: &Pods, side: PodSide, now: Duration) -> ProximityData {
+        let ad = pods.advertisement(side, now);
         let mut pd = parse_proximity_data(&ad.data).unwrap();
         let encrypted = pd.encrypted_portion().unwrap().to_vec();
         let decrypted = decrypt_for_device(&encrypted, &pods.keys().enc_key, pods.mac()).unwrap();
@@ -1251,10 +1308,24 @@ mod tests {
         pd
     }
 
-    /// The plaintext of the advertisement at `now`, unchecked.
-    fn plaintext(pods: &Pods, now: Duration) -> [u8; 16] {
-        let pd = parse_proximity_data(&pods.advertisement(now).data).unwrap();
+    /// The plaintext of what the pod on `side` sends at `now`, unchecked.
+    fn plaintext(pods: &Pods, side: PodSide, now: Duration) -> [u8; 16] {
+        let pd = parse_proximity_data(&pods.advertisement(side, now).data).unwrap();
         decrypt_raw(pd.encrypted_portion().unwrap(), &pods.keys().enc_key).unwrap()
+    }
+
+    /// The pods that advertise at `now`, by the addresses they advertise
+    /// from.
+    fn advertising(pods: &Pods, now: Duration) -> Vec<PodSide> {
+        pods.advertisements(now)
+            .iter()
+            .map(|ad| {
+                [PodSide::Right, PodSide::Left]
+                    .into_iter()
+                    .find(|&side| pods.address_at(side, now) == ad.address)
+                    .expect("a pod's address")
+            })
+            .collect()
     }
 
     /// The packets among `actions`.
@@ -1292,7 +1363,8 @@ mod tests {
         pods.set_in_case(PodSide::Right, false);
         pods.set_battery(Part::Case, None);
 
-        let ad = pods.advertisement(ms(0));
+        assert_eq!(advertising(&pods, ms(0)), [PodSide::Left], "both out");
+        let ad = pods.advertisement(PodSide::Right, ms(0));
         let clear = parse_proximity_data(&ad.data).unwrap();
         assert_eq!(clear.product_id, PRO_3);
         assert_eq!(clear.color, 0x01);
@@ -1306,7 +1378,7 @@ mod tests {
         assert_eq!(clear.lid_open, None, "both pods are out of the case");
         assert_eq!(clear.connection_state, CONNECTION_NONE);
 
-        let exact = read(&pods, ms(0));
+        let exact = read(&pods, PodSide::Right, ms(0));
         assert_eq!(
             (exact.left_battery, exact.right_battery),
             (Some(83), Some(41))
@@ -1315,39 +1387,128 @@ mod tests {
         assert!(exact.left_charging);
     }
 
+    /// Each pod advertises from an address of its own, as itself, calling
+    /// itself primary - the right pod's status `0x55` beside the left's `0x35`
+    /// in the #71 captures - whichever pod AAP has as primary. Both decode to
+    /// the same left and right. Only the pod in the case reads the lid; the
+    /// worn one says a pod is in the case.
     #[test]
-    fn advertises_the_primary_pod() {
+    fn each_pod_advertises_as_itself() {
         let mut pods = Pods::new(PRO_2_USB_C, MAC);
-        pods.set_primary(PodSide::Right);
+        pods.set_primary(PodSide::Left);
         pods.set_in_ear(PodSide::Right, true);
         pods.set_battery(Part::Right, Some(12));
         pods.set_charging(Part::Right, true);
 
-        let pd = read(&pods, ms(0));
-        assert!(pd.is_flipped);
-        assert_eq!(pd.right_battery, Some(12));
-        assert!(pd.right_charging);
-        assert_eq!(pd.left_battery, Some(80));
-        assert!(pd.right_in_ear && !pd.left_in_ear);
-        assert_eq!(pd.lid_open, None, "the right pod, worn, does the talking");
-        assert!(pd.one_in_case, "and says the left pod is in the case");
+        assert_eq!(advertising(&pods, ms(0)), [PodSide::Right, PodSide::Left]);
+        let right = read(&pods, PodSide::Right, ms(0));
+        let left = read(&pods, PodSide::Left, ms(0));
+        assert_eq!(right.primary_pod(), PodSide::Right);
+        assert_eq!(left.primary_pod(), PodSide::Left);
+        for pd in [&right, &left] {
+            assert_eq!((pd.left_battery, pd.right_battery), (Some(80), Some(12)));
+            assert!(pd.right_charging && !pd.left_charging);
+            assert!(pd.right_in_ear && !pd.left_in_ear);
+            assert!(pd.one_in_case);
+        }
+        assert_eq!(left.status & 0x40, 0x40, "the left pod in the case");
+        assert_eq!(right.status & 0x40, 0, "the right pod out of it");
+        assert_eq!(left.lid_open, Some(true));
+        assert_eq!(right.lid_open, None, "the right pod, worn");
+    }
+
+    /// Wherever each pod is - in an ear, in the case or out - both pods'
+    /// advertisements decode to the pods as they are: the flip of each and
+    /// the ear swap undo each other.
+    #[test]
+    fn both_pods_decode_to_the_same_left_and_right() {
+        // In an ear, in the case.
+        let places = [(true, false), (false, true), (false, false)];
+        for left_place in places {
+            for right_place in places {
+                let mut pods = Pods::new(PRO_3, MAC);
+                pods.set_battery(Part::Left, Some(83));
+                pods.set_battery(Part::Right, Some(41));
+                pods.set_charging(Part::Left, true);
+                for (side, (in_ear, in_case)) in
+                    [(PodSide::Left, left_place), (PodSide::Right, right_place)]
+                {
+                    pods.set_in_case(side, in_case);
+                    pods.set_in_ear(side, in_ear);
+                }
+                for side in [PodSide::Left, PodSide::Right] {
+                    let pd = read(&pods, side, ms(0));
+                    let what = format!("{side:?}'s, left {left_place:?}, right {right_place:?}");
+                    assert_eq!(
+                        (pd.left_battery, pd.right_battery),
+                        (Some(83), Some(41)),
+                        "{what}"
+                    );
+                    assert!(pd.left_charging && !pd.right_charging, "{what}");
+                    assert_eq!(
+                        (pd.left_in_ear, pd.right_in_ear),
+                        (left_place.0, right_place.0),
+                        "{what}"
+                    );
+                    assert_eq!(pd.one_in_case, left_place.1 || right_place.1, "{what}");
+                }
+            }
+        }
+    }
+
+    /// Both pods advertise while one is in the case; with both out, worn or
+    /// not, the primary pod alone - the right one in captures 1 and 2 of #71,
+    /// where it was primary - and the other after a role switch.
+    #[test]
+    fn only_the_primary_pod_advertises_with_both_out_of_the_case() {
+        let both = [PodSide::Right, PodSide::Left];
+        let mut pods = Pods::new(PRO_3, MAC);
+        pods.set_primary(PodSide::Right);
+        assert_eq!(advertising(&pods, ms(0)), both, "both in the case");
+        pods.set_in_ear(PodSide::Left, true);
+        assert_eq!(advertising(&pods, ms(0)), both, "one worn");
+        pods.set_in_ear(PodSide::Right, true);
+        assert_eq!(advertising(&pods, ms(0)), [PodSide::Right], "both worn");
+        pods.set_primary(PodSide::Left);
+        assert_eq!(advertising(&pods, ms(0)), [PodSide::Left], "switched");
+        pods.set_in_ear(PodSide::Left, false);
+        assert_eq!(advertising(&pods, ms(0)), [PodSide::Left], "one out");
+        pods.set_in_ear(PodSide::Right, false);
+        assert_eq!(advertising(&pods, ms(0)), [PodSide::Left], "both out");
+        pods.set_in_case(PodSide::Right, true);
+        assert_eq!(advertising(&pods, ms(0)), both, "the right one back");
+    }
+
+    /// With both pods in the case, only one sets status bit 6, as in capture
+    /// 2 of #71: in the fake, the primary.
+    #[test]
+    fn with_both_pods_in_the_case_the_primary_alone_says_it_is_in_it() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        let bit_6 = |pods: &Pods, side| read(pods, side, ms(0)).status & 0x40 != 0;
+        for primary in [PodSide::Left, PodSide::Right] {
+            pods.set_primary(primary);
+            for side in [PodSide::Left, PodSide::Right] {
+                assert_eq!(bit_6(&pods, side), side == primary, "{side:?}");
+                assert_eq!(read(&pods, side, ms(0)).lid_open, Some(true));
+            }
+        }
     }
 
     #[test]
     fn advertises_the_lid_while_the_sending_pod_is_in_the_case() {
         let mut pods = Pods::new(PRO_3, MAC);
+        let lid = |pods: &Pods, side| read(pods, side, ms(0)).lid_open;
         pods.set_lid(false);
-        assert_eq!(read(&pods, ms(0)).lid_open, Some(false));
+        assert_eq!(lid(&pods, PodSide::Left), Some(false));
+        assert_eq!(lid(&pods, PodSide::Right), Some(false));
         pods.set_lid(true);
-        assert_eq!(read(&pods, ms(0)).lid_open, Some(true));
+        assert_eq!(lid(&pods, PodSide::Left), Some(true));
+        assert_eq!(lid(&pods, PodSide::Right), Some(true));
         pods.set_in_ear(PodSide::Right, true);
-        assert_eq!(
-            read(&pods, ms(0)).lid_open,
-            Some(true),
-            "the left pod, in the case, does the talking"
-        );
+        assert_eq!(lid(&pods, PodSide::Left), Some(true), "in the case");
+        assert_eq!(lid(&pods, PodSide::Right), None, "worn");
         pods.set_in_ear(PodSide::Left, true);
-        assert_eq!(read(&pods, ms(0)).lid_open, None);
+        assert_eq!(lid(&pods, PodSide::Right), None);
     }
 
     /// Disconnected, bytes 7-9 carry the real address's suffix; connected,
@@ -1356,15 +1517,17 @@ mod tests {
     #[test]
     fn decrypts_with_its_key_connected_or_not() {
         let mut pods = Pods::new(PRO_3, MAC);
-        let plain = plaintext(&pods, ms(0));
+        let plain = plaintext(&pods, PodSide::Right, ms(0));
         assert_eq!(plain[7..10], [0xDD, 0xEE, 0xFF]);
         assert!(matches_device(&plain, MAC));
 
         pods.set_connected(true);
-        let plain = plaintext(&pods, ms(0));
+        let plain = plaintext(&pods, PodSide::Right, ms(0));
         assert_eq!(plain[7..10], ZEROED_SUFFIX);
         assert!(matches_device(&plain, MAC));
-        assert_eq!(read(&pods, ms(0)).connection_state, CONNECTION_IDLE);
+        let pd = read(&pods, PodSide::Right, ms(0));
+        assert_eq!(pd.connection_state, CONNECTION_IDLE);
+        assert_eq!(plain[0], CONNECTION_IDLE, "byte 0 follows byte 8");
     }
 
     #[test]
@@ -1372,7 +1535,8 @@ mod tests {
         let mut pods = Pods::new(PRO_3, MAC);
         pods.quirks.zero_suffix_when_connected = false;
         pods.set_connected(true);
-        assert_eq!(plaintext(&pods, ms(0))[7..10], [0xDD, 0xEE, 0xFF]);
+        let plain = plaintext(&pods, PodSide::Right, ms(0));
+        assert_eq!(plain[7..10], [0xDD, 0xEE, 0xFF]);
     }
 
     /// A wrong key passes by chance one time in 2^23 - the odds the app works
@@ -1382,7 +1546,7 @@ mod tests {
         for connected in [false, true] {
             let mut pods = Pods::new(PRO_3, MAC);
             pods.set_connected(connected);
-            let pd = parse_proximity_data(&pods.advertisement(ms(0)).data).unwrap();
+            let pd = parse_proximity_data(&pods.advertisement(PodSide::Left, ms(0)).data).unwrap();
             let encrypted = pd.encrypted_portion().unwrap();
             let other = Keys::generate();
             assert!(decrypt_for_device(encrypted, &other.enc_key, MAC).is_err());
@@ -1391,46 +1555,86 @@ mod tests {
         }
     }
 
-    /// Every address resolves with the IRK the key packet carries, as the
+    /// Each pod has an address of its own, which rotates on its own clock:
+    /// the left pod's half a rotation in, the right pod's at a whole. Every
+    /// address resolves with the IRK the key packet carries, as the
     /// hardware's do, and with no other pair's.
     #[test]
-    fn the_address_rotates_and_resolves_with_the_irk() {
+    fn each_pods_address_rotates_and_resolves_with_the_irk() {
         let pods = Pods::new(PRO_3, MAC);
-        let first = pods.address_at(ms(0));
-        assert_eq!(pods.address_at(ADDRESS_ROTATION - ms(1)), first);
-        let second = pods.address_at(ADDRESS_ROTATION);
-        assert_ne!(second, first);
-        assert_eq!(pods.advertisement(ADDRESS_ROTATION).address, second);
+        let half = ADDRESS_ROTATION / 2;
+        let right = pods.address_at(PodSide::Right, ms(0));
+        let left = pods.address_at(PodSide::Left, ms(0));
+        assert_ne!(right, left, "an address each");
+
+        assert_eq!(pods.address_at(PodSide::Left, half - ms(1)), left);
+        let left_next = pods.address_at(PodSide::Left, half);
+        assert_ne!(left_next, left);
+        assert_eq!(pods.address_at(PodSide::Right, half), right);
+
+        assert_eq!(
+            pods.address_at(PodSide::Right, ADDRESS_ROTATION - ms(1)),
+            right
+        );
+        let right_next = pods.address_at(PodSide::Right, ADDRESS_ROTATION);
+        assert_ne!(right_next, right);
+        assert_eq!(pods.address_at(PodSide::Left, ADDRESS_ROTATION), left_next);
+        let ad = pods.advertisement(PodSide::Right, ADDRESS_ROTATION);
+        assert_eq!(ad.address, right_next);
+
         let other = Pods::new(PRO_3, MAC);
-        for address in [first, second] {
+        for address in [right, left, right_next, left_next] {
             assert_ne!(address, MAC);
             assert!(resolves(&pods.keys().irk, address), "{address}");
             assert!(!resolves(&other.keys().irk, address), "{address}");
         }
-        assert_ne!(other.address_at(ms(0)), first, "every pair has its own");
+        let others = other.address_at(PodSide::Right, ms(0));
+        assert_ne!(others, right, "every pair has its own");
     }
 
-    /// Bytes 12-15 of the plaintext change from one advertisement to the
-    /// next, and the ciphertext with them.
+    /// A pod repeats its payload until something changes, or until
+    /// [`PAYLOAD_REFRESH`] brings a new tail - bytes 12-15 of the plaintext,
+    /// and the ciphertext with them. The left pod refreshes half a refresh
+    /// off the right.
     #[test]
-    fn every_advertisement_differs() {
-        let pods = Pods::new(PRO_3, MAC);
-        assert_ne!(plaintext(&pods, ms(0))[12..], plaintext(&pods, ms(1))[12..]);
-        assert_eq!(plaintext(&pods, ms(0))[..12], plaintext(&pods, ms(1))[..12]);
-        assert_eq!(pods.advertisement(ms(0)), pods.advertisement(ms(0)));
+    fn the_payload_changes_with_the_state_or_its_refresh() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        let data = |pods: &Pods, side, now| pods.advertisement(side, now).data;
+        let first = data(&pods, PodSide::Right, ms(0));
+        let repeated = data(&pods, PodSide::Right, PAYLOAD_REFRESH - ms(1));
+        assert_eq!(repeated, first);
+        assert_ne!(data(&pods, PodSide::Right, PAYLOAD_REFRESH), first);
+        let tail_only = |a: [u8; 16], b: [u8; 16]| a[..12] == b[..12] && a[12..] != b[12..];
+        assert!(tail_only(
+            plaintext(&pods, PodSide::Right, ms(0)),
+            plaintext(&pods, PodSide::Right, PAYLOAD_REFRESH)
+        ));
+
+        let half = PAYLOAD_REFRESH / 2;
+        let left = data(&pods, PodSide::Left, ms(0));
+        assert_ne!(left, first, "a payload each");
+        assert_eq!(data(&pods, PodSide::Left, half - ms(1)), left);
+        assert_ne!(data(&pods, PodSide::Left, half), left);
+
+        pods.set_battery(Part::Case, Some(49));
+        assert_ne!(
+            data(&pods, PodSide::Right, ms(0)),
+            first,
+            "a change at once"
+        );
     }
 
     #[test]
     fn repairing_changes_the_keys_and_the_address() {
         let mut pods = Pods::new(PRO_3, MAC);
         let keys = pods.keys().clone();
-        let address = pods.address_at(ms(0));
+        let address = pods.address_at(PodSide::Right, ms(0));
         pods.repair();
         assert_ne!(pods.keys().enc_key, keys.enc_key);
         assert_ne!(pods.keys().irk, keys.irk);
-        assert_ne!(pods.address_at(ms(0)), address);
-        assert!(!resolves(&keys.irk, pods.address_at(ms(0))));
-        read(&pods, ms(0));
+        assert_ne!(pods.address_at(PodSide::Right, ms(0)), address);
+        assert!(!resolves(&keys.irk, pods.address_at(PodSide::Right, ms(0))));
+        read(&pods, PodSide::Right, ms(0));
 
         let fixed = Keys::generate();
         pods.repair_with(fixed.clone());
@@ -2103,7 +2307,7 @@ mod tests {
         assert_eq!(pods.poll(ms(10)), [Action::HangUp]);
         assert!(!pods.has_aap());
         assert!(pods.poll(ms(20)).is_empty());
-        let pd = parse_proximity_data(&pods.advertisement(ms(20)).data).unwrap();
+        let pd = parse_proximity_data(&pods.advertisement(PodSide::Right, ms(20)).data).unwrap();
         assert_eq!(pd.connection_state, CONNECTION_NONE);
     }
 
