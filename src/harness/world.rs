@@ -790,7 +790,7 @@ mod tests {
 
     use super::*;
     use crate::aap::noise::{self, NoiseMode};
-    use crate::aap::{Client, parse_battery_packet};
+    use crate::aap::{Client, is_ear_packet, is_primary_packet, parse_battery_packet};
     use crate::ble::decrypt::decrypt_for_device;
     use crate::ble::rpa::resolves;
     use crate::ble::scanner::Scanner;
@@ -828,6 +828,14 @@ mod tests {
 
     async fn next_packet(client: &Client) -> anyhow::Result<Vec<u8>> {
         timeout(TIMEOUT, client.read_packet()).await.unwrap()
+    }
+
+    /// Runs the handshake, and reads what the pair sends unasked once it has
+    /// answered: the primary pod, then the ear report.
+    async fn handshake(client: &Client) {
+        client.handshake().await.unwrap();
+        assert!(is_primary_packet(&next_packet(client).await.unwrap()));
+        assert!(is_ear_packet(&next_packet(client).await.unwrap()));
     }
 
     /// Whether the fake BlueZ shows the pair connected, read afresh.
@@ -882,8 +890,8 @@ mod tests {
         let (bus, world, dir) = world().await;
         let client = aap(&dir, MAC).await;
 
-        // Back once the pair has answered it.
-        client.handshake().await.unwrap();
+        // Back once the pair has answered it, and told where its pods are.
+        handshake(&client).await;
         client.request_battery_status().await.unwrap();
         let info = parse_battery_packet(&next_packet(&client).await.unwrap()).unwrap();
         assert_eq!(info.left.unwrap().level, Some(80));
@@ -921,7 +929,7 @@ mod tests {
         let (bus, world, dir) = world().await;
         world.connect(MAC).await.unwrap();
         let client = aap(&dir, MAC).await;
-        client.handshake().await.unwrap();
+        handshake(&client).await;
 
         world.disconnect(MAC).await.unwrap();
         assert!(next_packet(&client).await.is_err());
@@ -935,7 +943,7 @@ mod tests {
         let (bus, world, dir) = world().await;
         world.connect(MAC).await.unwrap();
         let client = aap(&dir, MAC).await;
-        client.handshake().await.unwrap();
+        handshake(&client).await;
 
         world.set_powered(DEFAULT_ADAPTER, false).await.unwrap();
         assert!(next_packet(&client).await.is_err(), "AAP stays up");
@@ -953,7 +961,7 @@ mod tests {
         world.set_powered(DEFAULT_ADAPTER, true).await.unwrap();
         world.connect(MAC).await.unwrap();
         let client = aap(&dir, MAC).await;
-        client.handshake().await.unwrap();
+        handshake(&client).await;
 
         world.remove_adapter(DEFAULT_ADAPTER).await.unwrap();
         assert!(next_packet(&client).await.is_err(), "AAP stays up");
@@ -974,7 +982,7 @@ mod tests {
     async fn a_second_connection_is_turned_away() {
         let (_bus, _world, dir) = world().await;
         let first = aap(&dir, MAC).await;
-        first.handshake().await.unwrap();
+        handshake(&first).await;
 
         let second = aap(&dir, MAC).await;
         assert!(next_packet(&second).await.is_err());
@@ -995,7 +1003,7 @@ mod tests {
             .await
             .unwrap();
         let client = aap(&dir, MAC).await;
-        client.handshake().await.unwrap();
+        handshake(&client).await;
 
         client.set_noise_mode(NoiseMode::Adaptive).await.unwrap();
         assert_eq!(
