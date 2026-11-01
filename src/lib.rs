@@ -44,6 +44,7 @@ pub mod bluez;
 pub mod harness;
 pub mod indicator;
 pub mod keystore;
+pub mod notify;
 pub mod podstate;
 pub mod ui;
 
