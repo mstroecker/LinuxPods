@@ -102,8 +102,9 @@ carries a GTK object toward tokio.
 **Parsing and tests.** `aap::battery`, `aap::ear`, `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`,
 `ble::decrypt` and `ble::rpa` take bytes and return values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
-literals; flag what it cannot: a test reading the real keystore (`~/.local/share/linuxpods`,
-`$HOME`, `XDG_DATA_HOME` unset), a `gitleaks:allow` on a value that is not obviously
+literals; flag what it cannot: a test reading the real keystore or settings
+(`~/.local/share/linuxpods`, `~/.config/linuxpods`, `$HOME`, `XDG_DATA_HOME` or
+`XDG_CONFIG_HOME` unset), a `gitleaks:allow` on a value that is not obviously
 synthetic (the Core spec's public RPA sample, Vol 3 Part H Appendix D.7, is the one
 accepted exception), or a captured advertisement committed together with the key that decrypts it.
 

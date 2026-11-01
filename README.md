@@ -76,7 +76,7 @@ own. This is the only channel that can *send* commands.
 | Keys stored under the XDG data directory and reused across sessions | ✅ |
 | Native libadwaita interface following the GNOME HIG | ✅ |
 | Low battery notifications, at 20% and 5% as UPower's defaults, with a switch in Preferences | ✅ |
-| Persisted UI preferences | 📋 |
+| Preferences kept across restarts, in the XDG config directory | ✅ |
 
 ### Unexplored
 
@@ -190,9 +190,9 @@ them the model and its color, and which source the reading came from. With more 
 one pair to show - each one it holds a key for, and each one connected over AAP - the
 header bar switches between them. **Preferences**, in the main menu, lists every one of
 them with its encryption key status, and turns low battery notifications off and on. The
-switch is not saved yet, so it is on whenever the app starts. Low battery notifications
-need the launcher entry that `make install` writes: GNOME Shell shows none for an app it
-has no desktop entry for.
+switch is kept across restarts, in `~/.config/linuxpods/settings.json`. Low battery
+notifications need the launcher entry that `make install` writes: GNOME Shell shows none
+for an app it has no desktop entry for.
 
 Setup is connecting the AirPods to this machine once. On every connection LinuxPods asks
 them for their keys - the IRK and the encryption key - and writes them to
@@ -292,6 +292,7 @@ src/
 ├── bluez.rs       # Adapters, the device watch, a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # Key storage under XDG data dir
+├── settings.rs    # Preferences' settings under XDG config dir
 ├── indicator.rs   # System tray (StatusNotifierItem)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
 ├── ui/            # GTK4/libadwaita: window, Control page, Preferences, notifications; automation.rs, harness only
