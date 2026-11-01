@@ -1677,6 +1677,7 @@ mod tests {
     use zbus::proxy::CacheProperties;
 
     use super::*;
+    use crate::ble::parser::PodSide;
     use crate::ble::scanner::Scanner;
     use crate::bluez::{self, BatteryAction, BatteryProvider, Devices};
     use crate::harness::PrivateBus;
@@ -1922,7 +1923,7 @@ mod tests {
         assert!(!bluez.is_discovering("hci2"));
 
         let pods = Pods::new(PRO_3, PAIR);
-        let ad = pods.advertisement(Duration::ZERO);
+        let ad = pods.advertisement(PodSide::Right, Duration::ZERO);
         assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
         let advert = timeout(TIMEOUT, adverts.next()).await.unwrap().unwrap();
         assert_eq!(advert.ble_mac, ad.address);
@@ -2227,10 +2228,10 @@ mod tests {
         // strength alone - and a change. The scanner reads the first and the
         // change, in order, or the change alone when its reader is behind.
         let mut pods = Pods::new(PRO_3, PAIR);
-        let address = pods.address_at(Duration::ZERO);
-        let first = pods.advertisement(Duration::ZERO);
+        let first = pods.advertisement(PodSide::Right, Duration::ZERO);
+        let address = first.address;
         pods.set_battery(Part::Left, Some(10));
-        let changed = pods.advertisement(Duration::ZERO);
+        let changed = pods.advertisement(PodSide::Right, Duration::ZERO);
         for ad in [&first, &first, &changed] {
             bluez.advertise(address, &ad.data).await.unwrap();
         }

@@ -134,7 +134,7 @@ pub struct Plaintext {
     /// Bytes 7-9: the last three bytes of the real MAC, or [`ZEROED_SUFFIX`]
     /// unless both pods are in the case.
     pub mac_suffix: [u8; 3],
-    /// Bytes 12-15, which change with every advertisement.
+    /// Bytes 12-15, which change whenever the payload does.
     pub tail: [u8; 4],
 }
 

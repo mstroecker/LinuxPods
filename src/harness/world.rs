@@ -9,12 +9,18 @@
 //! loses its link when its adapter powers off or goes. The world carries out
 //! what the model asks for and nothing else:
 //!
-//! - **BLE.** Every [`ADVERTISING_INTERVAL`] each pair's advertisement goes to
-//!   the fake BlueZ, which signals it while the app discovers - from the
-//!   resolvable private address the model makes from the pair's IRK and
-//!   rotates, so a new device object every ten seconds. Every adapter that discovers hears it, whichever the pair is
-//!   paired with, as radios in one room do, so with two adapters each
-//!   advertisement is signaled twice, from a device under each.
+//! - **BLE.** Every [`ADVERTISING_INTERVAL`] the advertisement of each pod
+//!   that advertises goes to the fake BlueZ, which signals it while the app
+//!   discovers - from the resolvable private address the model makes for the
+//!   pod from the pair's IRK and rotates, so each pod brings a new device
+//!   object every ten seconds. Both pods advertise while one is in the case,
+//!   only the right one while both are out - see [`Pods::advertises`]. A pod
+//!   repeats its payload until something changes, or for
+//!   [`super::pods::PAYLOAD_REFRESH`], so most of what the fake BlueZ
+//!   signals is the strength alone, as with real AirPods. Every adapter that
+//!   discovers hears it, whichever the pair is paired with, as radios in one
+//!   room do, so with two adapters each advertisement is signaled twice, from
+//!   a device under each.
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
@@ -54,7 +60,7 @@
 //! request the world cannot carry out - a MAC it has no pair at, a hang-up
 //! with no connection - is `org.freedesktop.DBus.Error.Failed`.
 //!
-//! Time is real: a pair rotates its address every ten seconds - far more
+//! Time is real: each pod rotates its address every ten seconds - far more
 //! often than real AirPods, every 4 to 8 minutes, so that tests meet rotation -
 //! and the fake BlueZ forgets an address after thirty. The model's clock
 //! starts with the world.
@@ -79,6 +85,7 @@ use super::connect_serving;
 use super::pods::{Action, Keys, PRO_3, Part, Pods, Quirks};
 use crate::aap::client::unix_socket_path;
 use crate::ble::decrypt::random_key;
+use crate::ble::parser::PodSide;
 
 /// The name `FakeWorld1` is served under.
 pub const SERVICE: &str = "io.github.mstroecker.LinuxPods.FakeWorld";
@@ -89,9 +96,10 @@ pub const INTERFACE: &str = "io.github.mstroecker.LinuxPods.FakeWorld1";
 /// puts first.
 pub const DEFAULT_ADAPTER: &str = "hci0";
 
-/// How often each pair advertises. Real AirPods do so many times a second;
-/// once a second keeps the logs readable and still gives an address ten
-/// advertisements before it rotates.
+/// How often each pod advertises. Real AirPods do so about 5 times a second
+/// from each pod, with bursts of 30-35 a second after the lid opens or the
+/// pods go back in the case (#71). Once a second keeps the logs readable, and
+/// still gives an address ten advertisements before it rotates.
 pub const ADVERTISING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Room for any AAP packet the app sends; the longest is 16 bytes.
@@ -478,8 +486,8 @@ impl World {
         let now = self.now();
         for _ in 0..count {
             let spammer = Pods::new(PRO_3, random_address());
-            let address = spammer.address_at(now);
-            let advert = spammer.advertisement(now);
+            let advert = spammer.advertisement(PodSide::Right, now);
+            let address = advert.address;
             for _ in 0..times {
                 self.0.bluez.advertise(address, &advert.data).await?;
             }
@@ -488,8 +496,8 @@ impl World {
         Ok(())
     }
 
-    /// Advertises every pair every [`ADVERTISING_INTERVAL`], and has the fake
-    /// BlueZ forget the addresses that went quiet.
+    /// Advertises every pod that advertises every [`ADVERTISING_INTERVAL`],
+    /// and has the fake BlueZ forget the addresses that went quiet.
     async fn advertise(self) {
         let mut tick = tokio::time::interval(ADVERTISING_INTERVAL);
         loop {
@@ -499,7 +507,10 @@ impl World {
                 let now = self.now();
                 pairs
                     .iter()
-                    .map(|(mac, pair)| (*mac, pair.pods.advertisement(now)))
+                    .flat_map(|(mac, pair)| {
+                        let adverts = pair.pods.advertisements(now);
+                        adverts.into_iter().map(|advert| (*mac, advert))
+                    })
                     .collect()
             };
             for (mac, advert) in adverts {

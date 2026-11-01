@@ -23,10 +23,12 @@
 //! it from there: an AAP link, and a battery for GNOME Settings, which the fake
 //! BlueZ reports through [`World::batteries`].
 //!
-//! Time runs at real speed: each pair advertises once a second, from an
-//! address that its IRK resolves and that rotates every ten. Tests wait for what they expect to see,
-//! under [`TIMEOUT`]. The 30-minute BLE cache expiry stays with the
-//! coordinator's unit tests.
+//! Time runs at real speed: each pod advertises once a second, from an
+//! address of its own that the pair's IRK resolves and that rotates every
+//! ten, and repeats its payload until something changes - so the app hears
+//! a pod again when its state changes or its address does. Tests wait for
+//! what they expect to see, under [`TIMEOUT`]. The 30-minute BLE cache expiry
+//! stays with the coordinator's unit tests.
 //!
 //! Every key is generated at runtime, by the fake pairs; none is in the source.
 
@@ -619,7 +621,10 @@ async fn a_key_that_arrives_on_connect_is_stored_and_makes_the_ble_reading_exact
     })
     .await;
 
-    // The next session, which loads the key from the keystore.
+    // The next session, which loads the key from the keystore. The fake
+    // BlueZ still has the pods' devices from the first, so it hears them only
+    // once a payload or an address changes: up to half a rotation, while
+    // both pods advertise (#153).
     drop(app);
     let mut app = fixture.start_app().await;
     let snapshot = app
@@ -816,10 +821,21 @@ async fn a_repaired_pairs_new_key_replaces_the_stored_one_on_the_next_connection
 /// its key, and it stays identified as its address rotates: its reading
 /// follows it to a new address. Every address it is heard from resolves with
 /// its IRK (#134).
+///
+/// Both pods are out of the case, so the primary alone advertises, as real
+/// pods do, and the pair is heard from one address at a time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pair_whose_address_resolves_is_identified_across_a_rotation() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
     fixture.seed_keys(&[PAIR]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.set_in_case(PodSide::Left, false);
+            pods.set_in_case(PodSide::Right, false);
+        })
+        .await
+        .unwrap();
     let keys = fixture.pair_keys(PAIR).await;
     let irk = keys.irk.unwrap();
     let mut app = fixture.start_app().await;
@@ -828,10 +844,10 @@ async fn a_pair_whose_address_resolves_is_identified_across_a_rotation() {
     })
     .await;
 
-    // The address the pair is heard from now, then the next one: up to a
+    // The address the pair was first heard from, then the next one: up to a
     // rotation and an advertising interval away, which is more than
-    // `TIMEOUT` leaves room for on a loaded runner.
-    app.skip_handled();
+    // `TIMEOUT` leaves room for on a loaded runner. The first is still among
+    // those handled: a repeat of the same payload is never heard.
     let mut first = None;
     let next = "an advertisement from the pair's next address";
     app.handled_within(ADDRESS_ROTATION * 3, next, 1, |a| {
@@ -877,7 +893,7 @@ async fn what_decrypts_from_an_address_that_does_not_resolve_is_dropped() {
         .unwrap();
     let mut app = fixture.start_app().await;
 
-    let advert = pods.advertisement(Duration::ZERO);
+    let advert = pods.advertisement(PodSide::Right, Duration::ZERO);
     // A resolvable private address, as the pair's are, but another IRK's.
     let elsewhere = resolvable_address(&random_key(), [0x12, 0x34, 0x56]);
     assert!(!resolves(&keys.irk, elsewhere));
@@ -932,7 +948,7 @@ async fn a_pair_keyed_before_irks_were_kept_works_until_it_reconnects() {
     app.stop_listening().await;
     let mut pods = pods_at(PAIR, [21, 32, 43]);
     pods.repair_with(fixture.world.keys(PAIR).await.unwrap());
-    let advert = pods.advertisement(Duration::ZERO);
+    let advert = pods.advertisement(PodSide::Right, Duration::ZERO);
     let data = parse_proximity_data(&advert.data).unwrap();
     let elsewhere = resolvable_address(&random_key(), [0x12, 0x34, 0x56]);
     app.coordinator
@@ -1705,11 +1721,23 @@ async fn a_command_to_a_pair_off_aap_fails_to_its_caller() {
 /// watched for a while: the check comes after the coordinator has handled
 /// every advertiser, each known by its address, and it broadcasts within the
 /// handling or not at all.
+///
+/// Both pods are worn, so the primary alone advertises. That avoids #152:
+/// each pod calls itself primary, and an advertisement from the other would
+/// change the primary pod a snapshot takes from the last.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
     fixture.seed_keys(&[PAIR]).await;
     let key = fixture.enc_key(PAIR).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.set_in_ear(PodSide::Left, true);
+            pods.set_in_ear(PodSide::Right, true);
+        })
+        .await
+        .unwrap();
     // Connected before the app hears it, so that every advertisement it sends
     // says so, and none changes what a snapshot takes from the last.
     fixture.world.connect(PAIR).await.unwrap();
@@ -1774,7 +1802,7 @@ async fn an_address_that_advertises_once_reaches_the_coordinator() {
         .unwrap();
     let mut app = fixture.start_app().await;
 
-    let advert = pods.advertisement(Duration::ZERO);
+    let advert = pods.advertisement(PodSide::Right, Duration::ZERO);
     let bluez = fixture.world.bluez();
     let heard = bluez.advertise(advert.address, &advert.data).await.unwrap();
     assert!(heard, "advertised while the app discovers");
