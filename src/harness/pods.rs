@@ -51,6 +51,17 @@ pub const ADDRESS_ROTATION: Duration = Duration::from_secs(10);
 /// as the one time it was seen.
 pub const SILENT_HANG_UP: Duration = Duration::from_secs(9);
 
+/// How long after a mode change its echo comes, by default: a Pro 3 echoed
+/// 1.0-1.1 s after each change in the #71 captures. The real value, kept as
+/// the default: the app records the mode it asks for at once and waits for
+/// no echo, so nothing waits on it but a test that asks for it, which can
+/// set [`Quirks::echo_delay`] shorter.
+pub const ECHO_DELAY: Duration = Duration::from_secs(1);
+
+/// How long after an Off its stale report of the mode it replaced comes, by
+/// default: 0.33 s in the #71 capture - see [`Quirks::stale_report`].
+pub const STALE_REPORT: Duration = Duration::from_millis(330);
+
 /// Where an AAP packet carries its command.
 const OPCODE: usize = 4;
 
@@ -131,15 +142,18 @@ pub enum Part {
     Case,
 }
 
-/// Behavior of the hardware that the fake can switch. The default is what the
-/// hardware does, with two exceptions from the #71 captures. The answers to a
-/// mode change are AirPods 4's (`docs/aap-noise-control.md`), where a Pro 3
-/// echoes every change about 1 s later and sends no 0x4B. And
-/// [`Quirks::zero_suffix_when_connected`] zeroes the suffix while connected,
-/// where a Pro 3 zeroes it whenever a pod is out of the case. #115 brings
-/// those in line, along with the features answer, `FEATURES_ACK`, which is
-/// not a quirk. The address rotation, [`ADDRESS_ROTATION`], is faster than
-/// the hardware's on purpose.
+/// Behavior of the hardware that the fake can switch. The default is what
+/// AirPods Pro 3 do in the #71 captures, for every model: AirPods Pro 2
+/// (USB-C) count as behaving the same until a capture shows otherwise. Two
+/// exceptions: [`Quirks::zero_suffix_when_connected`] zeroes the suffix while
+/// connected, where a Pro 3 zeroes it whenever a pod is out of the case,
+/// which #115 brings in line; and the address rotation, [`ADDRESS_ROTATION`],
+/// is faster than the hardware's on purpose.
+///
+/// AirPods 4 answered a mode change otherwise (`docs/aap-noise-control.md`):
+/// a 0x4B on every change, an echo on about one in four, and no report of the
+/// mode an Off replaced. Their answers are `settings_changed: true,
+/// echo_every: 4, stale_report: None`.
 ///
 /// Each one is read when it applies, so a change takes effect from the next
 /// packet, advertisement or connection.
@@ -149,23 +163,25 @@ pub struct Quirks {
     /// nothing on the wire, where recent firmware on Pro 3 and Pro 2 plays an
     /// error chime.
     pub off_needs_allow: bool,
-    /// Answer every mode change with the 0x4B settings-changed notification.
+    /// Answer every mode change with the 0x4B settings-changed notification,
+    /// as AirPods 4 do. A Pro 3 sent none, so off by default.
     pub settings_changed: bool,
     /// Echo every n-th mode change with a 0x0D report of the mode set: 1
     /// echoes every change, 0 none. Counted rather than drawn at random, so
-    /// tests are never flaky; the default 4 is AirPods 4's one change in
-    /// four, the first echo following the fourth change.
+    /// tests are never flaky. The default 1 is a Pro 3's; AirPods 4 echoed
+    /// about one change in four, which 4 gives, the first echo following the
+    /// fourth change.
     pub echo_every: u32,
-    /// How long after its change an echo comes. A Pro 3 echoed 1.0-1.1 s after
-    /// each change in the #71 captures; the default 500 ms is shorter, and still
+    /// How long after its change an echo comes: [`ECHO_DELAY`] by default, as
+    /// a Pro 3 echoed 1.0-1.1 s after each change in the #71 captures. That
     /// puts it after the app has recorded the mode it asked for, so the echo
     /// confirms rather than sets it.
     pub echo_delay: Duration,
     /// Report the mode an Off replaced, this long after the change - before
     /// the echo, when one comes sooner than that. In the #71 capture, switched
-    /// from Noise Cancellation to Off, the pair reported `0D 02` 0.33 s later and
-    /// the Off itself, `0D 01`, at 1.4 s; the other three modes came with no
-    /// such report. Seen once, so `None` by default. It brings no echo of its
+    /// from Noise Cancellation to Off, a Pro 3 reported `0D 02` 0.33 s later
+    /// and the Off itself, `0D 01`, at 1.4 s; the other three modes came with
+    /// no such report. [`STALE_REPORT`] by default. It brings no echo of its
     /// own: [`Quirks::echo_every`] and [`Quirks::echo_delay`] say when that
     /// comes.
     pub stale_report: Option<Duration>,
@@ -201,10 +217,10 @@ impl Default for Quirks {
     fn default() -> Self {
         Self {
             off_needs_allow: true,
-            settings_changed: true,
-            echo_every: 4,
-            echo_delay: Duration::from_millis(500),
-            stale_report: None,
+            settings_changed: false,
+            echo_every: 1,
+            echo_delay: ECHO_DELAY,
+            stale_report: Some(STALE_REPORT),
             zero_suffix_when_connected: true,
             silent_handshake: false,
             refuse_aap: 0,
@@ -617,8 +633,9 @@ impl Pods {
     /// - the features packet (0x4D) the 0x2B LibrePods takes for its
     ///   acknowledgment - see `FEATURES_ACK`;
     /// - the key request (0x30) the key packet, IRK then ENC_KEY;
-    /// - a mode change the 0x4B notification and now and then the delayed echo,
-    ///   or nothing for an Off not allowed - see [`Quirks`];
+    /// - a mode change its delayed echo, and an Off a report of the mode it
+    ///   replaced ahead of that, as a Pro 3 answers; or nothing, for an Off not
+    ///   allowed - see [`Quirks`], which switch to AirPods 4's answers too;
     /// - `0x34` sets allow-Off. What it answers is not recorded, so the fake
     ///   answers nothing.
     ///
@@ -773,23 +790,58 @@ impl Pods {
         encrypt(&block, &self.keys.irk)
     }
 
-    /// The batteries as AAP reports them, in the order the device lists them:
-    /// right, left, case.
+    /// The batteries as AAP reports them, the primary pod first, then the
+    /// other, then the case.
+    ///
+    /// The hardware lists first the bud AAP reached, itself (#71), and in the
+    /// #142 captures that was the primary pod: left first with `08 01`, right
+    /// first with `08 02`. The fake takes the primary, so the order follows a
+    /// role switch.
+    ///
+    /// A part that is away is sent as the hardware sends it: status
+    /// Disconnected (`0x04`) at level 0, the level that once read as a real
+    /// 0% (#108). Away is a level the model holds as unknown, and a pod in the
+    /// closed case, which takes the case's battery with it (capture 4 of #71).
     fn aap_batteries(&self) -> [Battery; 3] {
-        let battery = |component, level, charging| Battery {
-            component,
-            level,
-            status: if charging {
-                Status::Charging
-            } else {
-                Status::Discharging
+        let closed = |pod: &Pod| pod.in_case && !self.lid_open;
+        let battery = |component, level: Option<u8>, charging, away: bool| match level {
+            Some(level) if !away => Battery {
+                component,
+                level: Some(level),
+                status: if charging {
+                    Status::Charging
+                } else {
+                    Status::Discharging
+                },
+            },
+            _ => Battery {
+                component,
+                level: Some(0),
+                status: Status::Disconnected,
             },
         };
-        [
-            battery(Component::Right, self.right.battery, self.right.charging),
-            battery(Component::Left, self.left.battery, self.left.charging),
-            battery(Component::Case, self.case_battery, self.case_charging),
-        ]
+        let left = battery(
+            Component::Left,
+            self.left.battery,
+            self.left.charging,
+            closed(&self.left),
+        );
+        let right = battery(
+            Component::Right,
+            self.right.battery,
+            self.right.charging,
+            closed(&self.right),
+        );
+        let case = battery(
+            Component::Case,
+            self.case_battery,
+            self.case_charging,
+            closed(&self.left) || closed(&self.right),
+        );
+        match self.primary {
+            PodSide::Left => [left, right, case],
+            PodSide::Right => [right, left, case],
+        }
     }
 
     fn key_packet(&self) -> Vec<u8> {
@@ -1182,10 +1234,8 @@ mod tests {
         pods.receive(&noise::set_packet(NoiseMode::Off), ms(20));
         assert!(pods.allow_off());
         assert_eq!(pods.noise_mode(), NoiseMode::Off);
-        assert_eq!(
-            sent(&pods.poll(ms(20))),
-            [noise::settings_changed_packet().to_vec()]
-        );
+        assert!(pods.poll(ms(20)).is_empty(), "nothing at once");
+        assert_eq!(pods.next_due(), Some(ms(20) + STALE_REPORT));
     }
 
     #[test]
@@ -1196,11 +1246,39 @@ mod tests {
         assert_eq!(pods.noise_mode(), NoiseMode::Off);
     }
 
-    /// The 0x4B notification on every change; the echo on every fourth, after
-    /// the delay, carrying the mode.
+    /// A Pro 3's answers, the default: nothing at once, and the echo of every
+    /// change [`ECHO_DELAY`] later, carrying the mode.
     #[test]
-    fn answers_mode_changes_as_the_hardware_does() {
+    fn answers_mode_changes_as_a_pro_3_does() {
         let mut pods = subscribed();
+        let modes = [
+            NoiseMode::Transparency,
+            NoiseMode::Adaptive,
+            NoiseMode::NoiseCancellation,
+        ];
+        for (i, mode) in modes.into_iter().enumerate() {
+            let now = ms(2000 * (i as u64 + 1));
+            pods.receive(&noise::set_packet(mode), now);
+            assert_eq!(pods.noise_mode(), mode);
+            assert!(pods.poll(now).is_empty(), "{mode}: no 0x4B");
+            assert_eq!(pods.next_due(), Some(now + ECHO_DELAY), "{mode}");
+            assert!(pods.poll(now + ECHO_DELAY - ms(1)).is_empty());
+            assert_eq!(
+                sent(&pods.poll(now + ECHO_DELAY)),
+                [noise::set_packet(mode).to_vec()]
+            );
+        }
+    }
+
+    /// AirPods 4's answers, through the quirks: the 0x4B notification on every
+    /// change; the echo on every fourth, after the delay, carrying the mode.
+    #[test]
+    fn answers_mode_changes_as_airpods_4_do() {
+        let mut pods = subscribed();
+        pods.quirks.settings_changed = true;
+        pods.quirks.echo_every = 4;
+        pods.quirks.echo_delay = ms(500);
+        pods.quirks.stale_report = None;
         let delay = pods.quirks.echo_delay;
         let modes = [
             NoiseMode::Transparency,
@@ -1233,21 +1311,15 @@ mod tests {
     }
 
     /// Off from Noise Cancellation as the #71 capture has it - a report of
-    /// Noise Cancellation at +0.33 s and the echo of Off at +1.4 s - with the
-    /// fake's default 0x4B at once on top. No other mode brings such a
-    /// report, nor does Off from Off.
+    /// Noise Cancellation at +0.33 s, the default, and the echo of Off at +1.4
+    /// s. No other mode brings such a report, nor does Off from Off.
     #[test]
-    fn off_can_bring_a_report_of_the_mode_it_replaced() {
+    fn off_brings_a_report_of_the_mode_it_replaced() {
         let mut pods = subscribed();
-        pods.quirks.stale_report = Some(ms(330));
-        pods.quirks.echo_every = 1;
         pods.quirks.echo_delay = ms(1400);
         pods.receive(&noise::allow_off_packet(true), ms(1000));
         pods.receive(&noise::set_packet(NoiseMode::Off), ms(1000));
-        assert_eq!(
-            sent(&pods.poll(ms(1000))),
-            [noise::settings_changed_packet().to_vec()]
-        );
+        assert!(pods.poll(ms(1000)).is_empty());
         assert_eq!(pods.next_due(), Some(ms(1330)));
         assert_eq!(
             sent(&pods.poll(ms(1330))),
@@ -1273,7 +1345,7 @@ mod tests {
     #[test]
     fn the_echo_and_the_notification_can_be_switched() {
         let mut pods = subscribed();
-        pods.quirks.echo_every = 1;
+        pods.quirks.settings_changed = true;
         pods.quirks.echo_delay = Duration::ZERO;
         pods.receive(&noise::set_packet(NoiseMode::Adaptive), ms(10));
         assert_eq!(
@@ -1365,7 +1437,14 @@ mod tests {
 
         let switched = ms(900);
         pods.set_primary(PodSide::Right);
-        assert_eq!(sent(&pods.poll(switched)), [ears(Place::InEar, Place::Out)]);
+        assert_eq!(
+            sent(&pods.poll(switched)),
+            [
+                battery_packet(&pods.aap_batteries()),
+                ears(Place::InEar, Place::Out)
+            ],
+            "the battery too, the new primary first"
+        );
         let first = switched + PRIMARY_AFTER_EAR;
         assert_eq!(pods.next_due(), Some(first));
         assert!(pods.poll(first - ms(1)).is_empty());
@@ -1389,7 +1468,11 @@ mod tests {
         pods.set_in_ear(PodSide::Right, true);
         pods.poll(ms(0));
         pods.set_primary(PodSide::Right);
-        assert!(pods.poll(ms(0)).is_empty());
+        assert_eq!(
+            sent(&pods.poll(ms(0))),
+            [battery_packet(&pods.aap_batteries())],
+            "no ear report"
+        );
         assert_eq!(
             sent(&pods.poll(PRIMARY_AFTER_EAR)),
             [primary_packet(PodSide::Right, true, true).to_vec()]
@@ -1397,28 +1480,87 @@ mod tests {
     }
 
     /// The secondary pod in the case as the lid closes and opens: the place,
-    /// and the primary pod packet's say on whether it can be reached.
+    /// the primary pod packet's say on whether it can be reached, and the
+    /// battery, which reports that pod and the case Disconnected while the lid
+    /// is closed.
     #[test]
     fn the_closed_case_is_reported() {
         let mut pods = subscribed();
         pods.set_in_ear(PodSide::Left, true);
         pods.poll(ms(0));
         pods.set_lid(false);
+        let away = [
+            battery(Component::Left, Some(80), Status::Discharging),
+            battery(Component::Right, Some(0), Status::Disconnected),
+            battery(Component::Case, Some(0), Status::Disconnected),
+        ];
         assert_eq!(
             sent(&pods.poll(ms(10))),
             [
+                battery_packet(&away),
                 ears(Place::InEar, Place::InClosedCase),
                 primary_packet(PodSide::Left, false, false).to_vec(),
             ]
         );
         pods.set_lid(true);
+        let back = [
+            battery(Component::Left, Some(80), Status::Discharging),
+            battery(Component::Right, Some(70), Status::Discharging),
+            battery(Component::Case, Some(50), Status::Discharging),
+        ];
         assert_eq!(
             sent(&pods.poll(ms(20))),
             [
+                battery_packet(&back),
                 ears(Place::InEar, Place::InCase),
                 primary_packet(PodSide::Left, true, false).to_vec(),
             ]
         );
+    }
+
+    fn battery(component: Component, level: Option<u8>, status: Status) -> Battery {
+        Battery {
+            component,
+            level,
+            status,
+        }
+    }
+
+    /// A part the model holds as unknown goes out as the hardware sends one
+    /// that is away: status Disconnected at level 0 - `08 01 00 04 01` for the
+    /// case, captured with both pods worn (#71) - which the app reads as
+    /// unknown, not 0% (#108).
+    #[test]
+    fn a_part_unknown_is_sent_disconnected_at_level_0() {
+        let mut pods = subscribed();
+        pods.set_battery(Part::Case, None);
+        let packets = sent(&pods.poll(ms(10)));
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0][17..], [0x08, 0x01, 0x00, 0x04, 0x01]);
+        let info = parse_battery_packet(&packets[0]).unwrap();
+        assert_eq!(info.case.unwrap().level, None);
+        assert_eq!(info.left.unwrap().level, Some(80));
+    }
+
+    /// The primary pod first, then the other, then the case - and after a
+    /// role switch the new primary first, which is a change to report.
+    #[test]
+    fn the_battery_lists_the_primary_pod_first() {
+        let mut pods = subscribed();
+        pods.set_in_ear(PodSide::Left, true);
+        pods.set_in_ear(PodSide::Right, true);
+        pods.poll(ms(0));
+        let components = |packet: &[u8]| [packet[7], packet[12], packet[17]];
+        pods.set_battery(Part::Left, Some(60));
+        let left_first = sent(&pods.poll(ms(10)));
+        assert_eq!(components(&left_first[0]), [0x04, 0x02, 0x08]);
+
+        pods.set_primary(PodSide::Right);
+        let right_first = sent(&pods.poll(ms(20)));
+        assert_eq!(right_first.len(), 1, "{right_first:02x?}");
+        assert_eq!(components(&right_first[0]), [0x02, 0x04, 0x08]);
+        let info = parse_battery_packet(&right_first[0]).unwrap();
+        assert_eq!(info.left.unwrap().level, Some(60));
     }
 
     #[test]
