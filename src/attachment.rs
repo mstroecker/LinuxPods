@@ -89,8 +89,8 @@ use zbus::Connection;
 
 use crate::aap::client::{CONNECT_LIMIT, HANDSHAKE_TIMEOUT, is_link_gone, went_during_setup};
 use crate::bluez::{
-    self, AdapterSet, Backoff, BatteryAction, BatteryProvider, ConnectionEvent, Devices,
-    ProviderConnection,
+    self, AdapterSet, Backoff, BatteryAction, BatteryProvider, ConnectionEvent, DeviceInfo,
+    Devices, ProviderConnection,
 };
 use crate::podstate::{Coordinator, LinkEnd, Snapshot};
 
@@ -321,11 +321,11 @@ impl Attachment {
         }
         // Names for the device switcher. Read up front so paired devices are
         // labeled before any of them connects, then again on every connection
-        // event, and on a services change of a connected device that is not
-        // attached yet - a rename made while the app was running takes effect at
-        // the next one, and a newly paired pair shows up with its services, which
-        // BlueZ fills in once pairing is done. An adapter plugged in brings its
-        // paired devices.
+        // event BlueZ confirms, and on a services change of a connected device
+        // that is not attached yet - a rename made while the app was running
+        // takes effect at the next one, and a newly paired pair shows up with
+        // its services, which BlueZ fills in once pairing is done. An adapter
+        // plugged in brings its paired devices.
         self.update_names().await;
         self.sweep().await;
     }
@@ -391,9 +391,20 @@ impl Attachment {
 
     /// Takes one connection event: a device connecting or disconnecting, or its
     /// services marking it as AirPods.
+    ///
+    /// An event is a hint, never the answer: the connection watch's rule
+    /// names no sender, so anyone on the bus can send one, and one sent by a
+    /// bluetoothd that has since restarted is stale (#132). Taken as given,
+    /// a `Connected=true` on a paired pair's path would have it attached, and
+    /// its supervisor's first L2CAP connect would page it, bringing back
+    /// AirPods the user had disconnected; a `Connected=false` would detach a
+    /// pair still connected and withdraw its battery. So BlueZ is asked, one
+    /// call per event, and the event is acted on only when its answer agrees:
+    /// an event BlueZ does not confirm costs that call and nothing more.
+    /// Attaching then asks once more, last - see [`Attachment::attach`].
     async fn handle(&mut self, event: ConnectionEvent) {
         let path = event.device_path.as_str();
-        let connected = match event.connected {
+        let claimed = match event.connected {
             Some(connected) => connected,
             // Only the services changed. That matters to a pair which
             // connected before they marked it as AirPods, not to one
@@ -402,12 +413,60 @@ impl Attachment {
             // advertiser can bring a services change with every address it
             // rotates to.
             None if self.attached_at(path).is_some() => return,
-            None if !self.devices.device_connected(path).await => {
-                tracing::trace!("services changed on {path}, which is not connected");
-                return;
-            }
             None => true,
         };
+        // Read out: the borrow holds the watch's lock. While BlueZ is off the
+        // bus, nothing it could say has come from it: an event then is
+        // stale or forged, and is not asked about - see
+        // `Devices::device_connected` for the moment before the watch knows.
+        // What was missed meanwhile, the sweep finds once BlueZ is back.
+        let on_bus = self.adapters.borrow().on_bus();
+        if !on_bus {
+            tracing::debug!("ignoring a connection event on {path}: BlueZ is off the bus");
+            return;
+        }
+        // No answer - BlueZ failed to give one, or the device is gone - reads
+        // as disconnected. On `true` that means no attach: attaching on a
+        // word BlueZ did not confirm is what pages a pair. On `false` it
+        // means a detach: a device removed while connected is often gone by
+        // the time its `Connected=false` is taken, and a detach pages
+        // nothing. Either way a pair BlueZ does report connected is attached
+        // by its next `Connected` change, or the sweep after the next adapter
+        // change. A forger cannot make BlueZ fail to answer for a device it
+        // has.
+        let connected = match self.devices.device_connected(path).await {
+            Ok(connected) => connected,
+            Err(e) if claimed => {
+                match event.connected {
+                    Some(_) => tracing::debug!(
+                        "ignoring Connected=true on {path}: BlueZ did not answer: {e:#}"
+                    ),
+                    None => tracing::trace!(
+                        "services changed on {path}, and BlueZ did not answer: {e:#}"
+                    ),
+                }
+                return;
+            }
+            // Nothing more is read: BlueZ may have left the bus, and the
+            // reads below would start it again.
+            Err(e) => {
+                tracing::debug!("taking Connected=false on {path}: BlueZ did not answer: {e:#}");
+                if let Some(mac) = self.attached_at(path) {
+                    tracing::info!("AirPods disconnected: {path}");
+                    self.detach(mac).await;
+                }
+                return;
+            }
+        };
+        if connected != claimed {
+            match event.connected {
+                Some(_) => tracing::debug!(
+                    "ignoring Connected={claimed} on {path}: BlueZ reports Connected={connected}"
+                ),
+                None => tracing::trace!("services changed on {path}, which is not connected"),
+            }
+            return;
+        }
         let alias = self.devices.device_alias(path).await;
         tracing::debug!(
             "connection event: {path} connected={:?} alias={alias:?}",
@@ -439,8 +498,19 @@ impl Attachment {
 
     /// Attaches the pair at `path` and starts its work. Its battery waits for a
     /// reading - see `sync_batteries`.
+    ///
+    /// Only while BlueZ reports the pair connected, read with its address as
+    /// the last thing awaited before its supervisor starts: the supervisor's
+    /// first AAP attempt asks nothing, and an L2CAP connect to a pair that
+    /// disconnected in between - while its names were read, say - would page
+    /// it back. The sweep and a connection event both found it connected
+    /// already; this is the answer they act on.
     async fn attach(&mut self, path: &str) {
-        let (mac, adapter) = match self.devices.device_address_and_adapter(path).await {
+        let DeviceInfo {
+            address: mac,
+            adapter,
+            connected,
+        } = match self.devices.device_info(path).await {
             Ok(found) => found,
             Err(e) => {
                 tracing::warn!("could not read address for {path}: {e:#}");
@@ -452,6 +522,17 @@ impl Attachment {
         // supervisor.
         if self.attached.contains_key(&mac) {
             return;
+        }
+        match connected {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!("not attaching {path}: BlueZ now reports it disconnected");
+                return;
+            }
+            Err(e) => {
+                tracing::debug!("not attaching {path}: BlueZ did not answer: {e:#}");
+                return;
+            }
         }
         // Only the battery needs the adapter: AAP and the keys do not.
         let adapter = match adapter {
@@ -591,13 +672,16 @@ impl Attachment {
 /// is tried again, and so is a link that went, both after a wait from
 /// [`Backoff`]: growing with each failure up to a minute, and from the
 /// shortest again after a link that stayed up a minute or more. Ahead of
-/// every attempt but the first, which attaching has just checked, BlueZ is
-/// asked whether the pair is still connected: while it is not - attachment is
-/// about to detach it, or missed that it went - nothing is tried, as an
-/// L2CAP connect would bring its Bluetooth link back up. While BlueZ is off
-/// the bus, as `adapters` tells, it is not asked but waited for: attachment
-/// asks it nothing then either, and on a bus that activates bluetoothd -
-/// systemd's - a call would start it again, undoing a `systemctl stop`.
+/// every attempt but the first, BlueZ is asked whether the pair is still
+/// connected. The first needs no asking: [`Attachment::attach`] starts this
+/// only on BlueZ's answer that the pair is connected, the last thing it
+/// awaits. While the pair is not connected - attachment is about to detach
+/// it, or missed that it went - nothing is tried, as an L2CAP connect would
+/// bring its Bluetooth link back up; nor while BlueZ does not answer. While
+/// BlueZ is off the bus, as `adapters` tells, it is not asked but waited
+/// for, as attachment's connection handling asks it nothing then either: on
+/// a bus that activates bluetoothd - systemd's - a call would start it
+/// again, undoing a `systemctl stop`.
 ///
 /// A link closed here, by [`Coordinator::disconnect_aap`], ends it: whatever
 /// closed the link wants it closed.
@@ -640,10 +724,15 @@ async fn supervise(
                 }
                 continue;
             }
-            if !devices.device_connected(&path).await {
+            let why = match devices.device_connected(&path).await {
+                Ok(true) => None,
+                Ok(false) => Some("BlueZ reports it disconnected".to_string()),
+                Err(e) => Some(format!("BlueZ did not answer: {e:#}")),
+            };
+            if let Some(why) = why {
                 let wait = backoff.failed();
                 tracing::debug!(
-                    "AAP to {mac} waits: BlueZ reports it disconnected; asking again in {}s",
+                    "AAP to {mac} waits: {why}; asking again in {}s",
                     wait.as_secs()
                 );
                 tokio::time::sleep(wait).await;

@@ -1794,12 +1794,13 @@ mod tests {
             devices.connected_airpods().await.unwrap(),
             std::slice::from_ref(&path)
         );
-        let (address, adapter) = devices.device_address_and_adapter(&path).await.unwrap();
-        assert_eq!(address, PAIR);
-        assert_eq!(adapter.unwrap(), adapter_path(ADAPTER));
+        let info = devices.device_info(&path).await.unwrap();
+        assert_eq!(info.address, PAIR);
+        assert_eq!(info.adapter.unwrap(), adapter_path(ADAPTER));
+        assert!(info.connected.unwrap());
         assert_eq!(devices.device_alias(&path).await, ALIAS);
         assert!(devices.device_is_airpods(&path).await);
-        assert!(devices.device_connected(&path).await);
+        assert!(devices.device_connected(&path).await.unwrap());
 
         // An advertiser in range is a device too, but not a paired one.
         Scanner::with_connection(bus.connect().await.unwrap())
@@ -2157,11 +2158,8 @@ mod tests {
             let path = device_path(adapter, address);
             let devices = &devices;
             async move {
-                let (address, on) = devices
-                    .device_address_and_adapter(path.as_str())
-                    .await
-                    .ok()?;
-                Some((address, on.ok()?))
+                let info = devices.device_info(path.as_str()).await.ok()?;
+                Some((info.address, info.adapter.ok()?))
             }
         };
         assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
@@ -2516,12 +2514,14 @@ mod tests {
         assert!(!adapter.get_property::<bool>("Discovering").await.unwrap());
         assert!(bluez.advertisers_on(ADAPTER).is_empty());
         assert!(
-            !devices
+            devices
                 .device_connected(device_path(ADAPTER, RANDOM).as_str())
                 .await
+                .is_err(),
+            "gone"
         );
         let pair = device_path(ADAPTER, PAIR).to_string();
-        assert!(!devices.device_connected(&pair).await);
+        assert!(!devices.device_connected(&pair).await.unwrap());
         assert!(bluez.set_connected(PAIR, true).await.is_err(), "while off");
         assert!(!bluez.can_connect(PAIR));
         for connected in [true, false] {
@@ -2536,7 +2536,10 @@ mod tests {
         bluez.set_powered(ADAPTER, true).await.unwrap();
         assert!(adapter.get_property::<bool>("Powered").await.unwrap());
         assert!(!bluez.is_discovering(ADAPTER), "not by itself");
-        assert!(!devices.device_connected(&pair).await, "not by itself");
+        assert!(
+            !devices.device_connected(&pair).await.unwrap(),
+            "not by itself"
+        );
         bluez.set_connected(PAIR, true).await.unwrap();
         let mut seen = Vec::new();
         while seen.len() < 2 {
@@ -2619,7 +2622,7 @@ mod tests {
         let devices = Devices::new(Connection::clone(&conn));
         assert!(
             devices
-                .device_address_and_adapter(device_path(SECOND, OTHER).as_str())
+                .device_info(device_path(SECOND, OTHER).as_str())
                 .await
                 .is_err()
         );
@@ -2644,11 +2647,8 @@ mod tests {
             address
         );
         let other = device_path(SECOND, OTHER).to_string();
-        assert_eq!(
-            devices.device_address_and_adapter(&other).await.unwrap().0,
-            OTHER
-        );
-        assert!(!devices.device_connected(&other).await);
+        assert_eq!(devices.device_info(&other).await.unwrap().address, OTHER);
+        assert!(!devices.device_connected(&other).await.unwrap());
         assert_eq!(devices.device_alias(&other).await, ALIAS);
     }
 
@@ -2702,6 +2702,7 @@ mod tests {
             devices
                 .device_connected(device_path(ADAPTER, PAIR).as_str())
                 .await
+                .unwrap()
         );
         assert!(bluez.is_powered(ADAPTER));
         assert!(
@@ -2745,6 +2746,25 @@ mod tests {
         bluez.start(bus.address()).await.unwrap();
         let adapters = timeout(TIMEOUT, asked).await.unwrap().unwrap().unwrap();
         assert_eq!(adapters.len(), 1);
+    }
+
+    /// Asked whether a device is connected while BlueZ is away, on a bus
+    /// that activates it, `Devices` gets no answer and starts nothing: a
+    /// connection event, forged or stale, must not start bluetoothd (#132).
+    #[tokio::test]
+    async fn asking_whether_a_device_is_connected_never_activates_bluez() {
+        let bus = PrivateBus::activating(BLUEZ_SERVICE).unwrap();
+        let bluez = FakeBluez::serve(bus.address()).await.unwrap();
+        bluez.add_adapter(ADAPTER, true).await.unwrap();
+        bluez.add_device(ADAPTER, PAIR, ALIAS).await.unwrap();
+        bluez.publish().await.unwrap();
+        let devices = Devices::new(bus.connect().await.unwrap());
+        let path = device_path(ADAPTER, PAIR).to_string();
+        assert!(!devices.device_connected(&path).await.unwrap());
+
+        bluez.stop().await.unwrap();
+        assert!(devices.device_connected(&path).await.is_err());
+        assert_eq!(bus.activations(), 0);
     }
 
     /// Without the battery API there is no manager: registering fails as the

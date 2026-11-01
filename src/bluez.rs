@@ -878,13 +878,10 @@ impl Devices {
             .collect())
     }
 
-    /// A device's address, and the path of the adapter it is on - its
-    /// `Adapter` - read through one proxy, so in one `GetAll`. Fails when the
-    /// address cannot be read; the adapter alone failing is the inner error.
-    pub async fn device_address_and_adapter(
-        &self,
-        device_path: &str,
-    ) -> Result<(Address, Result<String>)> {
+    /// What attaching needs of a device - see [`DeviceInfo`] - read through
+    /// one proxy, so in one `GetAll`. Fails when the address cannot be read;
+    /// the adapter or `Connected` alone failing is that field's error.
+    pub async fn device_info(&self, device_path: &str) -> Result<DeviceInfo> {
         let proxy = Device1Proxy::builder(&self.conn)
             .path(device_path.to_string())?
             .build()
@@ -901,7 +898,15 @@ impl Devices {
             .await
             .map(|adapter| adapter.to_string())
             .context("failed to get device adapter");
-        Ok((address, adapter))
+        let connected = proxy
+            .connected()
+            .await
+            .context("failed to get whether the device is connected");
+        Ok(DeviceInfo {
+            address,
+            adapter,
+            connected,
+        })
     }
 
     /// Every paired device's BlueZ alias, by MAC.
@@ -949,12 +954,32 @@ impl Devices {
         }
     }
 
-    /// False when the device is gone.
-    pub async fn device_connected(&self, device_path: &str) -> bool {
-        match self.device_proxy(device_path).await {
-            Some(proxy) => proxy.connected().await.unwrap_or(false),
-            None => false,
-        }
+    /// Whether BlueZ reports the device connected. Fails when BlueZ does not
+    /// answer, the device is gone, or BlueZ is not on the bus.
+    ///
+    /// One `Get`, which never starts BlueZ: on a bus that activates
+    /// bluetoothd - systemd's - a call to it while it is away would start it
+    /// again, undoing a `systemctl stop`. Its callers ask nothing while they
+    /// know BlueZ is away, but learn so only once the adapter watch has; this
+    /// covers the moment before (#132).
+    pub async fn device_connected(&self, device_path: &str) -> Result<bool> {
+        let properties = zbus::fdo::PropertiesProxy::builder(&self.conn)
+            .destination(BLUEZ_SERVICE)?
+            .path(device_path.to_string())?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await?;
+        let connected: Option<OwnedValue> = properties
+            .inner()
+            .call_with_flags(
+                "Get",
+                zbus::proxy::MethodFlags::NoAutoStart.into(),
+                &("org.bluez.Device1", "Connected"),
+            )
+            .await
+            .context("failed to get whether the device is connected")?;
+        let connected = connected.context("BlueZ sent no reply")?;
+        bool::try_from(connected).context("Connected is not a boolean")
     }
 
     async fn device_proxy(&self, device_path: &str) -> Option<Device1Proxy<'static>> {
@@ -967,7 +992,21 @@ impl Devices {
     }
 }
 
-/// A device connecting or disconnecting, or its services marking it as AirPods.
+/// A device as [`Devices::device_info`] reads it for attaching.
+#[derive(Debug)]
+pub struct DeviceInfo {
+    pub address: Address,
+    /// The path of the adapter it is on: its `Adapter`.
+    pub adapter: Result<String>,
+    /// Whether BlueZ reports it connected, read with the rest: a pair is
+    /// attached on this answer, its last word before the pair's supervisor
+    /// starts.
+    pub connected: Result<bool>,
+}
+
+/// A device connecting or disconnecting, or its services marking it as AirPods,
+/// as a signal says: a hint to ask BlueZ, not its answer - see
+/// [`Devices::watch_connections`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionEvent {
     pub device_path: String,
@@ -982,6 +1021,10 @@ impl Devices {
     /// that mark a device as AirPods. `Connected` changes come in the order
     /// they came; services changes after them, one per device - see
     /// [`Pending`].
+    ///
+    /// The rule names no sender, so an event may come from anyone on the bus,
+    /// or from a bluetoothd that has since left it: whoever acts on one asks
+    /// BlueZ first, as attachment does (#132).
     ///
     /// Port of the Go WatchForAirPods signal loop. Without this the app only ever
     /// saw devices that were already connected at startup, so plugging the
