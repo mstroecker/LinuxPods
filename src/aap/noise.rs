@@ -124,10 +124,16 @@ pub const STALE_REPORT_WINDOW: Duration = Duration::from_secs(2);
 /// and a mode changed from a phone among them, with one exception. After Off
 /// was set from Noise Cancellation, a pair reported Noise Cancellation 0.33 s
 /// later and Off only at 1.4 s, and taken as it came, that report put the
-/// previous mode back on show for a second (#113). So a report of the mode a
-/// command replaced is held off until the mode set is reported, or
+/// previous mode back on show for a second (#113). So a report of the mode
+/// the last command replaced is held off until the mode set is reported, or
 /// [`STALE_REPORT_WINDOW`] has passed. After that any report wins again: the
 /// mode may since have been changed on another device.
+///
+/// Only the last command's replaced mode is held off, and that is accepted.
+/// A report of a mode an earlier command set or replaced is taken, so quick
+/// successive changes can briefly replay older modes as their echoes come
+/// in; the last command's echo settles it, so the mode on show always ends
+/// as the one last set.
 ///
 /// A report held off is dropped, not kept to take once the window is over.
 /// Run 1 in `docs/aap-noise-control.md` has a pair report the old mode after
@@ -186,8 +192,9 @@ impl ModeState {
             if mode == replaced && now.saturating_duration_since(at) < STALE_REPORT_WINDOW {
                 return Report::Stale;
             }
-            // The mode set, reported; another one, changed elsewhere; or the
-            // hold is over. Whichever it is, reports count from here.
+            // The mode set, reported; another one - changed elsewhere, or an
+            // earlier command's echo; or the hold is over. Whichever it is,
+            // reports count from here.
             self.replaced = None;
         }
         if self.mode == Some(mode) {
