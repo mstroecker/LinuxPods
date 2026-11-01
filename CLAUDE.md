@@ -26,17 +26,18 @@ src/
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # ENC_KEY and IRK per pair at ~/.local/share/linuxpods/keys.json (0600)
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
-├── ui/            # GTK4/libadwaita: window, Control page, Preferences, automation
+├── notify.rs      # Low battery notifications: what to warn about, once per crossing
+├── ui/            # GTK4/libadwaita: window, Control page, Preferences, notifications, automation
 ├── harness/       # Harness only: fake AirPods, fake BlueZ, the fake world
 └── bin/fakepods.rs # Harness only: the fake world's process, which `make fake-world` runs
 ```
 
 **Threading.** GTK owns the main thread, tokio carries BLE/AAP/D-Bus. GTK types are
 `!Send`, so the two meet over channels: snapshots reach the UI on a `tokio::sync::watch`,
-and the tray's window commands on an `async-channel`, both consumed with
-`glib::spawn_future_local`. Commands to the AirPods go the other way, onto their link's
-queue (`Coordinator::command`), and each result comes back on a oneshot. Never touch a
-widget from a tokio task.
+and the tray's window commands and the low battery notifications on an `async-channel`,
+all consumed with `glib::spawn_future_local`. Commands to the AirPods go the other way,
+onto their link's queue (`Coordinator::command`), and each result comes back on a oneshot.
+Never touch a widget from a tokio task.
 
 **State.** `Coordinator` merges AAP (exact, needs L2CAP) and BLE (exact, and only from an
 address a stored IRK resolves, decrypted by that pair's key) **per device**, keyed by the
@@ -48,13 +49,13 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
   withdrawn and exported again on every reconnect (#62). It runs *after* identification,
   since an advertisement carries only a random MAC until then.
 - `subscribe()` returns a `watch::Receiver`: one latest-wins value every consumer sees,
-  so UI, tray and attachment never compete for a snapshot, and a slow one skips stale
-  snapshots instead of queueing them (per-consumer unbounded queues grew without limit
-  under an advertisement flood). It is marked changed so the current state arrives at
-  once - otherwise the window comes up blank until the first advertisement. Never hold
-  `borrow()` across an await: every broadcast waits for it while holding the `inner`
-  write lock, so a held borrow stalls the whole coordinator, and one held while awaiting
-  the coordinator deadlocks. The UI loop pauses `RENDER_INTERVAL` per pass, since tokio's
+  so UI, tray, attachment and the notifier never compete for a snapshot, and a slow one
+  skips stale snapshots instead of queueing them (per-consumer unbounded queues grew
+  without limit under an advertisement flood). It is marked changed so the current state
+  arrives at once - otherwise the window comes up blank until the first advertisement.
+  Never hold `borrow()` across an await: every broadcast waits for it while holding the
+  `inner` write lock, so a held borrow stalls the whole coordinator, and one held while
+  awaiting the coordinator deadlocks. The UI loop pauses `RENDER_INTERVAL` per pass, since tokio's
   coop budget does not reach glib's executor.
 - Snapshots go out under the lock they were changed under: `broadcast(&inner)` takes the
   state while the write guard is live, never a snapshot built earlier. Sent after the
@@ -292,8 +293,8 @@ deadlocked every command sent meanwhile.
 - Keep protocol parsing pure and tested. `aap::battery`, `aap::ear`, `aap::keys`,
   `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
   return values, and carry the bulk of the test suite; `noise::ModeState`,
-  `ear::EarState` and `rpa::ResolvedAddresses` take the time as an argument for the same
-  reason. `aap::decode` routes every packet by its header and opcode;
+  `ear::EarState`, `rpa::ResolvedAddresses` and `notify::Alerts` take the time as an
+  argument for the same reason. `aap::decode` routes every packet by its header and opcode;
   each module's `is_*` and `parse_*` still check the header themselves, so they stay safe
   to call on their own.
 - Use synthetic test vectors - never commit a real device key. New test keys come from
@@ -324,11 +325,22 @@ deadlocked every command sent meanwhile.
 
 **UI.** Widget updates arrive only from the snapshot stream. The one exception is a
 command that fails: its result comes back to the main context and goes up as a toast, an
-event, never a control's state, so the noise radios keep showing the recorded mode. Read
+event, never a control's state, so the noise radios keep showing the recorded mode. A
+setting is not device state: its switch is bound to an app action and shows that action's
+state, as Battery notifications does with `app.battery-notifications`. Read
 a selection *before* mutating the widget - splicing a `StringList` makes `GtkDropDown`
 emit `selected-notify`, clobbering the user's choice. Noise Control is a command,
 so it stays insensitive unless the device is on AAP, and Features stays insensitive until
 the commands behind it are known; BLE is receive-only.
+Low battery notifications are worked out on the tokio side (`notify::Alerts`) and sent
+from the main context as `GNotification`s, one per pair. They warn once per crossing, never
+per snapshot - the worst band stands until the part charges or clears
+`notify::REARM_ABOVE`, so a reading flipping across a threshold sends nothing - and only
+from a fresh reading - AAP, or BLE heard within `notify::FRESH`: the BLE cache outlives
+a pair that has gone by half an hour (#126). The Preferences switch is the app action
+`app.battery-notifications`, read by the delivery loop on the main context, not the
+notifier: off withdraws what is on show and on shows it again, while `notify::Alerts` goes
+on tracking crossings. It is not saved yet (#146).
 Artwork and the app icon are compiled into a GResource by `build.rs`
 (`assets/resources.gresource.xml`); a missing resource fails silently, so a test asserts
 every name the UI loads is in the bundle. The tray still points the shell at
