@@ -46,6 +46,7 @@ pub mod indicator;
 pub mod keystore;
 pub mod notify;
 pub mod podstate;
+pub mod settings;
 pub mod ui;
 
 #[cfg(test)]
