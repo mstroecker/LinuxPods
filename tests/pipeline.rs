@@ -1193,6 +1193,16 @@ fn in_ear(snapshot: &Snapshot, mac: Address) -> Option<(Option<bool>, Option<boo
     Some((state.left_in_ear, state.right_in_ear))
 }
 
+/// Whether each pod is in an ear, left then right, wherever the pair's
+/// reading comes from.
+fn ears_shown(snapshot: &Snapshot, mac: Address) -> InEar {
+    let state = snapshot.states.get(&mac)?;
+    Some((state.left_in_ear, state.right_in_ear))
+}
+
+/// In-ear as [`in_ear`] and [`ears_shown`] give it.
+type InEar = Option<(Option<bool>, Option<bool>)>;
+
 /// A pair with both pods worn, the left one primary, on AAP, and nothing
 /// heard over BLE: the scanner stops before the pair connects, so no
 /// advertisement is ever cached, and whatever in-ear the snapshot shows is
@@ -1279,7 +1289,6 @@ async fn a_role_switch_keeps_left_and_right() {
 
     // Every in-ear on show, each change once, until the battery change.
     // Cloned out of the borrow, which every broadcast waits for.
-    type InEar = Option<(Option<bool>, Option<bool>)>;
     fn read(updates: &mut watch::Receiver<Snapshot>) -> (InEar, Option<u8>) {
         let snapshot = updates.borrow_and_update();
         let left = snapshot.states.get(&PAIR).and_then(|s| s.left_battery);
@@ -1401,6 +1410,100 @@ async fn a_swap_with_no_role_switch_shows_once_the_hold_is_over() {
         swapped.elapsed() >= ROLE_SWITCH_HOLD,
         "taken without a hold"
     );
+}
+
+/// The link tells where the pods are only after the battery, as a Pro 3
+/// does: the primary pod (0x08), then 0x0C, 0x0E and 0x2E, then the ear
+/// report (0x06) - and the mode later still, in the startup dump after a
+/// second 0x0C (capture 4 of #71). Until the link has given both the primary
+/// and the ear report, in-ear comes from the cached advertisement, so nothing
+/// in between shows a pod in an ear that is not: read with the left pod taken
+/// for primary, the report would put the left pod in an ear and the right one
+/// out.
+///
+/// The advertisement cached has both pods in the case. Then, unheard, the
+/// right pod becomes primary and goes in an ear, and the left one comes out.
+/// Every in-ear on show is watched from before the pair connects until a
+/// battery change made once the link has told the places: it comes over the
+/// same connection, after them. The startup dump is held back meanwhile, so
+/// the mode is still unknown then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_link_tells_the_ears_after_the_battery_and_the_mode_after_both() {
+    /// A left pod level the pair has not had yet.
+    const LATER: u8 = 29;
+
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let mut app = fixture.start_app().await;
+    let in_case = Some((Some(false), Some(false)));
+    app.until("a BLE reading, both pods in the case", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS) && ears_shown(s, PAIR) == in_case
+    })
+    .await;
+    app.stop_listening().await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.set_primary(PodSide::Right);
+            pods.set_in_ear(PodSide::Right, true);
+            pods.set_in_case(PodSide::Left, false);
+            // Longer than the test: the mode stays unknown.
+            pods.quirks.dump_delay = Duration::from_secs(3600);
+        })
+        .await
+        .unwrap();
+
+    // Every in-ear on show, each change once, until the battery change, and
+    // the mode then. Cloned out of the borrow, which every broadcast waits
+    // for.
+    type Shown = (InEar, Option<u8>, Option<NoiseMode>);
+    fn read(updates: &mut watch::Receiver<Snapshot>) -> Shown {
+        let snapshot = updates.borrow_and_update();
+        let state = snapshot.states.get(&PAIR);
+        (
+            ears_shown(&snapshot, PAIR),
+            state.and_then(|s| s.left_battery),
+            state.and_then(|s| s.noise_mode),
+        )
+    }
+    let mut updates = app.coordinator.subscribe();
+    // Read here, not in the task, which may first run after the connect.
+    let mut shown = vec![read(&mut updates).0];
+    let watching = tokio::spawn(async move {
+        while updates.changed().await.is_ok() {
+            let (in_ear, left, mode) = read(&mut updates);
+            if shown.last() != Some(&in_ear) {
+                shown.push(in_ear);
+            }
+            if left == Some(LATER) {
+                return (shown, mode);
+            }
+        }
+        panic!("the coordinator went away");
+    });
+
+    app.attach(PAIR).await;
+    let right_in = Some((Some(false), Some(true)));
+    app.until("the right pod in an ear, as the link reports it", |s| {
+        in_ear(s, PAIR) == right_in
+    })
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_battery(Part::Left, Some(LATER)))
+        .await
+        .unwrap();
+
+    let (shown, mode) = timeout(TIMEOUT, watching)
+        .await
+        .expect("timed out waiting for the battery change")
+        .unwrap();
+    assert_eq!(
+        shown,
+        [in_case, right_in],
+        "the cached in-ear, then the link's"
+    );
+    assert_eq!(mode, None, "a mode ahead of the startup dump");
 }
 
 /// Two quick commands to a pair go out in the order they were issued, however

@@ -790,7 +790,7 @@ mod tests {
 
     use super::*;
     use crate::aap::noise::{self, NoiseMode};
-    use crate::aap::{Client, is_ear_packet, is_primary_packet, parse_battery_packet};
+    use crate::aap::{Client, parse_battery_packet};
     use crate::ble::decrypt::decrypt_for_device;
     use crate::ble::rpa::resolves;
     use crate::ble::scanner::Scanner;
@@ -830,12 +830,11 @@ mod tests {
         timeout(TIMEOUT, client.read_packet()).await.unwrap()
     }
 
-    /// Runs the handshake, and reads what the pair sends unasked once it has
-    /// answered: the primary pod, then the ear report.
+    /// Runs the handshake, and reads what the pair sends unasked with its
+    /// answer: the hosts it knows, 0x2B.
     async fn handshake(client: &Client) {
         client.handshake().await.unwrap();
-        assert!(is_primary_packet(&next_packet(client).await.unwrap()));
-        assert!(is_ear_packet(&next_packet(client).await.unwrap()));
+        assert_eq!(next_packet(client).await.unwrap()[4], 0x2B);
     }
 
     /// Whether the fake BlueZ shows the pair connected, read afresh.

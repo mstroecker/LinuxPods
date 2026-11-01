@@ -30,6 +30,7 @@ use bluer::Address;
 use crate::aap::battery::{Battery, Component, Status, battery_packet};
 use crate::aap::ear::{EarReport, Place, ear_packet, primary_packet};
 use crate::aap::keys::{KeyType, ProximityKey, key_packet};
+use crate::aap::message::HEADER;
 use crate::aap::noise::{self, NoiseMode};
 use crate::ble::decrypt::{KEY_LEN, Plaintext, ZEROED_SUFFIX, encrypt, random_key};
 use crate::ble::parser::{Cleartext, PodSide, proximity_message};
@@ -80,33 +81,202 @@ pub const SECOND_PRIMARY: Duration = Duration::from_millis(60);
 // change on the wire would change here along with them.
 const OP_HANDSHAKE: u8 = 0x01;
 const OP_NOTIFICATIONS: u8 = 0x0F;
-const OP_FEATURES: u8 = 0x4D;
 const OP_KEY_REQUEST: u8 = 0x30;
 
-/// The answer to the handshake. Pro 3 sends 18 bytes, starting
-/// `01 00 04 00 00 00 01 00`; the app, like LibrePods, matches only these
-/// four, so the fake sends just them.
-const HANDSHAKE_ACK: [u8; 4] = [0x01, 0x00, 0x04, 0x00];
-
-/// The answer to the features packet, as LibrePods takes it - by these six
-/// bytes, and tested there with AirPods Pro 2 only. On AirPods Pro 3, 0x2B is
-/// a list of known hosts that comes unasked with the handshake's answer, and
-/// nothing answers the features packet (#71); #115 brings the fake in line.
-const FEATURES_ACK: [u8; 6] = [0x04, 0x00, 0x04, 0x00, 0x2B, 0x00];
-
-/// The startup dump's settings beside the mode and allow-Off, with the values
-/// `docs/aap-noise-control.md` records - the ones it records none for are left
-/// out. Several are valid mode bytes: 0x24's 03 reads as Transparency, 0x25's
-/// 01 as Off. Taking a mode from any 0x09 packet without checking byte 6 reads
-/// them as one.
-const OTHER_SETTINGS: [(u8, &[u8]); 6] = [
-    (0x1F, &[0x50, 0x50]),
-    (0x24, &[0x03]),
-    (0x25, &[0x01]),
-    (0x26, &[0x01]),
-    (0x28, &[0x01]),
-    (0x2E, &[0x32]),
+/// The answer to the handshake, all 18 bytes, as a Pro 3 sent it in every #71
+/// capture. The app, like LibrePods, matches the first four.
+const HANDSHAKE_ACK: [u8; 18] = [
+    0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00,
 ];
+
+/// The address the fake gives this host, the one the app runs on, where AAP
+/// packets name a host: the second 0x0C, 0x0E, 0x2E and the 0x2B list. The
+/// fake cannot know the real one, and the app reads none of them; it is from
+/// the range set aside for documentation, as the tests' pairs are.
+pub const THIS_HOST: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0xF0]);
+
+/// Another host the pair has known, for the 0x2B list.
+const ANOTHER_HOST: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0xF1]);
+
+/// How long after the first 0x0C the second one comes by default, naming this
+/// host, and the startup dump right after it - see [`Quirks::dump_delay`]. A
+/// Pro 3 took 1.4-1.5 s in the #71 captures; the fake takes far less, as
+/// every test that waits for the mode would wait that long, and any wait at
+/// all keeps the order: the battery and the ears first, the mode later.
+pub const DUMP_DELAY: Duration = Duration::from_millis(200);
+
+/// What the startup dump holds, in the order a Pro 3 sent it in the #71
+/// captures. Settings of the 0x09 family carry the values captured: those
+/// `docs/aap-noise-control.md` records, and capture 4's for the rest. Several
+/// are valid mode bytes - 0x25's 01 reads as Off, 0x26's 02 as Noise
+/// Cancellation - so taking a mode from any 0x09 packet without checking byte
+/// 6 reads them as one. Neither 0x34, allow-Off, nor 0x1A was ever in it.
+const STARTUP_DUMP: [Dumped; 30] = [
+    Dumped::Other(0x02),
+    Dumped::DeviceInfo,
+    Dumped::Mode,
+    Dumped::Setting(0x18, &[0x00]),
+    Dumped::Setting(0x17, &[0x00]),
+    Dumped::Setting(0x25, &[0x01]),
+    Dumped::Setting(0x23, &[0x00]),
+    Dumped::Setting(0x1F, &[0x50, 0x50]),
+    Dumped::Setting(0x24, &[0x00, 0x03]),
+    Dumped::Setting(0x28, &[0x02]),
+    Dumped::Other(0x63),
+    Dumped::Other(0x4E),
+    Dumped::Setting(0x26, &[0x02]),
+    Dumped::Setting(0x29, &[0x02]),
+    Dumped::Setting(0x2C, &[0x02]),
+    Dumped::Setting(0x2F, &[0x00]),
+    Dumped::Setting(0x33, &[0x00]),
+    Dumped::Setting(0x2E, &[0x32]),
+    Dumped::Setting(0x30, &[0x01]),
+    Dumped::Setting(0x1B, &[0x02]),
+    Dumped::Setting(0x35, &[0x01]),
+    Dumped::Setting(0x3E, &[0x02]),
+    Dumped::Setting(0x37, &[0x00]),
+    Dumped::Setting(0x38, &[0x52]),
+    Dumped::Setting(0x3B, &[0x01]),
+    Dumped::Other(0x53),
+    Dumped::Other(0x55),
+    Dumped::Other(0x17),
+    Dumped::Other(0x17),
+    Dumped::Other(0x17),
+];
+
+/// One packet of the startup dump.
+#[derive(Debug, Clone, Copy)]
+enum Dumped {
+    /// The noise control mode, the one setting the app reads.
+    Mode,
+    /// Another setting of the 0x09 family: its sub-command and value.
+    Setting(u8, &'static [u8]),
+    /// 0x1D, which carries the device's name and model number: synthetic.
+    DeviceInfo,
+    /// A packet nothing reads, by its opcode: a short stand-in for one that
+    /// ran to hundreds of bytes on the hardware.
+    Other(u8),
+}
+
+impl Dumped {
+    fn packet(self, mode: NoiseMode) -> Vec<u8> {
+        match self {
+            // The mode packet serves both directions: this is the report.
+            Self::Mode => noise::set_packet(mode).to_vec(),
+            Self::Setting(sub_cmd, value) => noise::settings_report(sub_cmd, value).to_vec(),
+            Self::DeviceInfo => {
+                let text = b"Fake AirPods\0A0000\0";
+                let len = u16::try_from(text.len()).expect("a short text");
+                let mut packet = header(0x1D);
+                packet.push(0x02);
+                packet.extend_from_slice(&len.to_le_bytes());
+                packet.extend_from_slice(text);
+                packet
+            }
+            Self::Other(opcode) => {
+                let mut packet = header(opcode);
+                packet.extend_from_slice(&[0x00, 0x00]);
+                packet
+            }
+        }
+    }
+}
+
+/// The AAP header, an opcode and its zero byte: how every packet the pair
+/// sends after the handshake's answer starts.
+fn header(opcode: u8) -> Vec<u8> {
+    let mut packet = HEADER.to_vec();
+    packet.extend_from_slice(&[opcode, 0x00]);
+    packet
+}
+
+/// An address as 0x0C, 0x0E and the 0x2B list carry it: least significant
+/// byte first. 0x2E carries it the other way round, as `Address` holds it.
+fn reversed(address: Address) -> [u8; 6] {
+    let mut bytes = address.0;
+    bytes.reverse();
+    bytes
+}
+
+/// 0x0C, 14 bytes: an address, then `01 02` for a bud or `01 01` for this
+/// host. It names the device the pods take to be in use, most likely: the
+/// first after the notification request named one of the buds, the second
+/// this host, 1.4-1.5 s later, and the startup dump followed the second
+/// within a millisecond, in every #71 capture.
+fn in_use_packet(address: Address, this_host: bool) -> Vec<u8> {
+    let mut packet = header(0x0C);
+    packet.extend_from_slice(&reversed(address));
+    packet.extend_from_slice(&[0x01, if this_host { 0x01 } else { 0x02 }]);
+    packet
+}
+
+/// 0x0E, 13 bytes, naming this host right after the first 0x0C.
+fn host_packet(address: Address) -> Vec<u8> {
+    let mut packet = header(0x0E);
+    packet.extend_from_slice(&reversed(address));
+    packet.push(0x00);
+    packet
+}
+
+/// 0x2E, 17 bytes: one entry, this host's address most significant byte
+/// first, and `02 02`.
+fn host_entry_packet(address: Address) -> Vec<u8> {
+    let mut packet = header(0x2E);
+    packet.extend_from_slice(&[0x01, 0x00, 0x01]);
+    packet.extend_from_slice(&address.0);
+    packet.extend_from_slice(&[0x02, 0x02]);
+    packet
+}
+
+/// 0x2B, the hosts the pair knows, which comes unasked with the handshake's
+/// answer - not in answer to the features packet, which nothing answers
+/// (#71). As captured: `01`, the length of the entries, 8 bytes, then 17
+/// bytes an entry, each 8 bytes, an address least significant byte first and
+/// 3 bytes. The 8-byte fields are synthetic.
+fn known_hosts_packet(hosts: &[Address]) -> Vec<u8> {
+    const ENTRY_LEN: usize = 17;
+    let len = u16::try_from(hosts.len() * ENTRY_LEN).expect("a short list");
+    let mut packet = header(0x2B);
+    packet.push(0x01);
+    packet.extend_from_slice(&len.to_le_bytes());
+    packet.extend_from_slice(&[0x00; 8]);
+    for (i, host) in (1u64..).zip(hosts) {
+        packet.extend_from_slice(&i.to_le_bytes());
+        packet.extend_from_slice(&reversed(*host));
+        packet.extend_from_slice(&[0x00; 3]);
+    }
+    packet
+}
+
+/// The answer to the notification request, as capture 4 of #71 has it: the
+/// battery, the primary pod, 0x0C naming a bud - `pair` stands in for the one
+/// AAP reached - 0x0E and 0x2E naming this host, the ear report and 0x2E
+/// again.
+fn report_packets(
+    pair: Address,
+    batteries: &[Battery; 3],
+    ears: Ears,
+) -> impl Iterator<Item = Vec<u8>> {
+    [
+        battery_packet(batteries),
+        ears.primary_packet(false),
+        in_use_packet(pair, false),
+        host_packet(THIS_HOST),
+        host_entry_packet(THIS_HOST),
+        ear_packet(ears.report).to_vec(),
+        host_entry_packet(THIS_HOST),
+    ]
+    .into_iter()
+}
+
+/// The second 0x0C, naming this host, and the startup dump after it, with
+/// `mode` in it.
+fn startup_dump(mode: NoiseMode) -> Vec<Vec<u8>> {
+    std::iter::once(in_use_packet(THIS_HOST, true))
+        .chain(STARTUP_DUMP.iter().map(|dumped| dumped.packet(mode)))
+        .collect()
+}
 
 /// Byte 8 of the advertisement, connected to a host or not.
 const CONNECTION_IDLE: u8 = 0x04;
@@ -144,11 +314,20 @@ pub enum Part {
 
 /// Behavior of the hardware that the fake can switch. The default is what
 /// AirPods Pro 3 do in the #71 captures, for every model: AirPods Pro 2
-/// (USB-C) count as behaving the same until a capture shows otherwise. Two
-/// exceptions: [`Quirks::zero_suffix_when_connected`] zeroes the suffix while
-/// connected, where a Pro 3 zeroes it whenever a pod is out of the case,
-/// which #115 brings in line; and the address rotation, [`ADDRESS_ROTATION`],
-/// is faster than the hardware's on purpose.
+/// (USB-C) count as behaving the same until a capture shows otherwise.
+///
+/// Where a default is faster or simpler than the hardware, its field or
+/// constant says so. Those are:
+///
+/// - [`Quirks::zero_suffix_when_connected`], which zeroes the suffix while
+///   connected, where a Pro 3 zeroes it whenever a pod is out of the case -
+///   #115 brings it in line;
+/// - the address rotation, [`ADDRESS_ROTATION`], faster on purpose;
+/// - [`Quirks::handshake_delay`], [`Quirks::report_delay`] and
+///   [`Quirks::dump_delay`], none or short where the hardware takes a second
+///   or more;
+/// - the closed case, which [`Pods::poll`] reports the moment the lid
+///   closes, where the hardware took about 4.5 s.
 ///
 /// AirPods 4 answered a mode change otherwise (`docs/aap-noise-control.md`):
 /// a 0x4B on every change, an echo on about one in four, and no report of the
@@ -206,11 +385,22 @@ pub struct Quirks {
     /// fails to send, and that is a failed connect, with the warnings. Tried
     /// again either way, on a growing wait.
     pub refuse_aap: u32,
-    /// How long after the notification request the battery and the startup
-    /// dump come, holding the state as it was when asked. None by default; a
-    /// pair seen in #62 took about a second, which the GNOME Settings battery
-    /// went missing for.
+    /// How long the pair takes to answer the handshake. A Pro 3 took 1.0-1.2 s
+    /// in the #71 captures; none by default, as the app waits for the answer
+    /// however long it takes, up to its handshake timeout. What the app sends
+    /// before the answer is out is dropped, as the hardware drops it.
+    pub handshake_delay: Duration,
+    /// How long after the notification request the battery comes, with the
+    /// rest of what answers it - the primary pod, the first 0x0C, the ear
+    /// report - holding the state as it was when asked. None by default: a
+    /// Pro 3 sent the battery 0.15-0.19 s after the request in the #71
+    /// captures, and a pair seen in #62 took about a second, which the GNOME
+    /// Settings battery went missing for.
     pub report_delay: Duration,
+    /// How long after that the second 0x0C comes, naming this host, with the
+    /// startup dump right after it: the mode, and the rest. Until then the app
+    /// knows no mode. [`DUMP_DELAY`] by default, where a Pro 3 took 1.4-1.5 s.
+    pub dump_delay: Duration,
 }
 
 impl Default for Quirks {
@@ -224,7 +414,9 @@ impl Default for Quirks {
             zero_suffix_when_connected: true,
             silent_handshake: false,
             refuse_aap: 0,
+            handshake_delay: Duration::ZERO,
             report_delay: Duration::ZERO,
+            dump_delay: DUMP_DELAY,
         }
     }
 }
@@ -264,21 +456,50 @@ struct Session {
     /// Fixed when the connection opens: a quirk switched later does not turn a
     /// connection silent halfway.
     silent: bool,
-    /// What the app was last told, from the moment it subscribed; `None`
-    /// before. A change from it is what `poll` reports.
-    reported: Option<Reported>,
+    /// When the handshake's answer goes out, from the handshake on; `None`
+    /// before. What comes before that is dropped.
+    answered: Option<Duration>,
+    /// The batteries as the app was last told, from the answer to the
+    /// notification request on; `None` before. A change from them is what
+    /// `poll` reports.
+    batteries: Option<[Battery; 3]>,
+    /// The mode as the app was last told, from the startup dump on; `None`
+    /// before, when the pods report no change of it.
+    mode: Option<NoiseMode>,
     /// Where the pods are and which is primary, as the app was last told,
-    /// from the handshake's answer on; `None` before. These come unasked.
+    /// from the answer to the notification request on; `None` before. These
+    /// come unasked.
     ears_reported: Option<Ears>,
-    /// Actions waiting for their time, in time order.
-    scheduled: Vec<(Duration, Action)>,
+    /// What waits for its time, in time order.
+    scheduled: Vec<(Duration, Due)>,
+}
+
+/// Something a session has waiting for its time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Due {
+    Act(Action),
+    /// The answer to the notification request: the battery and what comes
+    /// with it, with the state as it was when asked. From here on, `poll`
+    /// reports what changed since.
+    Report {
+        batteries: [Battery; 3],
+        ears: Ears,
+    },
+    /// The second 0x0C, naming this host, and the startup dump after it,
+    /// carrying the mode as it is when it falls due.
+    Dump,
 }
 
 impl Session {
-    /// Queues `action` for `at`, after anything already queued for that time.
-    fn schedule(&mut self, at: Duration, action: Action) {
+    /// Queues `due` for `at`, after anything already queued for that time.
+    fn schedule(&mut self, at: Duration, due: Due) {
         let i = self.scheduled.partition_point(|(t, _)| *t <= at);
-        self.scheduled.insert(i, (at, action));
+        self.scheduled.insert(i, (at, due));
+    }
+
+    /// Queues `packet` for `at`.
+    fn send(&mut self, at: Duration, packet: Vec<u8>) {
+        self.schedule(at, Due::Act(Action::Send(packet)));
     }
 }
 
@@ -299,12 +520,6 @@ impl Ears {
     fn primary_packet(self, switching: bool) -> Vec<u8> {
         primary_packet(self.primary, self.secondary_reachable(), switching).to_vec()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Reported {
-    batteries: [Battery; 3],
-    mode: NoiseMode,
 }
 
 /// A pair of fake AirPods.
@@ -591,12 +806,14 @@ impl Pods {
         self.connected = true;
         let mut session = Session {
             silent: self.quirks.silent_handshake,
-            reported: None,
+            answered: None,
+            batteries: None,
+            mode: None,
             ears_reported: None,
             scheduled: Vec::new(),
         };
         if session.silent {
-            session.schedule(now + SILENT_HANG_UP, Action::HangUp);
+            session.schedule(now + SILENT_HANG_UP, Due::Act(Action::HangUp));
         }
         self.session = Some(session);
     }
@@ -622,17 +839,26 @@ impl Pods {
     /// next [`Pods::poll`].
     ///
     /// Requests are known by their command byte, and settings by their
-    /// sub-command too:
+    /// sub-command too. What the link brings up comes in the order of capture
+    /// 4 of #71:
     ///
-    /// - the handshake gets its acknowledgment, then the primary pod packet
-    ///   (0x08) and the ear report (0x06), unasked, and from then on a report
-    ///   of every change to them;
-    /// - the notification request (0x0F) the battery and the startup dump - the
-    ///   mode, allow-Off and other 0x09 settings - and from then on a report of
-    ///   every change;
-    /// - the features packet (0x4D) the 0x2B LibrePods takes for its
-    ///   acknowledgment - see `FEATURES_ACK`;
+    /// - the handshake gets its answer, all 18 bytes, after
+    ///   [`Quirks::handshake_delay`], and 0x2B, the hosts the pair knows, with
+    ///   it, unasked. Until the answer is out, everything else is dropped, as
+    ///   the hardware drops it;
+    /// - the features packet (0x4D) gets no answer;
+    /// - the notification request (0x0F) the battery, the primary pod (0x08),
+    ///   0x0C naming a bud - the pair itself - then 0x0E and 0x2E naming this
+    ///   host, the ear report (0x06) and 0x2E again, after
+    ///   [`Quirks::report_delay`]; from then on a report of every change to
+    ///   the batteries and the pods' places. After [`Quirks::dump_delay`] a
+    ///   second 0x0C names this host, and the startup dump follows it - the
+    ///   mode among some twenty other settings - and from then on a report of
+    ///   every change of mode. See [`THIS_HOST`];
     /// - the key request (0x30) the key packet, IRK then ENC_KEY;
+    ///
+    /// and on a link that is up:
+    ///
     /// - a mode change its delayed echo, and an Off a report of the mode it
     ///   replaced ahead of that, as a Pro 3 answers; or nothing, for an Off not
     ///   allowed - see [`Quirks`], which switch to AirPods 4's answers too;
@@ -643,12 +869,16 @@ impl Pods {
     /// arriving with no connection open or on a silent one.
     pub fn receive(&mut self, packet: &[u8], now: Duration) {
         self.received.push(packet.to_vec());
-        if !self.session.as_ref().is_some_and(|s| !s.silent) {
+        let Some(session) = self.session.as_ref().filter(|s| !s.silent) else {
+            return;
+        };
+        let opcode = packet.get(OPCODE).copied();
+        if opcode != Some(OP_HANDSHAKE) && !session.answered.is_some_and(|at| at <= now) {
+            // Ahead of the handshake's answer.
             return;
         }
-        match packet.get(OPCODE).copied() {
+        match opcode {
             Some(OP_HANDSHAKE) => self.answer_handshake(now),
-            Some(OP_FEATURES) => self.send(now, FEATURES_ACK.to_vec()),
             Some(OP_NOTIFICATIONS) => self.start_notifications(now),
             Some(OP_KEY_REQUEST) => self.send(now, self.key_packet()),
             _ => self.settings_command(packet, now),
@@ -673,6 +903,7 @@ impl Pods {
         let batteries = self.aap_batteries();
         let mode = self.noise_mode;
         let ears = self.ears();
+        let mac = self.mac;
         let Some(session) = &mut self.session else {
             return Vec::new();
         };
@@ -683,22 +914,41 @@ impl Pods {
         }
 
         let due = session.scheduled.partition_point(|(at, _)| *at <= now);
-        let mut actions: Vec<Action> = session.scheduled.drain(..due).map(|(_, a)| a).collect();
-        if let Some(i) = actions.iter().position(|a| *a == Action::HangUp) {
-            actions.truncate(i + 1);
-            self.session = None;
-            return actions;
+        let mut actions = Vec::new();
+        for (_, due) in session.scheduled.drain(..due).collect::<Vec<_>>() {
+            match due {
+                Due::Act(Action::HangUp) => {
+                    actions.push(Action::HangUp);
+                    self.session = None;
+                    return actions;
+                }
+                Due::Act(action) => actions.push(action),
+                Due::Report {
+                    batteries: asked,
+                    ears: placed,
+                } => {
+                    actions.extend(report_packets(mac, &asked, placed).map(Action::Send));
+                    session.batteries = Some(asked);
+                    session.ears_reported = Some(placed);
+                }
+                Due::Dump => {
+                    actions.extend(startup_dump(mode).into_iter().map(Action::Send));
+                    session.mode = Some(mode);
+                }
+            }
         }
 
-        if let Some(reported) = &mut session.reported {
-            if reported.batteries != batteries {
-                actions.push(Action::Send(battery_packet(&batteries)));
-                reported.batteries = batteries;
-            }
-            if reported.mode != mode {
-                actions.push(Action::Send(noise::set_packet(mode).to_vec()));
-                reported.mode = mode;
-            }
+        if let Some(reported) = &mut session.batteries
+            && *reported != batteries
+        {
+            actions.push(Action::Send(battery_packet(&batteries)));
+            *reported = batteries;
+        }
+        if let Some(reported) = &mut session.mode
+            && *reported != mode
+        {
+            actions.push(Action::Send(noise::set_packet(mode).to_vec()));
+            *reported = mode;
         }
         if let Some(reported) = &mut session.ears_reported
             && *reported != ears
@@ -709,11 +959,8 @@ impl Pods {
             }
             if reported.primary != ears.primary {
                 let first = now + PRIMARY_AFTER_EAR;
-                session.schedule(first, Action::Send(ears.primary_packet(true)));
-                session.schedule(
-                    first + SECOND_PRIMARY,
-                    Action::Send(ears.primary_packet(false)),
-                );
+                session.send(first, ears.primary_packet(true));
+                session.send(first + SECOND_PRIMARY, ears.primary_packet(false));
             } else if reported.secondary_reachable() != ears.secondary_reachable() {
                 actions.push(Action::Send(ears.primary_packet(false)));
             }
@@ -721,10 +968,12 @@ impl Pods {
         actions
     }
 
-    /// When the next timed action falls due - a delayed echo, or the silent
-    /// pair's hang-up - for the caller to [`Pods::poll`] at. `None` with
-    /// nothing scheduled. Replies and changes made through the setters are due
-    /// at once and not counted here: poll after each.
+    /// When the next timed action falls due, for the caller to [`Pods::poll`]
+    /// at: the handshake's answer, the answer to the notification request,
+    /// the startup dump, an echo or a stale report of a mode, a role switch's
+    /// primary pod packets, or the silent pair's hang-up. `None` with nothing
+    /// scheduled. Replies due at once - the key packet, say - are counted
+    /// too; changes made through the setters are not: poll after each.
     pub fn next_due(&self) -> Option<Duration> {
         self.session.as_ref()?.scheduled.first().map(|(at, _)| *at)
     }
@@ -754,15 +1003,17 @@ impl Pods {
         }
     }
 
-    /// The handshake's answer, and what comes unasked right after it: the
-    /// primary pod, then the ear report, as the #142 captures have them.
+    /// The handshake's answer, after [`Quirks::handshake_delay`], and the
+    /// hosts the pair knows with it, unasked: 0x2B came 3 µs after the answer
+    /// in one #71 capture, before the app had sent anything it might answer,
+    /// and 30 ms after it in another.
     fn answer_handshake(&mut self, now: Duration) {
-        let ears = self.ears();
-        self.send(now, HANDSHAKE_ACK.to_vec());
-        self.send(now, ears.primary_packet(false));
-        self.send(now, ear_packet(ears.report).to_vec());
+        let at = now + self.quirks.handshake_delay;
+        let hosts = known_hosts_packet(&[self.mac, THIS_HOST, ANOTHER_HOST]);
         if let Some(session) = &mut self.session {
-            session.ears_reported = Some(ears);
+            session.answered.get_or_insert(at);
+            session.send(at, HANDSHAKE_ACK.to_vec());
+            session.send(at, hosts);
         }
     }
 
@@ -860,34 +1111,30 @@ impl Pods {
     /// Queues `packet` on the open connection for `at`.
     fn send(&mut self, at: Duration, packet: Vec<u8>) {
         if let Some(session) = &mut self.session {
-            session.schedule(at, Action::Send(packet));
+            session.send(at, packet);
         }
     }
 
-    /// The answer to the notification request: the battery, then the startup
-    /// dump. From here on the app hears of every change.
+    /// The answer to the notification request, as capture 4 of #71 has it:
+    /// the battery, the primary pod, 0x0C naming a bud, 0x0E and 0x2E naming
+    /// this host, the ear report and 0x2E again; then, after the dump delay,
+    /// the second 0x0C and the startup dump. From the battery on, the app
+    /// hears of every change to the batteries and the pods' places, and from
+    /// the dump on, of every change of mode.
+    ///
+    /// The answer holds the state as it was when asked; what changes before
+    /// it is due follows it in the same poll, so the last word is the state
+    /// of the moment.
     fn start_notifications(&mut self, now: Duration) {
-        let batteries = self.aap_batteries();
-        let mut packets = vec![
-            battery_packet(&batteries),
-            // The mode packet serves both directions: this is the report.
-            noise::set_packet(self.noise_mode).to_vec(),
-            noise::allow_off_packet(self.allow_off).to_vec(),
-        ];
-        packets.extend(
-            OTHER_SETTINGS
-                .iter()
-                .map(|(sub_cmd, value)| noise::settings_report(*sub_cmd, value).to_vec()),
-        );
+        let report = Due::Report {
+            batteries: self.aap_batteries(),
+            ears: self.ears(),
+        };
         let at = now + self.quirks.report_delay;
+        let dump_at = at + self.quirks.dump_delay;
         if let Some(session) = &mut self.session {
-            for packet in packets {
-                session.schedule(at, Action::Send(packet));
-            }
-            session.reported = Some(Reported {
-                batteries,
-                mode: self.noise_mode,
-            });
+            session.schedule(at, report);
+            session.schedule(dump_at, Due::Dump);
         }
     }
 
@@ -911,31 +1158,28 @@ impl Pods {
             return;
         };
         // The app knows what it asked for; only a change from elsewhere is
-        // news to it.
-        if let Some(reported) = &mut session.reported {
-            reported.mode = mode;
+        // news to it. Before the startup dump, the dump tells it.
+        if let Some(reported) = &mut session.mode {
+            *reported = mode;
         }
         if self.quirks.settings_changed {
-            session.schedule(now, Action::Send(noise::settings_changed_packet().to_vec()));
+            session.send(now, noise::settings_changed_packet().to_vec());
         }
-        // Stale, so not what the app was told: `reported` keeps the mode set,
-        // and only the echo corrects the report.
+        // Stale, so not what the app was told: `session.mode` keeps the mode
+        // set, and only the echo corrects the report.
         if let Some(delay) = self.quirks.stale_report
             && mode == NoiseMode::Off
             && previous != NoiseMode::Off
         {
-            session.schedule(
-                now + delay,
-                Action::Send(noise::set_packet(previous).to_vec()),
-            );
+            session.send(now + delay, noise::set_packet(previous).to_vec());
         }
         // Carries the mode this command set, even if another has replaced it
         // by the time it arrives: a stale report, like those in run 1 of
         // docs/aap-noise-control.md.
         if self.quirks.echo_every != 0 && self.mode_changes.is_multiple_of(self.quirks.echo_every) {
-            session.schedule(
+            session.send(
                 now + self.quirks.echo_delay,
-                Action::Send(noise::set_packet(mode).to_vec()),
+                noise::set_packet(mode).to_vec(),
             );
         }
     }
@@ -997,9 +1241,10 @@ mod tests {
     }
 
     /// A Pro 3 pair with an AAP connection the app has run its connect
-    /// sequence on, the replies taken.
+    /// sequence on, the replies taken, the startup dump with them.
     fn subscribed() -> Pods {
         let mut pods = Pods::new(PRO_3, MAC);
+        pods.quirks.dump_delay = Duration::ZERO;
         pods.aap_opened(ms(0));
         for packet in [&HANDSHAKE[..], &NOTIFICATIONS, &FEATURES, &KEY_REQUEST] {
             pods.receive(packet, ms(0));
@@ -1164,50 +1409,151 @@ mod tests {
         assert_eq!(pods.keys(), &fixed);
     }
 
+    /// The opcode of each packet.
+    fn opcodes(packets: &[Vec<u8>]) -> Vec<u8> {
+        packets.iter().map(|p| p[OPCODE]).collect()
+    }
+
+    /// The link coming up as in capture 4 of #71: the handshake's answer with
+    /// 0x2B; nothing for the features packet; on the notification request the
+    /// battery, 0x08, 0x0C, 0x0E, 0x2E, 0x06 and 0x2E; the key reply when
+    /// asked; and once the dump delay is over, the second 0x0C and the dump.
     #[test]
-    fn answers_the_connect_sequence() {
+    fn the_link_comes_up_in_the_captured_order() {
         let mut pods = Pods::new(PRO_3, MAC);
         pods.set_battery(Part::Left, Some(83));
         pods.set_charging(Part::Case, true);
+        pods.set_in_ear(PodSide::Left, true);
         pods.aap_opened(ms(0));
         assert!(pods.is_connected(), "AAP needs a Bluetooth link");
 
         pods.receive(&HANDSHAKE, ms(0));
-        assert_eq!(sent(&pods.poll(ms(0))), handshake_answer(&pods));
+        let answer = sent(&pods.poll(ms(0)));
+        assert_eq!(answer[0], HANDSHAKE_ACK);
+        assert_eq!(answer[0].len(), 18);
+        assert_eq!(
+            answer[1],
+            known_hosts_packet(&[MAC, THIS_HOST, ANOTHER_HOST])
+        );
+        assert_eq!(answer.len(), 2);
 
-        pods.receive(&NOTIFICATIONS, ms(0));
-        let dump = sent(&pods.poll(ms(0)));
-        let info = parse_battery_packet(&dump[0]).unwrap();
+        let at = ms(10);
+        pods.receive(&NOTIFICATIONS, at);
+        pods.receive(&FEATURES, at);
+        pods.receive(&KEY_REQUEST, at);
+        let burst = sent(&pods.poll(at));
+        assert_eq!(
+            opcodes(&burst),
+            [0x04, 0x08, 0x0C, 0x0E, 0x2E, 0x06, 0x2E, 0x31],
+            "{burst:02x?}"
+        );
+        let info = parse_battery_packet(&burst[0]).unwrap();
         assert_eq!(info.left.unwrap().level, Some(83));
         assert_eq!(info.right.unwrap().level, Some(70));
         assert!(info.case.unwrap().is_charging());
-        assert_eq!(dump.len(), 3 + OTHER_SETTINGS.len());
-
-        pods.receive(&FEATURES, ms(0));
-        assert_eq!(sent(&pods.poll(ms(0))), [FEATURES_ACK.to_vec()]);
-
-        pods.receive(&KEY_REQUEST, ms(0));
-        let reply = sent(&pods.poll(ms(0)));
-        let keys = parse_proximity_keys(&reply[0]).unwrap();
+        assert_eq!(burst[1], primary_packet(PodSide::Left, true, false));
+        assert_eq!(burst[2], in_use_packet(MAC, false));
+        assert_eq!(burst[2].len(), 14);
+        assert_eq!(
+            burst[2][6..],
+            [0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x01, 0x02]
+        );
+        assert_eq!(burst[3], host_packet(THIS_HOST));
+        assert_eq!(burst[3].len(), 13);
+        assert_eq!(burst[4], host_entry_packet(THIS_HOST));
+        assert_eq!(burst[4].len(), 17);
+        assert_eq!(burst[4][9..15], THIS_HOST.0);
+        assert_eq!(burst[5], ears(Place::InEar, Place::InCase));
+        let keys = parse_proximity_keys(&burst[7]).unwrap();
         assert_eq!(find_encryption_key(&keys), Ok(pods.keys().enc_key));
         assert_eq!(keys[0].key_type, KeyType::Irk);
         assert_eq!(keys[0].data, pods.keys().irk);
 
-        assert!(pods.poll(ms(1000)).is_empty());
+        let dumped = at + DUMP_DELAY;
+        assert_eq!(pods.next_due(), Some(dumped));
+        assert!(pods.poll(dumped - ms(1)).is_empty(), "no mode yet");
+        let dump = sent(&pods.poll(dumped));
+        assert_eq!(dump[0], in_use_packet(THIS_HOST, true));
+        assert_eq!(dump[0][12..], [0x01, 0x01]);
+        assert_eq!(opcodes(&dump[1..4]), [0x02, 0x1D, 0x09]);
+        assert_eq!(
+            dump[3],
+            noise::set_packet(NoiseMode::NoiseCancellation).to_vec()
+        );
+        assert_eq!(dump.len(), 1 + STARTUP_DUMP.len());
+        assert_eq!(pods.next_due(), None);
+        assert!(pods.poll(ms(10_000)).is_empty());
     }
 
-    /// The mode is one 0x09 setting among several, some of them with values
-    /// that read as a mode. Only byte 6 picks it out.
+    /// The handshake's answer can take a while, as a Pro 3's took a second,
+    /// and what the app sends before it is out is dropped.
+    #[test]
+    fn nothing_counts_before_the_handshake_is_answered() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        pods.quirks.handshake_delay = ms(1000);
+        pods.aap_opened(ms(0));
+        pods.receive(&HANDSHAKE, ms(0));
+        pods.receive(&NOTIFICATIONS, ms(10));
+        pods.receive(&KEY_REQUEST, ms(10));
+        assert!(pods.poll(ms(999)).is_empty());
+        assert_eq!(opcodes(&sent(&pods.poll(ms(1000)))), [0x00, 0x2B]);
+        assert!(pods.poll(ms(5000)).is_empty(), "dropped");
+
+        pods.receive(&KEY_REQUEST, ms(5000));
+        assert_eq!(opcodes(&sent(&pods.poll(ms(5000)))), [0x31]);
+        assert_eq!(pods.received().len(), 4);
+    }
+
+    /// The dump carries the mode as it is when it comes, and until then no
+    /// change of mode is reported.
+    #[test]
+    fn the_dump_carries_the_mode_as_it_is_then() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        pods.aap_opened(ms(0));
+        pods.receive(&HANDSHAKE, ms(0));
+        pods.receive(&NOTIFICATIONS, ms(0));
+        pods.poll(ms(0));
+        pods.set_noise_mode(NoiseMode::Transparency);
+        assert!(pods.poll(ms(10)).is_empty());
+        let dump = sent(&pods.poll(DUMP_DELAY));
+        let modes: Vec<_> = dump.iter().filter(|p| is_noise_mode_packet(p)).collect();
+        assert_eq!(
+            modes,
+            [&noise::set_packet(NoiseMode::Transparency).to_vec()]
+        );
+        pods.set_noise_mode(NoiseMode::Adaptive);
+        assert_eq!(
+            sent(&pods.poll(DUMP_DELAY + ms(10))),
+            [noise::set_packet(NoiseMode::Adaptive).to_vec()]
+        );
+    }
+
+    /// The mode is one 0x09 setting among some twenty, several of them with
+    /// values that read as a mode. Only byte 6 picks it out. As in the
+    /// captures, allow-Off (0x34) is not among them.
     #[test]
     fn the_startup_dump_hides_the_mode_among_other_settings() {
         let mut pods = Pods::new(PRO_3, MAC);
         pods.set_noise_mode(NoiseMode::Adaptive);
         pods.aap_opened(ms(0));
+        pods.receive(&HANDSHAKE, ms(0));
         pods.receive(&NOTIFICATIONS, ms(0));
-        let settings: Vec<Vec<u8>> = sent(&pods.poll(ms(0)))
+        pods.poll(ms(0));
+        let settings: Vec<Vec<u8>> = sent(&pods.poll(DUMP_DELAY))
             .into_iter()
             .filter(|p| p[OPCODE] == 0x09)
             .collect();
+        let sub_cmds: Vec<u8> = settings.iter().map(|p| p[6]).collect();
+        assert_eq!(
+            sub_cmds,
+            [
+                0x0D, 0x18, 0x17, 0x25, 0x23, 0x1F, 0x24, 0x28, 0x26, 0x29, 0x2C, 0x2F, 0x33, 0x2E,
+                0x30, 0x1B, 0x35, 0x3E, 0x37, 0x38, 0x3B
+            ]
+        );
+        assert!(settings.contains(&noise::settings_report(0x24, &[0x00, 0x03]).to_vec()));
+        assert!(settings.contains(&noise::settings_report(0x26, &[0x02]).to_vec()));
+        assert!(settings.contains(&noise::settings_report(0x28, &[0x02]).to_vec()));
 
         let modes: Vec<&Vec<u8>> = settings
             .iter()
@@ -1220,7 +1566,11 @@ mod tests {
             .filter(|p| !is_noise_mode_packet(p) && NoiseMode::from_byte(p[7]).is_some())
             .count();
         assert!(lookalikes >= 2, "{settings:02x?}");
-        assert!(settings.contains(&noise::allow_off_packet(false).to_vec()));
+        assert!(
+            settings
+                .iter()
+                .all(|p| noise::parse_allow_off_packet(p).is_none())
+        );
     }
 
     #[test]
@@ -1369,35 +1719,33 @@ mod tests {
         ear_packet(EarReport { primary, secondary }).to_vec()
     }
 
-    /// What the handshake brings: its answer, then the primary pod and the
-    /// ear report, unasked.
-    fn handshake_answer(pods: &Pods) -> Vec<Vec<u8>> {
-        let ears = pods.ears();
-        vec![
-            HANDSHAKE_ACK.to_vec(),
-            ears.primary_packet(false),
-            ear_packet(ears.report).to_vec(),
-        ]
-    }
-
-    /// Out of the box: both pods in the open case, the left one primary.
+    /// Out of the box but for the left pod worn: the right one in the open
+    /// case, the left one primary. Told with the battery, not before.
     #[test]
-    fn tells_where_the_pods_are_once_the_handshake_is_answered() {
+    fn tells_where_the_pods_are_with_the_battery() {
         let mut pods = Pods::new(PRO_3, MAC);
         pods.aap_opened(ms(0));
         pods.set_in_ear(PodSide::Left, true);
         assert!(pods.poll(ms(0)).is_empty(), "nothing before the handshake");
 
         pods.receive(&HANDSHAKE, ms(0));
+        pods.poll(ms(0));
+        pods.set_in_ear(PodSide::Right, true);
+        assert!(pods.poll(ms(10)).is_empty(), "nothing before the request");
+        pods.set_in_ear(PodSide::Right, false);
+
+        pods.receive(&NOTIFICATIONS, ms(20));
+        let places: Vec<Vec<u8>> = sent(&pods.poll(ms(20)))
+            .into_iter()
+            .filter(|p| [0x06, 0x08].contains(&p[OPCODE]))
+            .collect();
         assert_eq!(
-            sent(&pods.poll(ms(0))),
+            places,
             [
-                HANDSHAKE_ACK.to_vec(),
                 primary_packet(PodSide::Left, true, false).to_vec(),
-                ears(Place::InEar, Place::InCase),
+                ears(Place::InEar, Place::Out),
             ]
         );
-        assert!(pods.poll(ms(10)).is_empty());
     }
 
     /// A pod in or out of an ear or the case, the primary pod's place first.
@@ -1641,12 +1989,47 @@ mod tests {
         pods.aap_opened(ms(0));
         pods.receive(&HANDSHAKE, ms(0));
         pods.receive(&NOTIFICATIONS, ms(0));
-        assert_eq!(sent(&pods.poll(ms(0))), handshake_answer(&pods));
+        assert_eq!(opcodes(&sent(&pods.poll(ms(0)))), [0x00, 0x2B]);
         assert_eq!(pods.next_due(), Some(ms(500)));
         assert!(pods.poll(ms(499)).is_empty());
         let report = sent(&pods.poll(ms(500)));
         assert!(parse_battery_packet(&report[0]).is_ok(), "{report:02x?}");
-        assert_eq!(report.len(), 3 + OTHER_SETTINGS.len());
+        assert_eq!(report.len(), 7, "the battery and what comes with it");
+        assert_eq!(pods.next_due(), Some(ms(500) + DUMP_DELAY));
+    }
+
+    /// A change while the report waits is not sent ahead of it, to be
+    /// overtaken by the state as it was when asked: the report comes as
+    /// asked, and the change right after it, so the app's last word is the
+    /// state of the moment.
+    #[test]
+    fn a_change_during_the_report_delay_comes_after_the_report() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        pods.quirks.report_delay = ms(500);
+        pods.aap_opened(ms(0));
+        pods.receive(&HANDSHAKE, ms(0));
+        pods.receive(&NOTIFICATIONS, ms(0));
+        pods.poll(ms(0));
+        pods.set_battery(Part::Left, Some(42));
+        pods.set_in_ear(PodSide::Left, true);
+        assert!(pods.poll(ms(100)).is_empty(), "ahead of the report");
+
+        let packets = sent(&pods.poll(ms(500)));
+        let batteries: Vec<_> = packets
+            .iter()
+            .filter_map(|p| parse_battery_packet(p).ok())
+            .map(|info| info.left.unwrap().level)
+            .collect();
+        assert_eq!(batteries, [Some(80), Some(42)], "as asked, then now");
+        let places: Vec<_> = packets.iter().filter(|p| p[OPCODE] == 0x06).collect();
+        assert_eq!(
+            places,
+            [
+                &ears(Place::InCase, Place::InCase),
+                &ears(Place::InEar, Place::InCase)
+            ]
+        );
+        assert!(pods.poll(ms(600)).is_empty());
     }
 
     /// Switched on during a connection, the quirk waits for the next one.
