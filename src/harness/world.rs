@@ -18,8 +18,11 @@
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
-//!   change, and again when [`Pods::next_due`] says, for the delayed echo and
-//!   the silent pair's hang-up.
+//!   change, and again when [`Pods::next_due`] says, for what comes late:
+//!   the handshake's answer, the startup dump, the echo of a mode change, the
+//!   silent pair's hang-up. A pair that drops its link, as with both pods in
+//!   the closed case, is disconnected in the fake BlueZ, then its AAP
+//!   connection closed, as a disconnect is - see [`World::disconnect`].
 //!
 //! The world changes in two ways that do the same: in the same process, by
 //! the methods of [`World`], which the pipeline tests (#73) use; or over
@@ -37,12 +40,12 @@
 //! | `SetPowered(s name, b powered)` | Powers it on or off; off, discovery there ends and its pairs disconnect |
 //! | `RestartBluez()` | bluetoothd restarting as after a crash, under a new unique name: `NameOwnerChanged` twice, and every client's discovery and battery providers forgotten. Nothing is announced again, as a real one would - see [`FakeBluez::restart`] |
 //! | `Connect(s mac)` | Connects them to the host, which the app takes up |
-//! | `Disconnect(s mac)` | Disconnects them, which takes the AAP connection along |
+//! | `Disconnect(s mac)` | Disconnects them, which takes the AAP connection along, after BlueZ's `Connected=false` |
 //! | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case`; a level above 100 is unknown |
-//! | `SetLid(s mac, b open)` | Opens or closes the case |
+//! | `SetLid(s mac, b open)` | Opens or closes the case; closed on both pods, it drops their link |
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
-//! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, `echo_delay_ms`, `report_delay_ms` and `stale_report_ms` in milliseconds, a `stale_report_ms` of 0 for none |
+//! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, the durations by theirs with `_ms` - `echo_delay_ms`, `handshake_delay_ms`, `report_delay_ms`, `dump_delay_ms`, `stale_report_ms` - in milliseconds, a `stale_report_ms` of 0 for none |
 //! | `Flood(u count)` | That many advertisers no key decrypts and no IRK resolves, each from an address of its own |
 //! | `Received(s mac) → aay` | Every AAP packet the app sent the pair, in order |
 //! | `Batteries() → a{sy}` | What GNOME Settings shows: the level a battery provider gave each device, by MAC |
@@ -664,11 +667,11 @@ fn parse_part(part: &str) -> Result<Part, String> {
     }
 }
 
-/// Sets the quirk named by its field in [`Quirks`]. `echo_delay`,
-/// `report_delay` and `stale_report` go by `echo_delay_ms`, `report_delay_ms`
-/// and `stale_report_ms`, in milliseconds, a `stale_report_ms` of 0 turning
-/// the quirk off. A number may come as any integer type,
-/// as `gdbus` sends `<4>` as an `int32`.
+/// Sets the quirk named by its field in [`Quirks`]. The durations go by
+/// their name with `_ms` - `echo_delay_ms`, `handshake_delay_ms`,
+/// `report_delay_ms`, `dump_delay_ms` and `stale_report_ms` - in
+/// milliseconds, a `stale_report_ms` of 0 turning the quirk off. A number may
+/// come as any integer type, as `gdbus` sends `<4>` as an `int32`.
 fn set_quirk(quirks: &mut Quirks, name: &str, value: &Value<'_>) -> Result<(), String> {
     let flag = || bool::try_from(value).map_err(|_| format!("{name} takes a boolean"));
     let count = || {
@@ -692,7 +695,9 @@ fn set_quirk(quirks: &mut Quirks, name: &str, value: &Value<'_>) -> Result<(), S
         "zero_suffix_when_connected" => quirks.zero_suffix_when_connected = flag()?,
         "silent_handshake" => quirks.silent_handshake = flag()?,
         "refuse_aap" => quirks.refuse_aap = count()?,
+        "handshake_delay_ms" => quirks.handshake_delay = Duration::from_millis(count()?.into()),
         "report_delay_ms" => quirks.report_delay = Duration::from_millis(count()?.into()),
+        "dump_delay_ms" => quirks.dump_delay = Duration::from_millis(count()?.into()),
         "stale_report_ms" => {
             quirks.stale_report =
                 Some(Duration::from_millis(count()?.into())).filter(|delay| !delay.is_zero());
@@ -903,6 +908,10 @@ mod tests {
         assert_eq!(quirks.refuse_aap, 3);
         assert_eq!(quirks.echo_every, 1);
         assert_eq!(quirks.echo_delay, Duration::from_millis(20));
+        set_quirk(&mut quirks, "handshake_delay_ms", &Value::from(1200u32)).unwrap();
+        set_quirk(&mut quirks, "dump_delay_ms", &Value::from(1500i32)).unwrap();
+        assert_eq!(quirks.handshake_delay, Duration::from_millis(1200));
+        assert_eq!(quirks.dump_delay, Duration::from_millis(1500));
         set_quirk(&mut quirks, "stale_report_ms", &Value::from(330u32)).unwrap();
         assert_eq!(quirks.stale_report, Some(Duration::from_millis(330)));
         set_quirk(&mut quirks, "stale_report_ms", &Value::from(0u32)).unwrap();

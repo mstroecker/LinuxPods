@@ -76,12 +76,12 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 | Method | Does |
 |---|---|
 | `AddPods(s mac, q model, s alias)` | pairs new AirPods with the first adapter there is now, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C) |
-| `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP |
+| `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP right after BlueZ's `Connected=false`, as the hardware's AAP dies with the link |
 | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case` |
-| `SetLid(s mac, b open)` | the case lid |
+| `SetLid(s mac, b open)` | the case lid; closed on both pods in the case, the pods drop their link, as real ones do |
 | `Repair(s mac)` | new keys, sent at the next key request; the old IRK stops resolving the pair's addresses, and the old key stops decrypting BLE |
 | `HangUp(s mac)` | closes AAP from the pods' end; the link stays, and the app links the pair again after a second, longer after repeated hang-ups (#49) |
-| `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `settings_changed`, `echo_every`, `echo_delay_ms`, `zero_suffix_when_connected`, `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `report_delay_ms` (hold back the battery and startup dump), `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none) |
+| `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `settings_changed` (a 0x4B on every mode change), `echo_every`, `echo_delay_ms`, `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none), `zero_suffix_when_connected`, `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `handshake_delay_ms` (hold back the handshake's answer), `report_delay_ms` (hold back the battery and what comes with it), `dump_delay_ms` (from the battery to the startup dump and its mode) |
 | `Flood(u count)` | that many advertisers no key decrypts and no IRK resolves |
 | `Received(s mac) → aay` | every AAP packet the app sent the pair: check `0x34 01` precedes Off |
 | `Batteries() → a{sy}` | what GNOME Settings shows, by MAC |
@@ -192,6 +192,16 @@ the fake world's own config directory, never the user's -
   changes every 4 to 8 minutes, connected or not, and across a closed lid (#71). The
   fake's rotation stays this fast on purpose, to exercise it; #115 brings the rest in
   line.
+- **AAP timing.** The fake pods answer as AirPods Pro 3 do in the #71 captures, for
+  every model: the battery and where the pods are come first, and the noise mode
+  only with the startup dump, 200 ms later (1.4-1.5 s on the hardware; set
+  `dump_delay_ms` for the real wait). Noise Control is sensitive as soon as the
+  reading is on AAP, with no mode selected until the dump. A
+  mode change is confirmed by an echo 1 s later, with no 0x4B; an Off is followed by
+  a stale report of the mode it replaced at 0.33 s, which the app should ignore. For
+  AirPods 4's answers: `settings_changed` true, `echo_every` 4, `stale_report_ms` 0.
+  The handshake is answered at once unless `handshake_delay_ms` says otherwise (about
+  1 s on the hardware).
 - **Logs** are in `$XDG_RUNTIME_DIR/linuxpods-harness/world/log/`: `linuxpods.log` at
   `RUST_LOG=linuxpods=debug`, `fakepods.log` and `broadwayd.log`. Set `RUST_LOG` before
   `make` to change the level. They stay until the next start.
