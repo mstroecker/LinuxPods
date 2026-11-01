@@ -76,12 +76,12 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 | Method | Does |
 |---|---|
 | `AddPods(s mac, q model, s alias)` | pairs new AirPods with the first adapter there is now, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C) |
-| `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP right after BlueZ's `Connected=false`, as the hardware's AAP dies with the link |
+| `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP right after BlueZ's `Connected=false`, as the hardware's AAP dies with the link. BlueZ signals `ServicesResolved=true` 4 s after `Connected=true`, and `false` just before `Connected=false`, as bluetoothd does; nothing in the app waits on it |
 | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case` |
-| `SetLid(s mac, b open)` | the case lid; closed on both pods in the case, the pods drop their link, as real ones do |
+| `SetLid(s mac, b open)` | the case lid; closed on both pods in the case, the pods drop their link, as real ones do. Over BLE, a pod in the closed case stops advertising 4 s after it closes; opened, the pods come back under new addresses, the right one 1 s later and the left 5.5 s |
 | `Repair(s mac)` | new keys, sent at the next key request; the old IRK stops resolving the pair's addresses, and the old key stops decrypting BLE |
 | `HangUp(s mac)` | closes AAP from the pods' end; the link stays, and the app links the pair again after a second, longer after repeated hang-ups (#49) |
-| `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `settings_changed` (a 0x4B on every mode change), `echo_every`, `echo_delay_ms`, `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none), `zero_suffix_when_connected`, `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `handshake_delay_ms` (hold back the handshake's answer), `report_delay_ms` (hold back the battery and what comes with it), `dump_delay_ms` (from the battery to the startup dump and its mode) |
+| `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `settings_changed` (a 0x4B on every mode change), `echo_every`, `echo_delay_ms`, `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none), `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `handshake_delay_ms` (hold back the handshake's answer), `report_delay_ms` (hold back the battery and what comes with it), `dump_delay_ms` (from the battery to the startup dump and its mode) |
 | `Flood(u count)` | that many advertisers no key decrypts and no IRK resolves |
 | `Received(s mac) → aay` | every AAP packet the app sent the pair: check `0x34 01` precedes Off |
 | `Batteries() → a{sy}` | what GNOME Settings shows, by MAC |
@@ -183,15 +183,27 @@ the fake world's own config directory, never the user's -
 - **Popovers are separate surfaces.** A screenshot of `main-window` leaves an open menu
   out; take one of the popover by its path. Screenshots go to
   `$XDG_RUNTIME_DIR/linuxpods-harness/`.
-- **BLE timing.** Each pair advertises once a second from a resolvable private address,
-  made from its IRK, that rotates every 10 s, and the fake BlueZ drops an address 30 s
-  after it goes quiet. An address's first advertisement comes in `InterfacesAdded`, the
-  rest in `PropertiesChanged`, and the app reads both: 10 readings out of 10 per
-  address, and a first reading within about a second of start. Real AirPods differ:
-  about 5 advertisements a second from each pod, each from its own address, which
-  changes every 4 to 8 minutes, connected or not, and across a closed lid (#71). The
-  fake's rotation stays this fast on purpose, to exercise it; #115 brings the rest in
-  line.
+- **BLE timing.** Each pod advertises once a second from a resolvable private address of
+  its own, made from the pair's IRK, that rotates every 10 s, the left pod's half a
+  rotation off the right's; the fake BlueZ drops an address 30 s after it goes quiet.
+  Both pods advertise while one is in the case, only the primary while both are out.
+  A pod repeats its payload until something changes, or for 25 s, and the fake BlueZ
+  signals a repeat as `RSSI` alone, as bluetoothd does. So the app reads an address's
+  first advertisement, in `InterfacesAdded`, and each change, in `PropertiesChanged`
+  with `ManufacturerData`, and no repeat: a first reading within about a second of
+  start, then one per change. A pod in the closed case stops advertising 4 s after the
+  lid closes, and the pods come back under new addresses once it opens, the right one
+  after 1 s and the left after 5.5 s. The MAC suffix in the payload is there only
+  while both pods are in the case. All of that is as in the #71 captures. Real AirPods
+  differ in the rate, about 5 advertisements a second from each pod with bursts of
+  30-35 after the lid opens or the pods go back in the case, and in the rotation,
+  every 4 to 8 minutes. The fake's rotation stays this fast on purpose, to exercise
+  it.
+- **An app started late hears a pod only once it changes.** Started while the fake
+  BlueZ still has a pod's address - within 30 s of the last app's discovery, say - the
+  app gets no `InterfacesAdded` for it, and nothing of it until its payload or address
+  changes: up to 5 s while both pods advertise, 10 s while one does. bluetoothd does
+  the same for a device it keeps, and the app has the same gap on hardware (#153).
 - **AAP timing.** The fake pods answer as AirPods Pro 3 do in the #71 captures, for
   every model: the battery and where the pods are come first, and the noise mode
   only with the startup dump, 200 ms later (1.4-1.5 s on the hardware; set

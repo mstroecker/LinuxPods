@@ -68,7 +68,7 @@ len     Length                          0x19        ✅ Working   Payload length
 
 ### Important: Orientation Handling
 
-AirPods broadcast which pod is "primary" (left or right). When the right pod is primary, several data fields are **swapped**:
+Each pod advertises as itself and calls itself "primary" (#71), so status bit 5 says which pod sent the advertisement: set by the left pod, clear from the right. In the right pod's advertisements several data fields are **swapped**:
 - The primary is encoded in Byte 3 (Status)
 - Battery level nibbles (left ↔ right)
 - Charging status bits (left ↔ right)
@@ -144,7 +144,7 @@ Only the first matters to the lid, below.
 
 **Primary Pod Determination:**
 
-The AirPods broadcast which pod is "primary". This affects how battery levels, charging status, and ear detection should be interpreted:
+Each pod calls itself "primary" in its own advertisement, so the primary flag names the pod that sent it. It decides how battery levels, charging status, and ear detection should be interpreted:
 
 ```rust
 let is_flipped = !primary_left;
@@ -222,12 +222,15 @@ About 4 s later the pods stop advertising, so a closed lid is only seen in the
 last advertisements before they go silent. The coordinator's cached reading
 keeps it on show until they advertise again, for up to `BLE_CACHE_TTL` (30 min).
 
-The high nibble does not say whether the pods are in the case. AirPods Pro 3
-sends `0x11` from the right pod in the open case, the same value it sends out
-of it, `0x31` from the left pod, and `0x32` from both after being put back. The
-`0x5` once read as "in the case" appears only in the September captures, all
-with the case charging (byte 5 bit 6) and status bit 2, so it may follow the
-case's charging. The parser does not read it. The low bits are not a lid-open
+The high nibble follows the pod and the case's charging, as capture 4 of #71
+settled: `0x1` from a pod out of the case, whether the case charges or not;
+`0x3` from one in a case that isn't charging; `0x5` from one in a charging case.
+Put on the charger, both pods in the open case went from `0x32` to `0x52` half
+a second ahead of byte 5's charging bit (bit 6), and with the lid closed they
+sent `0x5a`. The September `0x51`/`0x59` vectors, all with the case charging,
+fit. One capture does not fit yet: in capture 2 the right pod sent `0x11` from
+the open case, with the left pod's `0x31`, before both sent `0x32` after being
+put back. The parser does not read the nibble. The low bits are not a lid-open
 counter: they stayed `1` across two lid opens and went to `2` when the pods went
 back in.
 
@@ -401,8 +404,11 @@ From the #71 captures (AirPods Pro 3):
 - **Payload:** repeated for hundreds of advertisements. It changes in bursts when
   something happens, and otherwise every 20-30 s
 - **Closed lid:** the pods stop advertising about 4 s after the lid closes
-- **Which pod:** with both pods in the case, both advertise, each from its own
-  address. With both out of the case, worn or not, only the right one does
+- **Which pod:** while either pod is in the case, both advertise, each from its
+  own address. With both out of the case, worn or not, only the primary does:
+  the right one in captures 1 and 2, where it was primary, and in session 1 of
+  #142, both pods worn and the left primary at times, the advertisement's
+  primary agreed with AAP's 13 times out of 13
 - **Recommendation:** Use AAP for live battery monitoring
 
 ### Ear Detection
