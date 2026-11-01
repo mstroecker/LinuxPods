@@ -217,10 +217,18 @@ costs one bit (2^-23 per wrong key).
 part of the last host's address, and byte 0 follows the connection state - and rejects
 correct decryptions, leaving every pair unidentified and so dropped.
 
-**AAP packets carry battery only.** `Inner::snapshot` merges in the rest: model and color
-from the identity the link holds; ears, lid, activity and primary pod from the cached
+**AAP packets carry battery and in-ear.** In-ear comes unasked on every change, in two
+packets: the ear report (`0x06`) gives the primary pod's place first, so it reads only
+with the primary pod packet (`0x08`). The link keeps both (`Link::ear`, an
+`aap::ear::EarState`), and in-ear comes from them once it has both - from the cached
+advertisement before that and after the link goes. Never take that primary from the
+advertisement: a connected pair's payload changes seldom and lags its ears - 4 reached
+the app in 70 s - and its primary lags with its in-ear (#142). At a role switch the `0x06` in the new order comes 1-31 ms before the
+`0x08`, and read with the old primary it swaps the pods; `EarState` holds such a report
+for the `0x08`, at most `ROLE_SWITCH_HOLD`. `Inner::snapshot` merges in the rest: model
+and color from the identity the link holds; lid, activity and primary pod from the cached
 advertisement. The noise control mode is kept on the link (`Link::noise_mode`), apart
-from the reading every battery packet replaces, and goes with the link.
+from the reading every battery packet replaces, and goes with the link like `Link::ear`.
 
 **Off needs sub-command 0x34 first.** Recent firmware refuses a bare `0x0D 01` with an
 error chime - confirmed on Pro 3 and Pro Gen 2, while the other three modes work
@@ -281,10 +289,11 @@ deadlocked every command sent meanwhile.
 
 ## Patterns
 
-- Keep protocol parsing pure and tested. `aap::battery`, `aap::keys`, `aap::noise`,
-  `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and return values,
-  and carry the bulk of the test suite; `noise::ModeState` and `rpa::ResolvedAddresses`
-  take the time as an argument for the same reason. `aap::decode` routes every packet by its header and opcode;
+- Keep protocol parsing pure and tested. `aap::battery`, `aap::ear`, `aap::keys`,
+  `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
+  return values, and carry the bulk of the test suite; `noise::ModeState`,
+  `ear::EarState` and `rpa::ResolvedAddresses` take the time as an argument for the same
+  reason. `aap::decode` routes every packet by its header and opcode;
   each module's `is_*` and `parse_*` still check the header themselves, so they stay safe
   to call on their own.
 - Use synthetic test vectors - never commit a real device key. New test keys come from
@@ -339,4 +348,6 @@ A `Co-Authored-By:` trailer is fine.
   decrypted layout, suffix validation
 - `docs/aap-key-retrieval.md` - retrieving IRK and ENC_KEY over AAP
 - `docs/aap-noise-control.md` - mode packet, the 0x4B notification, the 0x09 family
+- `docs/aap-ear-detection.md` - the ear report (0x06) and primary pod (0x08), the role
+  switch
 - `docs/releasing.md` - release steps, what a release contains, verifying one
