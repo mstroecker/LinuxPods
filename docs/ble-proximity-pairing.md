@@ -407,9 +407,13 @@ From the #71 captures (AirPods Pro 3):
 
 ### Ear Detection
 
-✅ **Working** - Reliably detects when AirPods are in/out of ears
+✅ **Working, with limits** - detects when AirPods are in/out of ears
 - Encoded in byte 3 (status byte), bits 1 and 3
 - Affected by orientation (uses XOR logic)
+- Each pod advertises its own status byte: with both pods worn, the advertisements
+  flipped between `in_ear=false/true` and `true/false` within 0.6 s (#142)
+- While a pair is on AAP, the app takes in-ear from the ear report instead - see
+  [aap-ear-detection.md](aap-ear-detection.md)
 
 ### Lid Status
 

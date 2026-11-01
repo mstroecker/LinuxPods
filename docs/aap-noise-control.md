@@ -152,7 +152,7 @@ On AirPods Pro 3 the dump does not come with the battery: it waits until a `0x0C
 
 ### Ear Detection Reports
 
-AirPods Pro 3 report every change of a pod's place, unasked: `04 00 04 00 06 00`, then a byte per pod - `00` in an ear, `01` out, `02` in the case. A `0x0D` report of the unchanged mode usually follows. With exactly one pod in an ear, the pods briefly report `0D 01` (Off) and go back to the mode about 50 ms later. Neither is a mode change of the user's.
+AirPods Pro 3 report every change of a pod's place, unasked, in an ear report (`0x06`) - see `aap-ear-detection.md` for its layout and the primary pod packet (`0x08`) it reads with. A `0x0D` report of the unchanged mode usually follows. With exactly one pod in an ear, the pods briefly report `0D 01` (Off) and go back to the mode about 50 ms later. Neither is a mode change of the user's.
 
 ### Unsolicited Mode Changes
 

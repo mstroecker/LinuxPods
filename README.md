@@ -54,6 +54,7 @@ own. This is the only channel that can *send* commands.
 | --- | --- |
 | Battery, exact to 1% and live | ✅ |
 | Charging state | ✅ |
+| In-ear detection, live | ✅ |
 | Key retrieval - IRK and encryption key - which identifies the pair over BLE | ✅ |
 | Noise control - Transparency, Adaptive, ANC, Off | ✅ |
 | Conversation Awareness | 🚧 |
