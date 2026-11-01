@@ -810,8 +810,8 @@ impl Coordinator {
 
     /// Registers a new consumer, which sees the latest snapshot.
     ///
-    /// A watch channel holds one value that every receiver sees, so the UI, tray
-    /// and attachment never compete for a snapshot, and one that falls
+    /// A watch channel holds one value that every receiver sees, so the UI, tray,
+    /// attachment and the notifier never compete for a snapshot, and one that falls
     /// behind skips stale snapshots rather than queueing them - an unbounded queue
     /// per consumer grew without limit under a flood of advertisements. Sending
     /// never waits for a consumer to take the snapshot, so a slow one cannot
@@ -860,7 +860,7 @@ impl Coordinator {
     /// actually differ - attachment re-reads them on every connection event
     /// BlueZ confirms and every adapter change while BlueZ is on the bus, and
     /// rebroadcasting an identical map would wake the UI,
-    /// tray and attachment for nothing.
+    /// tray, attachment and notifier for nothing.
     pub(crate) async fn set_device_names(&self, names: HashMap<Address, String>) {
         let mut inner = self.inner.write().await;
         if inner.device_names == names {
@@ -1218,8 +1218,8 @@ impl Coordinator {
                     queues.remove(&mac_addr);
                 }
             }
-            // Without this the UI, tray and attachment never hear that the
-            // connection ended and keep showing the last AAP reading.
+            // Without this the UI, tray, attachment and notifier never hear
+            // that the connection ended and keep showing the last AAP reading.
             self.broadcast(&inner);
         }
         tracing::info!("AAP disconnected from {mac_addr} - showing its last BLE advertisement");
@@ -1437,7 +1437,7 @@ impl Coordinator {
     /// it changed.
     ///
     /// The startup dump repeats, and an unchanged mode is not worth waking the
-    /// window, tray and attachment for. A stale report of the mode a
+    /// window, tray, attachment and notifier for. A stale report of the mode a
     /// command just replaced is not taken - see [`ModeState`].
     async fn handle_noise_mode(
         &self,
