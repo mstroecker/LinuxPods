@@ -28,6 +28,7 @@ use std::time::Duration;
 use bluer::Address;
 
 use crate::aap::battery::{Battery, Component, Status, battery_packet};
+use crate::aap::ear::{EarReport, Place, ear_packet, primary_packet};
 use crate::aap::keys::{KeyType, ProximityKey, key_packet};
 use crate::aap::noise::{self, NoiseMode};
 use crate::ble::decrypt::{KEY_LEN, Plaintext, ZEROED_SUFFIX, encrypt, random_key};
@@ -52,6 +53,15 @@ pub const SILENT_HANG_UP: Duration = Duration::from_secs(9);
 
 /// Where an AAP packet carries its command.
 const OPCODE: usize = 4;
+
+/// How long after the ear report in the new order a role switch's first
+/// primary pod packet comes. In the #142 captures the ear report came 1-31 ms
+/// before it, at every switch.
+pub const PRIMARY_AFTER_EAR: Duration = Duration::from_millis(10);
+
+/// How long after a role switch's first primary pod packet its second one
+/// comes: 30-90 ms in the #142 captures.
+pub const SECOND_PRIMARY: Duration = Duration::from_millis(60);
 
 // The requests a link sends as it comes up - `aap::Client::open`'s, and the key
 // request `Coordinator::open_aap` adds - known by their command byte, as a
@@ -241,6 +251,9 @@ struct Session {
     /// What the app was last told, from the moment it subscribed; `None`
     /// before. A change from it is what `poll` reports.
     reported: Option<Reported>,
+    /// Where the pods are and which is primary, as the app was last told,
+    /// from the handshake's answer on; `None` before. These come unasked.
+    ears_reported: Option<Ears>,
     /// Actions waiting for their time, in time order.
     scheduled: Vec<(Duration, Action)>,
 }
@@ -250,6 +263,25 @@ impl Session {
     fn schedule(&mut self, at: Duration, action: Action) {
         let i = self.scheduled.partition_point(|(t, _)| *t <= at);
         self.scheduled.insert(i, (at, action));
+    }
+}
+
+/// What the ear report and the primary pod packet carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ears {
+    primary: PodSide,
+    report: EarReport,
+}
+
+impl Ears {
+    /// The primary pod packet's `SS`: whether the secondary pod can be
+    /// reached, as it cannot from the closed case.
+    fn secondary_reachable(self) -> bool {
+        self.report.secondary != Place::InClosedCase
+    }
+
+    fn primary_packet(self, switching: bool) -> Vec<u8> {
+        primary_packet(self.primary, self.secondary_reachable(), switching).to_vec()
     }
 }
 
@@ -396,7 +428,7 @@ impl Pods {
     }
 
     /// Puts a pod in an ear, or takes it out. A pod in an ear is out of the
-    /// case.
+    /// case. Over AAP, the next [`Pods::poll`] sends an ear report.
     pub fn set_in_ear(&mut self, side: PodSide, in_ear: bool) {
         let pod = self.pod_mut(side);
         pod.in_ear = in_ear;
@@ -404,7 +436,7 @@ impl Pods {
     }
 
     /// Puts a pod in the case, or takes it out. A pod in the case is out of
-    /// the ear.
+    /// the ear. Over AAP, the next [`Pods::poll`] sends an ear report.
     pub fn set_in_case(&mut self, side: PodSide, in_case: bool) {
         let pod = self.pod_mut(side);
         pod.in_case = in_case;
@@ -414,11 +446,15 @@ impl Pods {
     /// Opens or closes the case. The advertisement carries the lid only while
     /// the pod that sends it is in the case, or both are. With the sending pod
     /// worn and the other in the case, it says only that a pod is in the case,
-    /// and the app keeps the lid it last heard.
+    /// and the app keeps the lid it last heard. Over AAP, a pod in the case
+    /// is in the closed case at once - see [`Pods::poll`].
     pub fn set_lid(&mut self, open: bool) {
         self.lid_open = open;
     }
 
+    /// Makes a pod primary, as the pair does at a role switch. Over AAP, the
+    /// next [`Pods::poll`] sends the ear report in the new order, and the
+    /// primary pod packets after it - see [`PRIMARY_AFTER_EAR`].
     pub fn set_primary(&mut self, side: PodSide) {
         self.primary = side;
     }
@@ -540,6 +576,7 @@ impl Pods {
         let mut session = Session {
             silent: self.quirks.silent_handshake,
             reported: None,
+            ears_reported: None,
             scheduled: Vec::new(),
         };
         if session.silent {
@@ -571,7 +608,9 @@ impl Pods {
     /// Requests are known by their command byte, and settings by their
     /// sub-command too:
     ///
-    /// - the handshake gets its acknowledgment;
+    /// - the handshake gets its acknowledgment, then the primary pod packet
+    ///   (0x08) and the ear report (0x06), unasked, and from then on a report
+    ///   of every change to them;
     /// - the notification request (0x0F) the battery and the startup dump - the
     ///   mode, allow-Off and other 0x09 settings - and from then on a report of
     ///   every change;
@@ -591,7 +630,7 @@ impl Pods {
             return;
         }
         match packet.get(OPCODE).copied() {
-            Some(OP_HANDSHAKE) => self.send(now, HANDSHAKE_ACK.to_vec()),
+            Some(OP_HANDSHAKE) => self.answer_handshake(now),
             Some(OP_FEATURES) => self.send(now, FEATURES_ACK.to_vec()),
             Some(OP_NOTIFICATIONS) => self.start_notifications(now),
             Some(OP_KEY_REQUEST) => self.send(now, self.key_packet()),
@@ -602,13 +641,21 @@ impl Pods {
     /// What is due on the AAP connection by `now`, in order: replies and timed
     /// actions as they fall due, then a report of each change the app has not
     /// been told of - batteries and charging in one battery packet, the mode in
-    /// a 0x0D report. Taken once; a second call at the same time returns
-    /// nothing new.
+    /// a 0x0D report, the pods' places in an ear report. Taken once; a second
+    /// call at the same time returns nothing new.
+    ///
+    /// A new primary pod comes as the hardware's does: the ear report in the
+    /// new order now, then two primary pod packets, the first
+    /// [`PRIMARY_AFTER_EAR`] later and marked as a switch, the second
+    /// [`SECOND_PRIMARY`] after that. A pod in the case is in the closed case
+    /// the moment the lid closes, where the hardware took about 4 s, and
+    /// then the primary pod packet says the secondary cannot be reached.
     ///
     /// A [`Action::HangUp`] ends the connection, and nothing comes after it.
     pub fn poll(&mut self, now: Duration) -> Vec<Action> {
         let batteries = self.aap_batteries();
         let mode = self.noise_mode;
+        let ears = self.ears();
         let Some(session) = &mut self.session else {
             return Vec::new();
         };
@@ -636,6 +683,24 @@ impl Pods {
                 reported.mode = mode;
             }
         }
+        if let Some(reported) = &mut session.ears_reported
+            && *reported != ears
+        {
+            let reported = std::mem::replace(reported, ears);
+            if reported.report != ears.report {
+                actions.push(Action::Send(ear_packet(ears.report).to_vec()));
+            }
+            if reported.primary != ears.primary {
+                let first = now + PRIMARY_AFTER_EAR;
+                session.schedule(first, Action::Send(ears.primary_packet(true)));
+                session.schedule(
+                    first + SECOND_PRIMARY,
+                    Action::Send(ears.primary_packet(false)),
+                );
+            } else if reported.secondary_reachable() != ears.secondary_reachable() {
+                actions.push(Action::Send(ears.primary_packet(false)));
+            }
+        }
         actions
     }
 
@@ -645,6 +710,43 @@ impl Pods {
     /// at once and not counted here: poll after each.
     pub fn next_due(&self) -> Option<Duration> {
         self.session.as_ref()?.scheduled.first().map(|(at, _)| *at)
+    }
+
+    /// Where a pod is, as an ear report gives it.
+    fn place(&self, pod: &Pod) -> Place {
+        match (pod.in_ear, pod.in_case, self.lid_open) {
+            (true, _, _) => Place::InEar,
+            (false, true, true) => Place::InCase,
+            (false, true, false) => Place::InClosedCase,
+            (false, false, _) => Place::Out,
+        }
+    }
+
+    /// The primary pod, and the ear report in its order.
+    fn ears(&self) -> Ears {
+        let (primary, secondary) = match self.primary {
+            PodSide::Left => (&self.left, &self.right),
+            PodSide::Right => (&self.right, &self.left),
+        };
+        Ears {
+            primary: self.primary,
+            report: EarReport {
+                primary: self.place(primary),
+                secondary: self.place(secondary),
+            },
+        }
+    }
+
+    /// The handshake's answer, and what comes unasked right after it: the
+    /// primary pod, then the ear report, as the #142 captures have them.
+    fn answer_handshake(&mut self, now: Duration) {
+        let ears = self.ears();
+        self.send(now, HANDSHAKE_ACK.to_vec());
+        self.send(now, ears.primary_packet(false));
+        self.send(now, ear_packet(ears.report).to_vec());
+        if let Some(session) = &mut self.session {
+            session.ears_reported = Some(ears);
+        }
     }
 
     fn pod_mut(&mut self, side: PodSide) -> &mut Pod {
@@ -1019,7 +1121,7 @@ mod tests {
         assert!(pods.is_connected(), "AAP needs a Bluetooth link");
 
         pods.receive(&HANDSHAKE, ms(0));
-        assert_eq!(sent(&pods.poll(ms(0))), [HANDSHAKE_ACK.to_vec()]);
+        assert_eq!(sent(&pods.poll(ms(0))), handshake_answer(&pods));
 
         pods.receive(&NOTIFICATIONS, ms(0));
         let dump = sent(&pods.poll(ms(0)));
@@ -1190,6 +1292,135 @@ mod tests {
         assert!(pods.poll(ms(10_000)).is_empty());
     }
 
+    /// The ear report, `primary` then `secondary`.
+    fn ears(primary: Place, secondary: Place) -> Vec<u8> {
+        ear_packet(EarReport { primary, secondary }).to_vec()
+    }
+
+    /// What the handshake brings: its answer, then the primary pod and the
+    /// ear report, unasked.
+    fn handshake_answer(pods: &Pods) -> Vec<Vec<u8>> {
+        let ears = pods.ears();
+        vec![
+            HANDSHAKE_ACK.to_vec(),
+            ears.primary_packet(false),
+            ear_packet(ears.report).to_vec(),
+        ]
+    }
+
+    /// Out of the box: both pods in the open case, the left one primary.
+    #[test]
+    fn tells_where_the_pods_are_once_the_handshake_is_answered() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        pods.aap_opened(ms(0));
+        pods.set_in_ear(PodSide::Left, true);
+        assert!(pods.poll(ms(0)).is_empty(), "nothing before the handshake");
+
+        pods.receive(&HANDSHAKE, ms(0));
+        assert_eq!(
+            sent(&pods.poll(ms(0))),
+            [
+                HANDSHAKE_ACK.to_vec(),
+                primary_packet(PodSide::Left, true, false).to_vec(),
+                ears(Place::InEar, Place::InCase),
+            ]
+        );
+        assert!(pods.poll(ms(10)).is_empty());
+    }
+
+    /// A pod in or out of an ear or the case, the primary pod's place first.
+    #[test]
+    fn reports_where_the_pods_go() {
+        let mut pods = subscribed();
+        pods.set_in_ear(PodSide::Left, true);
+        pods.set_in_ear(PodSide::Right, true);
+        assert_eq!(
+            sent(&pods.poll(ms(10))),
+            [ears(Place::InEar, Place::InEar)],
+            "one report for both changes"
+        );
+        pods.set_in_ear(PodSide::Right, false);
+        assert_eq!(sent(&pods.poll(ms(20))), [ears(Place::InEar, Place::Out)]);
+        pods.set_in_case(PodSide::Right, true);
+        assert_eq!(
+            sent(&pods.poll(ms(30))),
+            [ears(Place::InEar, Place::InCase)]
+        );
+        pods.set_in_ear(PodSide::Right, true);
+        pods.set_in_ear(PodSide::Right, true);
+        assert_eq!(sent(&pods.poll(ms(40))), [ears(Place::InEar, Place::InEar)]);
+        assert!(pods.poll(ms(50)).is_empty(), "no change, no packet");
+    }
+
+    /// The #142 captures' switch: the ear report in the new order first, then
+    /// the primary pod twice, the first marked as a switch.
+    #[test]
+    fn a_role_switch_sends_the_ear_report_first() {
+        let mut pods = subscribed();
+        pods.set_in_ear(PodSide::Left, true);
+        pods.set_in_ear(PodSide::Right, true);
+        pods.poll(ms(0));
+        pods.set_in_ear(PodSide::Left, false);
+        assert_eq!(sent(&pods.poll(ms(0))), [ears(Place::Out, Place::InEar)]);
+
+        let switched = ms(900);
+        pods.set_primary(PodSide::Right);
+        assert_eq!(sent(&pods.poll(switched)), [ears(Place::InEar, Place::Out)]);
+        let first = switched + PRIMARY_AFTER_EAR;
+        assert_eq!(pods.next_due(), Some(first));
+        assert!(pods.poll(first - ms(1)).is_empty());
+        assert_eq!(
+            sent(&pods.poll(first)),
+            [primary_packet(PodSide::Right, true, true).to_vec()]
+        );
+        assert_eq!(
+            sent(&pods.poll(first + SECOND_PRIMARY)),
+            [primary_packet(PodSide::Right, true, false).to_vec()]
+        );
+        assert_eq!(pods.next_due(), None);
+    }
+
+    /// With both pods worn the report reads the same either way round, and
+    /// only the primary pod packets come.
+    #[test]
+    fn a_switch_with_both_pods_worn_sends_the_primary_alone() {
+        let mut pods = subscribed();
+        pods.set_in_ear(PodSide::Left, true);
+        pods.set_in_ear(PodSide::Right, true);
+        pods.poll(ms(0));
+        pods.set_primary(PodSide::Right);
+        assert!(pods.poll(ms(0)).is_empty());
+        assert_eq!(
+            sent(&pods.poll(PRIMARY_AFTER_EAR)),
+            [primary_packet(PodSide::Right, true, true).to_vec()]
+        );
+    }
+
+    /// The secondary pod in the case as the lid closes and opens: the place,
+    /// and the primary pod packet's say on whether it can be reached.
+    #[test]
+    fn the_closed_case_is_reported() {
+        let mut pods = subscribed();
+        pods.set_in_ear(PodSide::Left, true);
+        pods.poll(ms(0));
+        pods.set_lid(false);
+        assert_eq!(
+            sent(&pods.poll(ms(10))),
+            [
+                ears(Place::InEar, Place::InClosedCase),
+                primary_packet(PodSide::Left, false, false).to_vec(),
+            ]
+        );
+        pods.set_lid(true);
+        assert_eq!(
+            sent(&pods.poll(ms(20))),
+            [
+                ears(Place::InEar, Place::InCase),
+                primary_packet(PodSide::Left, true, false).to_vec(),
+            ]
+        );
+    }
+
     #[test]
     fn a_battery_change_is_notified() {
         let mut pods = subscribed();
@@ -1268,7 +1499,7 @@ mod tests {
         pods.aap_opened(ms(0));
         pods.receive(&HANDSHAKE, ms(0));
         pods.receive(&NOTIFICATIONS, ms(0));
-        assert_eq!(sent(&pods.poll(ms(0))), [HANDSHAKE_ACK.to_vec()]);
+        assert_eq!(sent(&pods.poll(ms(0))), handshake_answer(&pods));
         assert_eq!(pods.next_due(), Some(ms(500)));
         assert!(pods.poll(ms(499)).is_empty());
         let report = sent(&pods.poll(ms(500)));

@@ -43,11 +43,12 @@ use tokio::time::timeout;
 use zbus::Connection;
 
 use linuxpods::aap::NoiseMode;
+use linuxpods::aap::ear::ROLE_SWITCH_HOLD;
 use linuxpods::aap::noise::{allow_off_packet, set_packet};
 use linuxpods::attachment::Attachment;
 use linuxpods::ble::decrypt::random_key;
 use linuxpods::ble::decrypt_for_device;
-use linuxpods::ble::parser::parse_proximity_data;
+use linuxpods::ble::parser::{PodSide, parse_proximity_data};
 use linuxpods::ble::rpa::{resolvable_address, resolves};
 use linuxpods::ble::scanner::{Advertisement, Scanner};
 use linuxpods::bluez::{BatteryProvider, ProviderConnection};
@@ -361,9 +362,23 @@ impl Fixture {
     /// test's bus that the test may have used first - one for providers, as
     /// attachment's is: see [`PrivateBus::connect_for_providers`].
     async fn start_app_on(&self, bluez: ProviderConnection) -> App {
-        let coordinator = Coordinator::with_aap_socket_dir(
+        self.start_app_holding(bluez, ROLE_SWITCH_HOLD).await
+    }
+
+    /// [`Fixture::start_app`], its links holding an ear report for a role
+    /// switch for `hold` at most - see `aap::ear::EarState`.
+    async fn start_app_with_hold(&self, hold: Duration) -> App {
+        self.start_app_holding(self.bus.connect_for_providers().await.unwrap(), hold)
+            .await
+    }
+
+    /// [`Fixture::start_app_on`], holding as [`Fixture::start_app_with_hold`]
+    /// does.
+    async fn start_app_holding(&self, bluez: ProviderConnection, hold: Duration) -> App {
+        let coordinator = Coordinator::with_aap_socket_dir_and_hold(
             Some(self.keystore()),
             self.sockets.path().to_path_buf(),
+            hold,
         );
         let updates = coordinator.subscribe();
 
@@ -1085,6 +1100,226 @@ async fn a_stale_report_after_off_does_not_bring_the_old_mode_back() {
         shown,
         [Some(NoiseMode::NoiseCancellation), Some(NoiseMode::Off)],
         "Off, and nothing after it"
+    );
+}
+
+/// Whether each pod is in an ear, left then right, while the pair's reading
+/// comes over AAP.
+fn in_ear(snapshot: &Snapshot, mac: Address) -> Option<(Option<bool>, Option<bool>)> {
+    let state = snapshot
+        .states
+        .get(&mac)
+        .filter(|s| s.source == DataSource::Aap)?;
+    Some((state.left_in_ear, state.right_in_ear))
+}
+
+/// A pair with both pods worn, the left one primary, on AAP, and nothing
+/// heard over BLE: the scanner stops before the pair connects, so no
+/// advertisement is ever cached, and whatever in-ear the snapshot shows is
+/// the link's. Its links hold an ear report for a role switch for `hold` at
+/// most.
+async fn worn_on_aap(hold: Duration) -> (Fixture, App) {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.set_in_ear(PodSide::Left, true);
+            pods.set_in_ear(PodSide::Right, true);
+        })
+        .await
+        .unwrap();
+    let mut app = fixture.start_app_with_hold(hold).await;
+    app.stop_listening().await;
+    app.attach(PAIR).await;
+    let snapshot = app
+        .until("both pods worn, as the link reports it", |s| {
+            in_ear(s, PAIR) == Some((Some(true), Some(true)))
+        })
+        .await;
+    assert_eq!(
+        snapshot.states[&PAIR].connection_state, None,
+        "no advertisement cached"
+    );
+    (fixture, app)
+}
+
+/// A pod taken out over AAP shows at once, with no advertisement to tell
+/// it: a connected pair's payload changes seldom, and the icons followed its
+/// advertisements alone, seconds late or not at all (#142). Back in, it
+/// shows again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pod_taken_out_shows_from_the_link_alone() {
+    let (fixture, mut app) = worn_on_aap(ROLE_SWITCH_HOLD).await;
+    for (in_ear_now, what) in [(false, "out"), (true, "back in")] {
+        fixture
+            .world
+            .with_pods(PAIR, |pods| pods.set_in_ear(PodSide::Right, in_ear_now))
+            .await
+            .unwrap();
+        let snapshot = app
+            .until(&format!("the right pod {what}"), |s| {
+                in_ear(s, PAIR) == Some((Some(true), Some(in_ear_now)))
+            })
+            .await;
+        assert_eq!(snapshot.states[&PAIR].connection_state, None);
+    }
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_in_case(PodSide::Left, true))
+        .await
+        .unwrap();
+    app.until("the left pod in the case", |s| {
+        in_ear(s, PAIR) == Some((Some(false), Some(true)))
+    })
+    .await;
+}
+
+/// The primary pod taken out moves the role to the other, as the #142
+/// capture has it: the ear report in the new order comes first, the primary
+/// pod packet 10 ms later. Left and right stay where they are throughout.
+///
+/// Every snapshot from the left pod going out on is watched, until a battery
+/// change made once the switch is over has arrived: it comes over the same
+/// connection, after the ear report and the primary pod packets, so by then
+/// all of them have been read. The switch is made only once the watcher has
+/// seen the left pod go out.
+///
+/// The app holds the ear report for the primary pod packet for [`TIMEOUT`]
+/// here, not the 250 ms of [`ROLE_SWITCH_HOLD`]: on a loaded machine the
+/// fake's packet 10 ms later could come later than that, and the report be
+/// taken as it is - the pods shown swapped, as a swap by hand is. So what is
+/// checked is that the report waits for the primary pod packet, and is read
+/// with it; that the hold ends on its own is the next test's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_switch_keeps_left_and_right() {
+    /// A left pod level the pair has not had yet.
+    const LATER: u8 = 29;
+
+    let (fixture, mut app) = worn_on_aap(TIMEOUT).await;
+
+    // Every in-ear on show, each change once, until the battery change.
+    // Cloned out of the borrow, which every broadcast waits for.
+    type InEar = Option<(Option<bool>, Option<bool>)>;
+    fn read(updates: &mut watch::Receiver<Snapshot>) -> (InEar, Option<u8>) {
+        let snapshot = updates.borrow_and_update();
+        let left = snapshot.states.get(&PAIR).and_then(|s| s.left_battery);
+        (in_ear(&snapshot, PAIR), left)
+    }
+    let left_out = Some((Some(false), Some(true)));
+    let mut updates = app.coordinator.subscribe();
+    let mut shown = vec![read(&mut updates).0];
+    let (watching_tx, watching) = tokio::sync::oneshot::channel();
+    let watcher = tokio::spawn(async move {
+        let mut watching_tx = Some(watching_tx);
+        while updates.changed().await.is_ok() {
+            let (in_ear, left) = read(&mut updates);
+            if shown.last() != Some(&in_ear) {
+                shown.push(in_ear);
+            }
+            if in_ear == left_out
+                && let Some(tx) = watching_tx.take()
+            {
+                let _ = tx.send(());
+            }
+            if left == Some(LATER) {
+                break;
+            }
+        }
+        shown
+    });
+
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_in_ear(PodSide::Left, false))
+        .await
+        .unwrap();
+    timeout(TIMEOUT, watching)
+        .await
+        .expect("timed out waiting for the left pod to go out")
+        .unwrap();
+
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_primary(PodSide::Right))
+        .await
+        .unwrap();
+    let world = &fixture.world;
+    eventually("the primary pod packets", move || async move {
+        world
+            .with_pods(PAIR, |pods| pods.next_due().is_none())
+            .await
+            .unwrap()
+    })
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_battery(Part::Left, Some(LATER)))
+        .await
+        .unwrap();
+
+    let shown = timeout(TIMEOUT, watcher)
+        .await
+        .expect("timed out waiting for the battery change")
+        .unwrap();
+    assert_eq!(
+        shown,
+        [Some((Some(true), Some(true))), left_out],
+        "the left pod out, and nothing after it"
+    );
+
+    // The right pod, primary now, out as well; then the left one back in.
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_in_ear(PodSide::Right, false))
+        .await
+        .unwrap();
+    app.until("both pods out", |s| {
+        in_ear(s, PAIR) == Some((Some(false), Some(false)))
+    })
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_in_ear(PodSide::Left, true))
+        .await
+        .unwrap();
+    app.until("the left pod back in", |s| {
+        in_ear(s, PAIR) == Some((Some(true), Some(false)))
+    })
+    .await;
+}
+
+/// Both pods swapped by hand in one ear report, with no role switch after
+/// it: the report is held for a primary pod packet that never comes, and
+/// taken once the hold is over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_swap_with_no_role_switch_shows_once_the_hold_is_over() {
+    let (fixture, mut app) = worn_on_aap(ROLE_SWITCH_HOLD).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_in_ear(PodSide::Left, false))
+        .await
+        .unwrap();
+    app.until("the left pod out", |s| {
+        in_ear(s, PAIR) == Some((Some(false), Some(true)))
+    })
+    .await;
+
+    let swapped = Instant::now();
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.set_in_ear(PodSide::Left, true);
+            pods.set_in_ear(PodSide::Right, false);
+        })
+        .await
+        .unwrap();
+    app.until("the right pod out, the left one in", |s| {
+        in_ear(s, PAIR) == Some((Some(true), Some(false)))
+    })
+    .await;
+    assert!(
+        swapped.elapsed() >= ROLE_SWITCH_HOLD,
+        "taken without a hold"
     );
 }
 
