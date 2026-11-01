@@ -1010,6 +1010,86 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
     assert_eq!(settings, expected);
 }
 
+/// A pair that answers as AirPods 4 do - a 0x4B on every mode change, naming
+/// no mode, and an echo of one change in four - has every mode set taken and
+/// kept on show: the 0x4B changes nothing, and the echo, after the fourth
+/// change, confirms it. Each change waits for the one before to be on show,
+/// so no echo or 0x4B can be a stale report of a mode replaced meanwhile.
+///
+/// The echo is out once the pair has nothing due; a battery change made
+/// then comes over the same connection after it, so once it shows, the
+/// echo has been read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_answering_as_airpods_4_do_has_every_mode_confirmed() {
+    /// A left pod level the pair has not had yet.
+    const LATER: u8 = 29;
+
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.quirks.settings_changed = true;
+            pods.quirks.echo_every = 4;
+            pods.quirks.echo_delay = Duration::from_millis(500);
+            pods.quirks.stale_report = None;
+        })
+        .await
+        .unwrap();
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    app.until("the mode from the startup dump", |s| {
+        s.states
+            .get(&PAIR)
+            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancellation))
+    })
+    .await;
+
+    let modes = [
+        NoiseMode::Transparency,
+        NoiseMode::Adaptive,
+        NoiseMode::Off,
+        NoiseMode::NoiseCancellation,
+    ];
+    for mode in modes {
+        app.coordinator
+            .command(PAIR, Command::NoiseControl(mode))
+            .await
+            .unwrap_or_else(|e| panic!("setting {mode} failed: {e:#}"));
+        fixture.until_mode(PAIR, mode).await;
+        app.until(&format!("{mode} on show"), |s| {
+            s.states
+                .get(&PAIR)
+                .is_some_and(|state| state.noise_mode == Some(mode))
+        })
+        .await;
+    }
+
+    let world = &fixture.world;
+    eventually("the echo of the fourth change", move || async move {
+        world
+            .with_pods(PAIR, |pods| pods.next_due().is_none())
+            .await
+            .unwrap()
+    })
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_battery(Part::Left, Some(LATER)))
+        .await
+        .unwrap();
+    let snapshot = app
+        .until("the battery change", |s| {
+            s.states
+                .get(&PAIR)
+                .is_some_and(|state| state.left_battery == Some(LATER))
+        })
+        .await;
+    assert_eq!(
+        snapshot.states[&PAIR].noise_mode,
+        Some(NoiseMode::NoiseCancellation)
+    );
+}
+
 /// After Off, a report of the mode it replaced does not bring that mode back:
 /// in the #71 capture the pair reported Noise Cancellation 0.33 s after Off
 /// was set from it, and Off itself only at 1.4 s, and the window showed Noise
@@ -1349,12 +1429,20 @@ async fn a_command_goes_out_in_its_place_though_awaited_later() {
 /// for Transparency's result first, and checks the pair got allow-Off, Off
 /// and Transparency in that order, and the snapshot shows Transparency.
 ///
-/// The pair echoes no mode here, so that nothing but the commands sets it.
+/// The pair reports no mode here - no echo, and no report of the mode Off
+/// replaced - so that nothing but the commands sets it.
 async fn two_quick_switches(spawned: bool) {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
     fixture
         .world
-        .with_pods(PAIR, |pods| pods.quirks.echo_every = 0)
+        .with_pods(PAIR, |pods| {
+            pods.quirks.echo_every = 0;
+            // Off's report of the mode it replaced, taken once Transparency
+            // has replaced Off, may briefly put Noise Cancellation back on
+            // show, which is accepted (see `aap::noise::ModeState`) - but this
+            // test reads the snapshot right after the commands.
+            pods.quirks.stale_report = None;
+        })
         .await
         .unwrap();
     let mut app = fixture.start_app().await;

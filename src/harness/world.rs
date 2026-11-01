@@ -1008,10 +1008,6 @@ mod tests {
         client.set_noise_mode(NoiseMode::Adaptive).await.unwrap();
         assert_eq!(
             next_packet(&client).await.unwrap(),
-            noise::settings_changed_packet()
-        );
-        assert_eq!(
-            next_packet(&client).await.unwrap(),
             noise::set_packet(NoiseMode::Adaptive)
         );
     }
