@@ -17,7 +17,8 @@
 //! it next advertises - which, lid closed in the case, can be a long wait. AAP
 //! state is only ever the live link's and goes with it. While the link is up,
 //! the device's snapshot takes from its cached advertisement what AAP does not
-//! carry: in-ear, lid, connection state and primary pod.
+//! carry: lid, connection state and primary pod - and in-ear until the link has
+//! reported it, see [`EarState`].
 //!
 //! A link supersedes the cached reading from its first battery packet, not
 //! from when it comes up: in between - about a second on one pair - the
@@ -51,6 +52,7 @@ use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tracing::Instrument;
 
 use crate::KEY_LEN;
+use crate::aap::ear::{EarReport, EarState, ROLE_SWITCH_HOLD};
 use crate::aap::noise::{ModeState, Report};
 use crate::aap::{self, Message};
 use crate::ble::decode_model_name;
@@ -190,7 +192,9 @@ pub struct PodState {
     pub right_charging: bool,
     pub case_charging: bool,
 
-    /// Whether each pod is in an ear, from an advertisement like the
+    /// Whether each pod is in an ear. For a device on AAP, from its link's
+    /// ear reports once it has both one and the primary pod - see
+    /// [`EarState`] - and until then from an advertisement like the
     /// [connection state](PodState::connection_state).
     pub left_in_ear: Option<bool>,
     pub right_in_ear: Option<bool>,
@@ -203,16 +207,17 @@ pub struct PodState {
 
     /// Decoded with `ble::decode_connection_state`.
     ///
-    /// Only advertisements carry it, along with in-ear, lid and the primary pod.
+    /// Only advertisements carry it, along with the lid and the primary pod.
     /// Unlike the identity these change as the earbuds are used, so for a
     /// device on AAP they are taken from its cached advertisement each time a
-    /// snapshot is built: a connected pair keeps advertising, which keeps them
-    /// current, and they expire with that cache entry. `None` while no
-    /// advertisement is cached.
+    /// snapshot is built, and they expire with that cache entry. `None` while
+    /// no advertisement is cached. A connected pair's payload changes seldom
+    /// and lags what it reports - 4 reached the app in 70 s in #142.
     pub connection_state: Option<u8>,
 
     /// From an advertisement like the
-    /// [connection state](PodState::connection_state).
+    /// [connection state](PodState::connection_state), for a device on AAP
+    /// too: the link's own primary pod maps its ear reports, and is not shown.
     pub primary_pod: Option<PodSide>,
 
     /// Active noise control mode. `None` until the connected device reports one:
@@ -363,6 +368,11 @@ struct Link {
     /// session would show as selected after a reconnect, though it may have
     /// been changed from a phone meanwhile.
     noise_mode: ModeState,
+    /// Which pod is in an ear, as the device's ear reports and primary pod
+    /// packets tell it. Kept apart from the reading like the mode, and goes
+    /// with the link like it: after a disconnect the cached advertisement
+    /// shows through.
+    ear: EarState,
     /// Which device the link is to, as last advertised; AAP never says.
     /// Kept apart from the reading like the mode. Taken from the cached
     /// advertisement when the link comes up and refreshed by every one after,
@@ -373,8 +383,12 @@ struct Link {
 }
 
 /// The parts of an advertisement that change as the earbuds are used - a pod
-/// taken out, the lid opened, a call coming in. AAP carries none of them, so a
-/// linked device's snapshot takes them from its cached advertisement.
+/// taken out, the lid opened, a call coming in. A linked device's snapshot
+/// takes them from its cached advertisement, all but in-ear once its link has
+/// reported that: AAP carries in-ear too, and at once, where a connected
+/// pair's payload changes seldom and lags its ears (#142). The lid, the
+/// connection state and the primary pod it does not carry, as far as is
+/// known.
 #[derive(Clone, Copy, PartialEq)]
 struct Live {
     left_in_ear: Option<bool>,
@@ -466,6 +480,39 @@ impl Inner {
         self.ble.len() != before
     }
 
+    /// What a snapshot shows for a device on AAP: its link's reading, with
+    /// the rest merged in. `None` until the link's first battery packet.
+    fn linked_state(&self, mac: Address, link: &Link) -> Option<PodState> {
+        let mut state = link.reading.clone()?;
+        state.noise_mode = link.noise_mode.mode();
+        // Merged here rather than copied into each battery packet: a
+        // reading that arrived before the first advertisement kept a blank
+        // model until the next packet, which over AAP comes only when a
+        // level changes.
+        state.identity = link.identity;
+        // From the cache entry itself rather than the link, unlike the
+        // identity: these go stale, so they expire with the advertisement
+        // they came from.
+        if let Some(entry) = self.ble.get(&mac) {
+            Live::of(&entry.state).apply_to(&mut state);
+        }
+        // The link's, where it has reported them: a connected pair's payload
+        // changes seldom, and the icons lagged or missed changes (#142). A
+        // pod whose place is unknown keeps the advertisement's.
+        if let Some((left, right)) = link.ear.in_ear() {
+            state.left_in_ear = left.or(state.left_in_ear);
+            state.right_in_ear = right.or(state.right_in_ear);
+        }
+        Some(state)
+    }
+
+    /// The [`Live`] parts a snapshot shows for a device on AAP: `None`
+    /// without a link, or before its first battery packet.
+    fn linked_live(&self, mac: Address) -> Option<Live> {
+        let state = self.linked_state(mac, self.links.get(&mac)?)?;
+        Some(Live::of(&state))
+    }
+
     fn snapshot(&self) -> Snapshot {
         let mut known_keys: Vec<Address> = self.keys.keys().copied().collect();
         known_keys.sort_unstable();
@@ -485,23 +532,9 @@ impl Inner {
             .collect();
 
         for (&mac, link) in &self.links {
-            let Some(reading) = &link.reading else {
-                continue;
-            };
-            let mut state = reading.clone();
-            state.noise_mode = link.noise_mode.mode();
-            // Merged here rather than copied into each battery packet: a
-            // reading that arrived before the first advertisement kept a blank
-            // model until the next packet, which over AAP comes only when a
-            // level changes.
-            state.identity = link.identity;
-            // From the cache entry itself rather than the link, unlike the
-            // identity: these go stale, so they expire with the advertisement
-            // they came from.
-            if let Some(entry) = self.ble.get(&mac) {
-                Live::of(&entry.state).apply_to(&mut state);
+            if let Some(state) = self.linked_state(mac, link) {
+                states.insert(mac, state);
             }
-            states.insert(mac, state);
         }
 
         let mut links: Vec<(&Address, &Link)> = self.links.iter().collect();
@@ -639,6 +672,10 @@ pub struct Coordinator {
     /// same way.
     #[cfg(feature = "harness")]
     aap_socket_dir: Option<PathBuf>,
+    /// How long a link holds an ear report for a role switch at most - see
+    /// [`EarState`]. [`ROLE_SWITCH_HOLD`] but under the harness, where a
+    /// test may ask for longer.
+    role_switch_hold: Duration,
     /// Runs once, in the next broadcast just before it sends, for a test to
     /// hold an update up there.
     #[cfg(test)]
@@ -684,12 +721,27 @@ impl Coordinator {
     /// variable is process-wide, and `unsafe` since edition 2024.
     #[cfg(feature = "harness")]
     pub fn with_aap_socket_dir(keystore: Option<Keystore>, dir: PathBuf) -> Arc<Self> {
+        Self::with_aap_socket_dir_and_hold(keystore, dir, ROLE_SWITCH_HOLD)
+    }
+
+    /// [`Coordinator::with_aap_socket_dir`], its links holding an ear report
+    /// for a role switch for `hold` at most - see [`EarState`]. Longer than
+    /// [`ROLE_SWITCH_HOLD`], it keeps a test that watches a switch from
+    /// timing out on a loaded machine before the fake's primary pod packet
+    /// has come.
+    #[cfg(feature = "harness")]
+    pub fn with_aap_socket_dir_and_hold(
+        keystore: Option<Keystore>,
+        dir: PathBuf,
+        hold: Duration,
+    ) -> Arc<Self> {
         tracing::info!(
             "Harness: AAP links go to {}/<MAC>.sock instead of L2CAP",
             dir.display()
         );
         Arc::new(Self {
             aap_socket_dir: Some(dir),
+            role_switch_hold: hold,
             ..Self::from_keystore(keystore)
         })
     }
@@ -748,6 +800,7 @@ impl Coordinator {
             updates,
             #[cfg(feature = "harness")]
             aap_socket_dir: None,
+            role_switch_hold: ROLE_SWITCH_HOLD,
             #[cfg(test)]
             before_send: std::sync::Mutex::default(),
             #[cfg(test)]
@@ -998,11 +1051,11 @@ impl Coordinator {
                 .filter(|e| now.duration_since(e.last_seen) < BLE_CACHE_TTL)
                 .and_then(|e| e.state.lid_open);
         }
-        let live = Live::of(&state);
+        let shown = inner.linked_live(real_mac);
         // Recorded even while AAP supersedes it, so that the reading is
         // current the moment the link drops - and a linked device's
         // snapshot takes its live fields from it meanwhile.
-        let previous = inner.ble.insert(
+        inner.ble.insert(
             real_mac,
             Entry {
                 state,
@@ -1014,13 +1067,17 @@ impl Coordinator {
             .links
             .get_mut(&real_mac)
             .is_some_and(|link| link.identity.replace(identity) != Some(identity));
-        let live_changed = previous.is_none_or(|e| Live::of(&e.state) != live);
+        // Judged by what the snapshot shows, not by the advertisement: once
+        // the link reports in-ear, an advertisement's is not on show, and
+        // two from the two pods differed within 0.6 s with both worn (#142).
+        let live_changed = inner.linked_live(real_mac) != shown;
         // AAP data for this device is exact and current; its own
         // advertisements lag behind. Nothing a snapshot shows has changed -
         // unless they told the link something new about the device,
         // typically its model on the first advertisement after connecting;
         // or changed what the snapshot takes from them, such as a pod taken
-        // out of an ear; or the prune dropped something.
+        // out of an ear before the link has reported one; or the prune
+        // dropped something.
         if inner.supersedes_ble(real_mac) && !identified && !live_changed && !pruned {
             return;
         }
@@ -1080,6 +1137,8 @@ impl Coordinator {
                     reading: None,
                     // Reported by the startup dump, once the read loop is up.
                     noise_mode: ModeState::default(),
+                    // Reported as the link comes up, waiting in the socket.
+                    ear: EarState::with_hold(self.role_switch_hold),
                     identity,
                     since: Instant::now(),
                 },
@@ -1170,10 +1229,27 @@ impl Coordinator {
     /// Reads one link's packets until a read fails, and returns that error.
     /// It is handed the client rather than looking it up, so it only ever
     /// hears its own device.
+    ///
+    /// While an ear report is held for a role switch - see [`EarState`] - a
+    /// read waits no longer than the hold, and the report is taken when it is
+    /// over. The read given up on loses nothing: the socket gives up a packet
+    /// only to a read that returns it.
     async fn aap_read_loop(&self, mac_addr: Address, client: &Arc<aap::Client>) -> anyhow::Error {
         tracing::debug!("AAP read loop started for {mac_addr}");
+        let mut held_until: Option<Instant> = None;
         loop {
-            let packet = match client.read_packet().await {
+            let read = client.read_packet();
+            let read = match held_until {
+                Some(until) => match tokio::time::timeout_at(until.into(), read).await {
+                    Ok(read) => read,
+                    Err(_) => {
+                        held_until = self.release_ear(mac_addr, client, Instant::now()).await;
+                        continue;
+                    }
+                },
+                None => read.await,
+            };
+            let packet = match read {
                 Ok(p) => p,
                 Err(e) => return e,
             };
@@ -1185,10 +1261,26 @@ impl Coordinator {
                 packet.len(),
                 aap::keys::redacted_hex(&packet[..packet.len().min(8)])
             );
+            // Whole, for what lies past the first 8 bytes: 0x08's last two
+            // took a local build to see (#142).
+            tracing::trace!(
+                "AAP packet ({} bytes), whole: {}",
+                packet.len(),
+                aap::keys::redacted_hex(&packet)
+            );
 
             match aap::decode(&packet) {
                 Ok(Message::Battery(info)) => {
                     self.handle_battery_info(info, mac_addr, client).await;
+                }
+                // Each ends the hold on a report held for a role switch, if
+                // one is: a report replaces it, the primary pod reads it.
+                Ok(Message::Ear(report)) => {
+                    held_until = self.handle_ear_report(report, mac_addr, client).await;
+                }
+                Ok(Message::Primary(primary)) => {
+                    self.handle_primary(primary, mac_addr, client).await;
+                    held_until = None;
                 }
                 // The device's own report: its startup dump, or a mode changed
                 // from another device such as an iPhone.
@@ -1212,9 +1304,11 @@ impl Coordinator {
 
     /// Makes a battery packet the link's reading, and broadcasts.
     ///
-    /// AAP packets carry battery only. [`Inner::snapshot`] merges in the rest:
-    /// the identity the link holds, the mode, and what the cached
-    /// advertisement says about ears, lid, connection state and primary pod.
+    /// A battery packet carries battery only. [`Inner::snapshot`] merges in
+    /// the rest: the identity the link holds, the mode, in-ear from the link's
+    /// ear reports, and what the cached advertisement says about lid,
+    /// connection state and primary pod - and about ears, until the link has
+    /// reported them.
     async fn handle_battery_info(
         &self,
         info: aap::BatteryInfo,
@@ -1257,6 +1351,86 @@ impl Coordinator {
         };
         link.reading = Some(state);
         self.broadcast(&inner);
+    }
+
+    /// Records an ear report from `client`'s link - see [`EarState`] - and
+    /// broadcasts if that changed what the snapshot shows. Returns when it is
+    /// to be taken if it is held for a role switch.
+    async fn handle_ear_report(
+        &self,
+        report: EarReport,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+    ) -> Option<Instant> {
+        tracing::debug!(
+            "AAP ear report: primary pod {:?}, secondary {:?}",
+            report.primary,
+            report.secondary
+        );
+        let held_until = self
+            .update_ear(mac_addr, client, |ear| ear.report(report, Instant::now()))
+            .await;
+        if held_until.is_some() {
+            tracing::debug!("AAP ear report held for the primary pod: a role switch, it seems");
+        }
+        held_until
+    }
+
+    /// Records the primary pod `client`'s link reported - see [`EarState`] -
+    /// and broadcasts if that changed what the snapshot shows.
+    async fn handle_primary(
+        &self,
+        primary: Option<PodSide>,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+    ) {
+        tracing::debug!("AAP primary pod: {primary:?}");
+        self.update_ear(mac_addr, client, |ear| ear.set_primary(primary))
+            .await;
+    }
+
+    /// Takes the ear report held for a role switch on `client`'s link, its
+    /// hold over by `now` with no primary pod packet, and broadcasts if that
+    /// changed what the snapshot shows. Returns when it is to be taken if it
+    /// is still held.
+    async fn release_ear(
+        &self,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+        now: Instant,
+    ) -> Option<Instant> {
+        let mut released = false;
+        let held_until = self
+            .update_ear(mac_addr, client, |ear| released = ear.release(now))
+            .await;
+        if released {
+            tracing::debug!("AAP ear report held for a role switch taken: no primary pod came");
+        }
+        held_until
+    }
+
+    /// Changes the ear state of `client`'s link, and broadcasts if that
+    /// changed what the snapshot shows - under the lock it was changed under
+    /// (#88). Nothing it shows before the link's first battery packet: that
+    /// broadcasts with the ear state in. Returns when the report held for a
+    /// role switch is to be taken, if one is.
+    async fn update_ear(
+        &self,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+        change: impl FnOnce(&mut EarState),
+    ) -> Option<Instant> {
+        let mut inner = self.inner.write().await;
+        let shown = inner.linked_live(mac_addr);
+        // A packet read just before a disconnect must not land on a newer
+        // link.
+        let link = inner.live_link(mac_addr, client)?;
+        change(&mut link.ear);
+        let held_until = link.ear.held_until();
+        if inner.linked_live(mac_addr) != shown {
+            self.broadcast(&inner);
+        }
+        held_until
     }
 
     /// Records a mode the device reported on `client`'s link, and broadcasts if
@@ -1491,6 +1665,7 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aap::ear::Place;
     use crate::ble::decrypt::random_key;
 
     fn entry(age: Duration) -> Entry {
@@ -1519,6 +1694,7 @@ mod tests {
             client: Arc::new(aap::Client::new(Address::any())),
             reading,
             noise_mode: ModeState::default(),
+            ear: EarState::default(),
             identity: None,
             since: Instant::now(),
         }
@@ -1543,6 +1719,7 @@ mod tests {
             updates,
             #[cfg(feature = "harness")]
             aap_socket_dir: None,
+            role_switch_hold: ROLE_SWITCH_HOLD,
             before_send: std::sync::Mutex::default(),
             before_save: std::sync::Mutex::default(),
         });
@@ -2210,10 +2387,13 @@ mod tests {
     /// Regression (#45): the in-ear icons vanished the moment a pair connected
     /// over AAP, whose battery packets say nothing about ears, although its
     /// advertisements kept saying it. The snapshot takes it from the cached
-    /// advertisement - and drops it with that, rather than keeping a pod in
-    /// an ear long after it may have come out.
+    /// advertisement until the link has reported it, and then from the link
+    /// (#142): a connected pair's payload changes seldom, so the icons lagged
+    /// or missed changes. The link's in-ear goes with the link, not with the
+    /// advertisement's cache entry; the lid, connection state and primary pod
+    /// still come from that.
     #[tokio::test]
-    async fn a_device_on_aap_shows_in_ear_from_its_cached_advertisement() {
+    async fn a_device_on_aap_shows_in_ear_from_its_link_once_reported() {
         let (coordinator, client, _dir) = linked();
         coordinator
             .handle_battery_info(battery_packet(83), MAC, &client)
@@ -2230,10 +2410,30 @@ mod tests {
         assert_eq!(state.left_battery, Some(83), "AAP's level, not BLE's");
         assert_eq!(
             (state.left_in_ear, state.right_in_ear),
-            (Some(true), Some(false))
+            (Some(true), Some(false)),
+            "the advertisement's, before the link has reported"
         );
         assert_eq!(state.connection_state, Some(0x05));
         assert_eq!(state.primary_pod, Some(PodSide::Left));
+
+        // The right pod primary and worn, the left out: not what the
+        // advertisement said, nor its primary.
+        coordinator
+            .handle_primary(Some(PodSide::Right), MAC, &client)
+            .await;
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::Out), MAC, &client)
+            .await;
+        let state = coordinator.subscribe().borrow().states[&MAC].clone();
+        assert_eq!(
+            (state.left_in_ear, state.right_in_ear),
+            (Some(false), Some(true))
+        );
+        assert_eq!(
+            state.primary_pod,
+            Some(PodSide::Left),
+            "the advertisement's still, as before #142"
+        );
 
         assert!(
             coordinator
@@ -2244,10 +2444,274 @@ mod tests {
         );
         let state = coordinator.inner.read().await.snapshot().states[&MAC].clone();
         assert_eq!(state.source, DataSource::Aap);
-        assert_eq!((state.left_in_ear, state.right_in_ear), (None, None));
+        assert_eq!(
+            (state.left_in_ear, state.right_in_ear),
+            (Some(false), Some(true)),
+            "the link's, which outlives the advertisement"
+        );
         assert_eq!(state.connection_state, None);
         assert_eq!(state.primary_pod, None);
         assert_eq!(state.identity, Some(PRO_3), "the link's, unlike these");
+    }
+
+    /// An ear report: the primary pod's place, then the secondary's.
+    fn ear(primary: Place, secondary: Place) -> EarReport {
+        EarReport { primary, secondary }
+    }
+
+    /// The device's in-ear as the latest snapshot shows it, left then right.
+    fn in_ear(coordinator: &Coordinator) -> (Option<bool>, Option<bool>) {
+        let snapshot = coordinator.subscribe().borrow().clone();
+        let state = &snapshot.states[&MAC];
+        (state.left_in_ear, state.right_in_ear)
+    }
+
+    /// A linked device with a reading, the left pod primary, both pods worn,
+    /// and no advertisement cached.
+    async fn worn() -> (Arc<Coordinator>, Arc<aap::Client>, tempfile::TempDir) {
+        let (coordinator, client, dir) = linked();
+        coordinator
+            .handle_battery_info(battery_packet(83), MAC, &client)
+            .await;
+        coordinator
+            .handle_primary(Some(PodSide::Left), MAC, &client)
+            .await;
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::InEar), MAC, &client)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(true)));
+        (coordinator, client, dir)
+    }
+
+    /// The #142 capture at 17:04:19: the left pod, primary, taken out; the
+    /// right one, still worn, primary 0.9 s later, with the ear report in the
+    /// new order a few milliseconds before the primary pod packet. Each pod
+    /// stays where it is throughout: the report, read with the old primary,
+    /// would swap them, and is held for the primary pod - not broadcast.
+    #[tokio::test]
+    async fn taking_the_primary_pod_out_moves_the_role_and_the_pods_stay_put() {
+        let (coordinator, client, _dir) = worn().await;
+        coordinator
+            .handle_ear_report(ear(Place::Out, Place::InEar), MAC, &client)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(false), Some(true)));
+
+        let mut rx = coordinator.subscribe();
+        rx.mark_unchanged();
+        let held = coordinator
+            .handle_ear_report(ear(Place::InEar, Place::Out), MAC, &client)
+            .await;
+        let until = held.expect("held for the primary pod");
+        // Its time given, so that a slow run cannot end the hold here.
+        assert_eq!(
+            coordinator
+                .release_ear(MAC, &client, until - Duration::from_millis(1))
+                .await,
+            held,
+            "held until the hold is over"
+        );
+        coordinator
+            .handle_primary(Some(PodSide::Right), MAC, &client)
+            .await;
+        assert!(!rx.has_changed().unwrap(), "the pods never shown swapped");
+        assert_eq!(in_ear(&coordinator), (Some(false), Some(true)));
+
+        // Back in: both worn, the right pod primary from here on.
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::InEar), MAC, &client)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(true)));
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::Out), MAC, &client)
+            .await;
+        assert_eq!(
+            in_ear(&coordinator),
+            (Some(false), Some(true)),
+            "the left pod, now secondary, out"
+        );
+    }
+
+    /// Taking the secondary pod out changes the ear report alone.
+    #[tokio::test]
+    async fn taking_the_secondary_pod_out_changes_its_pod_alone() {
+        let (coordinator, client, _dir) = worn().await;
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::Out), MAC, &client)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(false)));
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::InEar), MAC, &client)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(true)));
+    }
+
+    /// The UI shows in-ear only: in the case, lid open or closed, is out of
+    /// the ear.
+    #[tokio::test]
+    async fn a_pod_in_the_case_is_out_of_the_ear() {
+        let (coordinator, client, _dir) = worn().await;
+        for place in [Place::InCase, Place::InClosedCase] {
+            coordinator
+                .handle_ear_report(ear(Place::InEar, place), MAC, &client)
+                .await;
+            assert_eq!(in_ear(&coordinator), (Some(true), Some(false)), "{place:?}");
+        }
+    }
+
+    /// A place the app has no meaning for is not taken for out: the pod keeps
+    /// what its advertisement says. A primary pod naming neither pod leaves
+    /// the report unreadable, and both pods the advertisement's.
+    #[tokio::test]
+    async fn an_unknown_value_falls_back_to_the_advertisement() {
+        let (coordinator, client, _dir) = worn().await;
+        let left_in = ProximityData {
+            left_in_ear: true,
+            ..advertisement()
+        };
+        coordinator.handle_advertisement(left_in, BLE_MAC).await;
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(true)), "the link's");
+
+        coordinator
+            .handle_ear_report(ear(Place::Unknown(0x09), Place::Out), MAC, &client)
+            .await;
+        assert_eq!(
+            in_ear(&coordinator),
+            (Some(true), Some(false)),
+            "the left pod the advertisement's, the right the link's"
+        );
+        coordinator
+            .handle_ear_report(ear(Place::Out, Place::Unknown(0x09)), MAC, &client)
+            .await;
+        assert_eq!(
+            in_ear(&coordinator),
+            (Some(false), Some(false)),
+            "the left pod the link's, the right the advertisement's"
+        );
+
+        coordinator
+            .handle_ear_report(ear(Place::Out, Place::InEar), MAC, &client)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(false), Some(true)));
+        coordinator.handle_primary(None, MAC, &client).await;
+        assert_eq!(
+            in_ear(&coordinator),
+            (Some(true), Some(false)),
+            "the advertisement's, both"
+        );
+    }
+
+    /// Neither the ear report nor the primary pod is any use alone: until the
+    /// link has both, the advertisement shows. After a disconnect it shows
+    /// again, at once.
+    #[tokio::test]
+    async fn the_advertisement_shows_until_the_link_has_reported_and_after_it() {
+        let (coordinator, client, _dir) = linked();
+        coordinator
+            .handle_battery_info(battery_packet(83), MAC, &client)
+            .await;
+        let left_in = ProximityData {
+            left_in_ear: true,
+            ..advertisement()
+        };
+        coordinator.handle_advertisement(left_in, BLE_MAC).await;
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(false)));
+
+        coordinator
+            .handle_ear_report(ear(Place::Out, Place::InEar), MAC, &client)
+            .await;
+        assert_eq!(
+            in_ear(&coordinator),
+            (Some(true), Some(false)),
+            "no primary pod yet"
+        );
+        coordinator
+            .handle_primary(Some(PodSide::Left), MAC, &client)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(false), Some(true)));
+
+        coordinator.disconnect_aap(MAC).await;
+        let snapshot = coordinator.subscribe().borrow().clone();
+        assert_eq!(snapshot.states[&MAC].source, DataSource::Ble);
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(false)));
+    }
+
+    /// Before the link's first battery packet the advertisement shows, and
+    /// nothing the link reports is worth a broadcast; the battery packet
+    /// brings what it reported along.
+    #[tokio::test]
+    async fn reports_before_the_first_battery_packet_come_with_it() {
+        let (coordinator, client, _dir) = linked();
+        coordinator
+            .handle_advertisement(advertisement(), BLE_MAC)
+            .await;
+        let mut rx = coordinator.subscribe();
+        rx.mark_unchanged();
+        coordinator
+            .handle_primary(Some(PodSide::Left), MAC, &client)
+            .await;
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::Out), MAC, &client)
+            .await;
+        assert!(!rx.has_changed().unwrap(), "nothing new to show");
+        assert_eq!(in_ear(&coordinator), (Some(false), Some(false)));
+
+        coordinator
+            .handle_battery_info(battery_packet(83), MAC, &client)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(false)));
+    }
+
+    /// A report that changes nothing on show is not broadcast: repeated, or
+    /// in an advertisement while the link reports in-ear - the pods'
+    /// advertisements differed within 0.6 s with both worn (#142).
+    #[tokio::test]
+    async fn what_changes_nothing_on_show_is_not_broadcast() {
+        let (coordinator, client, _dir) = worn().await;
+        let mut rx = coordinator.subscribe();
+        rx.mark_unchanged();
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::InEar), MAC, &client)
+            .await;
+        coordinator
+            .handle_primary(Some(PodSide::Left), MAC, &client)
+            .await;
+        assert!(!rx.has_changed().unwrap(), "the same report again");
+
+        // Both pods out, then the left one in, as the advertisements have it
+        // while the link reports both worn. The first is news for the
+        // connection state it brings, the second for nothing.
+        coordinator
+            .handle_advertisement(advertisement(), BLE_MAC)
+            .await;
+        assert!(rx.has_changed().unwrap());
+        rx.mark_unchanged();
+        let left_in = ProximityData {
+            left_in_ear: true,
+            ..advertisement()
+        };
+        coordinator.handle_advertisement(left_in, BLE_MAC).await;
+        assert!(!rx.has_changed().unwrap(), "in-ear not on show");
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(true)));
+
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::Out), MAC, &client)
+            .await;
+        assert!(rx.has_changed().unwrap(), "a pod taken out");
+    }
+
+    /// A report read just before the link was replaced belongs to the old
+    /// session, and must not land on the new one.
+    #[tokio::test]
+    async fn a_report_from_a_replaced_link_is_dropped() {
+        let (coordinator, _client, _dir) = worn().await;
+        let stale = Arc::new(aap::Client::new(Address::any()));
+        coordinator
+            .handle_ear_report(ear(Place::Out, Place::Out), MAC, &stale)
+            .await;
+        coordinator
+            .handle_primary(Some(PodSide::Right), MAC, &stale)
+            .await;
+        assert_eq!(in_ear(&coordinator), (Some(true), Some(true)));
     }
 
     /// [`advertisement`]'s encrypted portion behind `cleartext`, parsed: an

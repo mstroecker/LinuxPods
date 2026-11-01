@@ -33,6 +33,8 @@ fn describe(packet: &[u8]) -> String {
         Ok(Message::Battery(_)) => "battery".to_string(),
         Ok(Message::NoiseMode(mode)) => format!("noise control mode report: {mode}"),
         Ok(Message::Keys(keys)) => format!("proximity keys, {} of them", keys.len()),
+        Ok(Message::Ear(report)) => format!("ear report: {report:?}"),
+        Ok(Message::Primary(primary)) => format!("primary pod: {primary:?}"),
         Ok(Message::Unknown { opcode: Some(_) }) => "not read by the app".to_string(),
         Ok(Message::Unknown { opcode: None }) => "no AAP header".to_string(),
         Err(e) => format!("unparsable: {e}"),
