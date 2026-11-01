@@ -224,8 +224,8 @@ packets: the ear report (`0x06`) gives the primary pod's place first, so it read
 with the primary pod packet (`0x08`). The link keeps both (`Link::ear`, an
 `aap::ear::EarState`), and in-ear comes from them once it has both - from the cached
 advertisement before that and after the link goes. Never take that primary from the
-advertisement: a connected pair's payload changes seldom and lags its ears - 4 reached
-the app in 70 s - and its primary lags with its in-ear (#142). At a role switch the `0x06` in the new order comes 1-31 ms before the
+advertisement: each pod calls itself primary in its own (#71), and a connected pair's
+payload changes seldom and lags its ears - 4 reached the app in 70 s (#142). At a role switch the `0x06` in the new order comes 1-31 ms before the
 `0x08`, and read with the old primary it swaps the pods; `EarState` holds such a report
 for the `0x08`, at most `ROLE_SWITCH_HOLD`. `Inner::snapshot` merges in the rest: model
 and color from the identity the link holds; lid, activity and primary pod from the cached

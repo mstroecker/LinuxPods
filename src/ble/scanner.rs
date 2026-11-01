@@ -5,10 +5,14 @@
 //! advertisements out of it. An address heard for the first time becomes a
 //! device, announced by the ObjectManager's InterfacesAdded with that first
 //! advertisement among its properties; every later one comes as a
-//! PropertiesChanged. Both are read: watching PropertiesChanged alone lost
-//! the first advertisement from every address - each pod's, every new one
-//! after the lid has been closed, and every one coming back after BlueZ
-//! dropped it 30 s into a silence (#86).
+//! PropertiesChanged, which carries `ManufacturerData` only when the
+//! payload changed, and `RSSI` alone otherwise - those are dropped. Both are
+//! read: watching PropertiesChanged alone lost the first advertisement from
+//! every address - each pod's, every new one after the lid has been closed,
+//! and every one coming back after BlueZ dropped it 30 s into a silence
+//! (#86). An address BlueZ already keeps when discovery starts is not
+//! announced again, so its unchanged payload is not heard until it changes:
+//! a known gap (#153).
 //!
 //! Discovery runs on every powered adapter, whatever it is called (#51), and
 //! starts again on each as it powers on, is plugged in, or bluetoothd restarts

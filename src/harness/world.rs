@@ -14,13 +14,13 @@
 //!   discovers - from the resolvable private address the model makes for the
 //!   pod from the pair's IRK and rotates, so each pod brings a new device
 //!   object every ten seconds. Both pods advertise while one is in the case,
-//!   only the right one while both are out - see [`Pods::advertises`]. A pod
-//!   repeats its payload until something changes, or for
-//!   [`super::pods::PAYLOAD_REFRESH`], so most of what the fake BlueZ
-//!   signals is the strength alone, as with real AirPods. Every adapter that
-//!   discovers hears it, whichever the pair is paired with, as radios in one
-//!   room do, so with two adapters each advertisement is signaled twice, from
-//!   a device under each.
+//!   only the primary while both are out, and none from the closed case -
+//!   see [`Pods::advertisements`]. A pod repeats its payload until something
+//!   changes, or for [`super::pods::PAYLOAD_REFRESH`], so most of what the
+//!   fake BlueZ signals is the strength alone, as with real AirPods. Every
+//!   adapter that discovers hears it, whichever the pair is paired with, as
+//!   radios in one room do, so with two adapters each advertisement is
+//!   signaled twice, from a device under each.
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
@@ -45,7 +45,7 @@
 //! | `RemoveAdapter(s name)` | Unplugs it: its pairs disconnect, and its devices and battery providers go |
 //! | `SetPowered(s name, b powered)` | Powers it on or off; off, discovery there ends and its pairs disconnect |
 //! | `RestartBluez()` | bluetoothd restarting as after a crash, under a new unique name: `NameOwnerChanged` twice, and every client's discovery and battery providers forgotten. Nothing is announced again, as a real one would - see [`FakeBluez::restart`] |
-//! | `Connect(s mac)` | Connects them to the host, which the app takes up |
+//! | `Connect(s mac)` | Connects them to the host, which the app takes up; their services are resolved 4 s later, as bluetoothd signals - see [`FakeBluez::set_connected`] |
 //! | `Disconnect(s mac)` | Disconnects them, which takes the AAP connection along, after BlueZ's `Connected=false` |
 //! | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case`; a level above 100 is unknown |
 //! | `SetLid(s mac, b open)` | Opens or closes the case; closed on both pods, it drops their link. The pods in the closed case stop advertising 4 s later, and come back under new addresses once it opens, the right pod 1 s later, the left 5.5 s |
