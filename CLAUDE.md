@@ -183,18 +183,20 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
 
 ## Protocol
 
-**Keys are requested on every AAP connection**, not only when none is stored. Re-pairing
-regenerates them, and a stale IRK or key leaves the pair unidentified without a word: it
-drops off BLE altogether, since an advertisement nothing identifies is dropped. The request is one
-packet, which `open_aap` sends right after `aap::Client::open`: `open` leaves it out, so
-a probe never receives keys it did not ask for and prints them. `aap_read_loop` takes the
-ENC_KEY and IRK that come back if each is 16 bytes - the length check keeps a malformed
-key from replacing a working one. A packet without a usable IRK keeps the stored one
-while the ENC_KEY is unchanged; a new ENC_KEY drops it, so the pair falls back to its key
-alone rather than vanishing. They go into use at once, and the keystore is written only
-when the keys differ from those last saved, so an unchanged key costs no write and a save
-that failed is retried (#38). Format version 2 keeps the IRKs in an `irks` map beside
-`keys`, so a version 1 file loads unchanged and a version 1 reader still finds its keys.
+**Keys are requested on every AAP connection**, not only when none is stored. What would
+change them is not known - a Pro 2 forgotten and paired again with the same computer
+kept both (2026-11-01) - and a stale IRK or key leaves the pair unidentified without a
+word: it drops off BLE altogether, since an advertisement nothing identifies is dropped.
+The request is one packet, which `open_aap` sends right after `aap::Client::open`:
+`open` leaves it out, so a probe never receives keys it did not ask for and prints them.
+`aap_read_loop` takes the ENC_KEY and IRK that come back if each is 16 bytes - the
+length check keeps a malformed key from replacing a working one. A packet without a
+usable IRK keeps the stored one while the ENC_KEY is unchanged; a new ENC_KEY drops it,
+so the pair falls back to its key alone rather than vanishing. They go into use at once,
+and the keystore is written only when the keys differ from those last saved, so an
+unchanged key costs no write and a save that failed is retried (#38). Format version 2
+keeps the IRKs in an `irks` map beside `keys`, so a version 1 file loads unchanged and a
+version 1 reader still finds its keys.
 
 **BLE identification is by IRK, then ENC_KEY.** The advertising address must resolve
 with a stored IRK (`ble::rpa::resolves`, `ah()` of Core spec Vol 3 Part H 2.2.2), and only
