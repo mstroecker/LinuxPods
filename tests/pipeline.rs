@@ -1528,6 +1528,65 @@ async fn a_command_goes_out_in_its_place_though_awaited_later() {
     two_quick_switches(false).await;
 }
 
+/// Quick changes of mode on a pair answering as a Pro 3 does - an echo of
+/// every change 1 s later, and after an Off a report of the mode it replaced
+/// at 0.33 s - end with the mode last set on show. Noise Cancellation to Off
+/// to Transparency, 150 ms apart: Off's stale report and its echo come after
+/// Transparency has replaced Off, and may briefly replay Noise Cancellation
+/// and Off, which is accepted (see `aap::noise::ModeState`). Transparency's
+/// echo comes last and settles it.
+///
+/// Once the pair has nothing more due, a battery change comes over the same
+/// connection after every report, so once it shows, all of them have been
+/// read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quick_changes_end_with_the_mode_last_set() {
+    /// A left pod level the pair has not had yet.
+    const LATER: u8 = 29;
+
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    app.until("the mode from the startup dump", |s| {
+        s.states
+            .get(&PAIR)
+            .is_some_and(|state| state.noise_mode == Some(NoiseMode::NoiseCancellation))
+    })
+    .await;
+
+    for mode in [NoiseMode::Off, NoiseMode::Transparency] {
+        app.coordinator
+            .command(PAIR, Command::NoiseControl(mode))
+            .await
+            .unwrap_or_else(|e| panic!("setting {mode} failed: {e:#}"));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let world = &fixture.world;
+    eventually("every echo and report", move || async move {
+        world
+            .with_pods(PAIR, |pods| pods.next_due().is_none())
+            .await
+            .unwrap()
+    })
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_battery(Part::Left, Some(LATER)))
+        .await
+        .unwrap();
+    let snapshot = app
+        .until("the battery change", |s| {
+            s.states
+                .get(&PAIR)
+                .is_some_and(|state| state.left_battery == Some(LATER))
+        })
+        .await;
+    assert_eq!(
+        snapshot.states[&PAIR].noise_mode,
+        Some(NoiseMode::Transparency)
+    );
+}
+
 /// Issues Off then Transparency to a fresh pair, spawned apart or not, waits
 /// for Transparency's result first, and checks the pair got allow-Off, Off
 /// and Transparency in that order, and the snapshot shows Transparency.
