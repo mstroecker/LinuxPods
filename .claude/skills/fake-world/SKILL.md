@@ -125,6 +125,7 @@ scripts/fake-world.sh tree | jq '.. | objects | select(.id? == "battery-left") |
 scripts/fake-world.sh app SetActive noise-off true
 scripts/fake-world.sh app Select device-dropdown 1
 scripts/fake-world.sh app Screenshot main-window    # prints the PNG's path: Read it
+scripts/fake-world.sh app Notifications             # every notification sent and withdrawn, as JSON
 ```
 
 `Tree` lists every widget with its `id` (if any), `path`, text and state;
@@ -133,6 +134,18 @@ where a user's click would fail, so Noise Control refuses presses while the devi
 on BLE.
 
 Change, settle, then read: `SetBattery`, `Settle`, `tree`.
+
+Low battery notifications: `SetBattery` a part to 20 or below (5 or below is critical),
+then `app Notifications` lists the notification sent, by ID `low-battery-<MAC>`. Above 25
+again, clear of the low threshold, or charging, it lists the withdrawal - or, while another
+part is still low, a send naming only the parts that are. The private session bus has no
+notification server, so nothing is shown and GLib warns once; the list records what the app
+sent. `Settle` does not wait for a notification: read again until it is there.
+
+The Preferences switch `battery-notifications` turns them off and on, once Preferences is
+open (see below): `app SetActive battery-notifications false` withdraws what is on show
+and sends nothing more, and `true` shows again what is low. It is on whenever the app
+starts.
 
 ## Practical notes
 

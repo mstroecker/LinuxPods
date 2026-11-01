@@ -136,6 +136,8 @@ fn carry_out(app: &gio::Application, action: Action) {
         }
         Action::Withdraw(id) => app.withdraw_notification(id),
     }
+    #[cfg(feature = "harness")]
+    super::automation::record_notification(&action);
 }
 
 #[cfg(test)]
