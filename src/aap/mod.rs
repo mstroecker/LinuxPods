@@ -6,12 +6,14 @@
 
 pub mod battery;
 pub mod client;
+pub mod ear;
 pub mod keys;
 pub mod message;
 pub mod noise;
 
 pub use battery::{BatteryInfo, is_battery_packet, parse_battery_packet};
 pub use client::Client;
+pub use ear::{EarReport, Place, is_ear_packet, is_primary_packet, parse_ear, parse_primary};
 pub use keys::{find_encryption_key, find_irk, parse_proximity_keys};
 pub use message::{DecodeError, Message, decode};
 pub use noise::{NoiseMode, is_noise_mode_packet, parse_noise_mode_packet};

@@ -3,13 +3,16 @@
 //! Every packet after the handshake's answer starts with the same four bytes,
 //! [`HEADER`], and names what it carries by its opcode, byte 4. That is
 //! checked here, once, and the opcode picks the parser: battery (0x04), the
-//! 0x09 settings family - of which only the noise control mode (sub-command
-//! 0x0D) is read - and the proximity keys (0x31). Each parser checks what is
-//! its own beyond that, as it always has.
+//! ear report (0x06), the primary pod (0x08), the 0x09 settings family - of
+//! which only the noise control mode (sub-command 0x0D) is read - and the
+//! proximity keys (0x31). Each parser checks what is its own beyond that, as
+//! it always has.
 
 use crate::aap::battery::{self, BatteryInfo, BatteryParseError};
+use crate::aap::ear::{self, EarReport};
 use crate::aap::keys::{self, KeyParseError, ProximityKey};
 use crate::aap::noise::{self, NoiseMode, NoiseParseError};
+use crate::ble::parser::PodSide;
 
 /// How every packet starts, in both directions, once the handshake is
 /// answered. The handshake and its answer are the exceptions: `00 00 04 00`
@@ -31,6 +34,12 @@ pub enum Message {
     /// A battery report: at the start of a session, and whenever a level or
     /// a charging state changes.
     Battery(BatteryInfo),
+    /// Where each pod is, the primary pod's place first: once as the link
+    /// comes up, and whenever a pod goes into or out of an ear or the case.
+    Ear(EarReport),
+    /// The primary pod, `None` for a byte naming neither: once as the link
+    /// comes up, before the first [`Message::Ear`], and at a role switch.
+    Primary(Option<PodSide>),
     /// A noise control mode report: in the startup dump, now and then as the
     /// echo of a mode set here, and when the mode is changed elsewhere.
     NoiseMode(NoiseMode),
@@ -63,6 +72,10 @@ pub fn decode(packet: &[u8]) -> Result<Message, DecodeError> {
         battery::OPCODE if battery::is_battery_packet(packet) => {
             Message::Battery(battery::read(packet)?)
         }
+        ear::EAR_OPCODE if ear::is_ear_packet(packet) => Message::Ear(ear::read_ear(packet)),
+        ear::PRIMARY_OPCODE if ear::is_primary_packet(packet) => {
+            Message::Primary(ear::read_primary(packet))
+        }
         noise::OPCODE if noise::is_noise_mode_packet(packet) => {
             Message::NoiseMode(noise::read(packet)?)
         }
@@ -77,6 +90,7 @@ pub fn decode(packet: &[u8]) -> Result<Message, DecodeError> {
 mod tests {
     use super::*;
     use crate::aap::battery::{Battery, Component, Status, battery_packet};
+    use crate::aap::ear::{Place, ear_packet, primary_packet};
     use crate::aap::keys::{KeyType, key_packet};
 
     fn left(level: u8) -> Battery {
@@ -104,6 +118,28 @@ mod tests {
                 Ok(Message::NoiseMode(mode))
             );
         }
+    }
+
+    #[test]
+    fn decodes_an_ear_report() {
+        let report = EarReport {
+            primary: Place::InEar,
+            secondary: Place::InClosedCase,
+        };
+        assert_eq!(decode(&ear_packet(report)), Ok(Message::Ear(report)));
+    }
+
+    #[test]
+    fn decodes_the_primary_pod() {
+        for primary in [PodSide::Left, PodSide::Right] {
+            assert_eq!(
+                decode(&primary_packet(primary, true, false)),
+                Ok(Message::Primary(Some(primary)))
+            );
+        }
+        let mut neither = primary_packet(PodSide::Left, true, false);
+        neither[6] = 0x03;
+        assert_eq!(decode(&neither), Ok(Message::Primary(None)));
     }
 
     #[test]
@@ -168,15 +204,18 @@ mod tests {
     }
 
     /// Too short to be what their opcode names, as the parsers have always
-    /// passed them over: no battery count, no key count, no mode byte. A
-    /// battery packet needs byte 5 to be zero as well.
+    /// passed them over: no battery count, no key count, no mode byte, no
+    /// second place, no primary. A battery packet needs byte 5 to be zero as
+    /// well.
     #[test]
     fn a_packet_too_short_for_its_opcode_is_unknown() {
-        let short: [&[u8]; 4] = [
+        let short: [&[u8]; 6] = [
             &[0x04, 0x00, 0x04, 0x00, 0x04, 0x00],
             &[0x04, 0x00, 0x04, 0x00, 0x04, 0x01, 0x01],
             &[0x04, 0x00, 0x04, 0x00, 0x31, 0x00],
             &noise::set_packet(NoiseMode::Off)[..7],
+            &[0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00],
+            &[0x04, 0x00, 0x04, 0x00, 0x08, 0x00],
         ];
         for packet in short {
             assert_eq!(

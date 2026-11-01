@@ -441,7 +441,8 @@ fn clear_battery_display(w: &BatteryWidgets, status: &str) {
 }
 
 /// Draws a reading into the battery display and the status text. A pod is
-/// drawn in an ear only while that is known: AAP alone does not say.
+/// drawn in an ear only while that is known: until a link has reported its
+/// ears, only an advertisement says.
 fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
     w.left.show(
         state.left_battery,

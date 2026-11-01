@@ -42,6 +42,8 @@ fn describe(packet: &[u8]) -> String {
         Ok(Message::NoiseMode(mode)) => format!("noise control mode report: {mode}"),
         Ok(Message::Battery(info)) => format!("battery: {info:?}"),
         Ok(Message::Keys(keys)) => format!("proximity keys: {} of them", keys.len()),
+        Ok(Message::Ear(report)) => format!("ear report: {report:?}"),
+        Ok(Message::Primary(primary)) => format!("primary pod: {primary:?}"),
         // AirPods 4's only consistent answer to a mode change, and no use as
         // one: it is byte-identical whichever mode was set.
         Ok(Message::Unknown { opcode: Some(0x4B) }) => {
