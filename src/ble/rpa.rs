@@ -116,8 +116,8 @@ pub struct ResolvedAddresses {
 struct Resolved {
     /// The pair's real address.
     pair: Address,
-    /// The IRK that resolved it. A pair whose IRK has changed since -
-    /// re-paired - is not this address's any more.
+    /// The IRK that resolved it. A pair whose IRK has changed since is not
+    /// this address's any more.
     irk: [u8; KEY_LEN],
     at: Instant,
 }
