@@ -24,6 +24,7 @@
 //! | `Click(s widget)` | Presses the widget, as a click on it does |
 //! | `SetActive(s widget, b active)` | Turns a switch, check or toggle button on or off |
 //! | `Select(s widget, u position)` | Selects a dropdown's item through `set_selected`, so `selected-notify` fires as for a user |
+//! | `SetText(s widget, s text)` | Replaces an entry's text, as typing or pasting it does: `changed` fires, and the cursor ends up after it |
 //! | `Screenshot(s widget) → s path` | Draws the widget to a PNG in `$XDG_RUNTIME_DIR/linuxpods-harness/` |
 //! | `Settle(u timeout_ms)` | Returns once the window has taken in the latest snapshot, and what was opened is on screen |
 //! | `Notifications() → s` | Every notification sent and withdrawn so far, as JSON |
@@ -67,6 +68,12 @@
 //! | `noise-control` | the Noise Control group, insensitive unless the device is on AAP |
 //! | `noise-off`, `noise-noise-cancellation`, `noise-transparency`, `noise-adaptive` | its radios |
 //! | `conversation-awareness` | the Features switch for Conversation Awareness: on as the snapshot has it, insensitive unless the device is on AAP and has reported it; turning it sends the command |
+//! | `info` | the Info group |
+//! | `rename` | its Name row, insensitive unless the device is on AAP and its link has reported the pods' name; clicked, it opens the rename dialog |
+//! | `device-name` | the row's name: the pods' own, else BlueZ's alias |
+//! | `rename-dialog` | the rename dialog, while open; its responses are buttons labeled `_Cancel` and `_Rename` |
+//! | `rename-entry` | its entry, holding the name; clicked, it renames as Enter does, unless Rename is insensitive - as it is for an empty name, the name the pods have, or one over 127 bytes |
+//! | `rename-error` | the line under it, visible while the name is too long |
 //! | `preferences` | the Preferences dialog, while open |
 //! | `auto-connect` | its switch, always insensitive |
 //! | `battery-notifications` | its switch for low battery notifications, as saved: on unless turned off |
@@ -86,7 +93,9 @@
 //! - `path`: `/` and an index per level, from the window down: `/0/2/1`
 //! - `role`: its accessible role, `label`, `button`, `check-box`
 //! - text, where there is some: `label`, `title`, `subtitle`, `description`,
-//!   and `icon` for an image's icon name
+//!   `icon` for an image's icon name, and `text` for an entry's text
+//! - `classes`: an entry's or a label's style classes, such as `error`,
+//!   where it has any
 //! - state, where there is some: `active` for switches, check and toggle
 //!   buttons; `selected` and `items` for dropdowns; `value` for level bars,
 //!   from 0 to 1; `page` for a stack's visible page
@@ -99,12 +108,13 @@
 //!
 //! ## Pressing
 //!
-//! `Click`, `SetActive` and `Select` refuse what a user could not press either:
+//! `Click`, `SetActive`, `Select` and `SetText` refuse what a user could not press either:
 //! a widget that is not on screen, or one that takes no input. That is what
 //! lets a test see Noise Control closed to a device on BLE. A press takes the
 //! user's path, and is done when the call returns: `Click` emits a button's
-//! `clicked`, pops a menu button's popover up or down, flips a switch, and
-//! activates anything else with `gtk_widget_activate`, as Enter on it does.
+//! `clicked`, pops a menu button's popover up or down, flips a switch,
+//! presses Enter in an entry, and activates anything else with
+//! `gtk_widget_activate`, as Enter on it does.
 //! `SetActive` clicks the widget only when its state differs, so a check
 //! button bound to an action - a noise radio - activates the action, and the
 //! action's state decides. Whatever a press sets off - a command to the
@@ -188,6 +198,10 @@ const INTERFACE_XML: &str = r#"<node>
     <method name="Select">
       <arg name="widget" type="s" direction="in"/>
       <arg name="position" type="u" direction="in"/>
+    </method>
+    <method name="SetText">
+      <arg name="widget" type="s" direction="in"/>
+      <arg name="text" type="s" direction="in"/>
     </method>
     <method name="Screenshot">
       <arg name="widget" type="s" direction="in"/>
@@ -337,6 +351,7 @@ enum Call {
     Click(String),
     SetActive(String, bool),
     Select(String, u32),
+    SetText(String, String),
     Screenshot(String),
     Settle(u32),
     Notifications,
@@ -360,6 +375,9 @@ impl gio::prelude::DBusMethodCall for Call {
             "Select" => params
                 .get()
                 .map(|(widget, position)| Call::Select(widget, position)),
+            "SetText" => params
+                .get()
+                .map(|(widget, text)| Call::SetText(widget, text)),
             "Screenshot" => params.get().map(|(widget,)| Call::Screenshot(widget)),
             "Settle" => params.get().map(|(timeout_ms,)| Call::Settle(timeout_ms)),
             "Notifications" => Some(Call::Notifications),
@@ -394,6 +412,9 @@ fn dispatch(call: Call, invocation: gio::DBusMethodInvocation) {
         }
         Call::Select(target, position) => {
             reply(invocation, select(&target, position).map(|()| None));
+        }
+        Call::SetText(target, text) => {
+            reply(invocation, set_text(&target, &text).map(|()| None));
         }
         // These two wait, and reply once done. Waiting in the handler would
         // stop the main loop, and with it the very window they wait for.
@@ -489,6 +510,11 @@ struct Node {
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     icon: Option<String>,
+    /// An entry's text, empty or not: `Some` marks an entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    classes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     active: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -610,6 +636,14 @@ fn selectable(node: &Node, target: &str, position: u32) -> Result<(), Error> {
     }
 }
 
+/// Checks a `SetText`: an entry a user could type in.
+fn typable(node: &Node, target: &str) -> Result<(), Error> {
+    if node.text.is_none() {
+        return Err(unsupported(node, target, "take text"));
+    }
+    pressable(node, target)
+}
+
 fn unsupported(node: &Node, target: &str, what: &'static str) -> Error {
     Error::Unsupported {
         target: target.to_string(),
@@ -693,7 +727,8 @@ fn click(target: &str) -> Result<(), Error> {
 /// Does what a click on the widget ends in, before returning. Activating a
 /// button or a switch - the keyboard's way - would not: a button is held
 /// down for a quarter second before it emits `clicked`, and a switch slides
-/// over before it flips. False when the widget takes no click.
+/// over before it flips. An entry is pressed as Enter in it is. False when
+/// the widget takes no click.
 fn press(widget: &gtk::Widget) -> bool {
     if let Some(button) = widget.downcast_ref::<gtk::Button>() {
         // Toggles a toggle button, and activates an action bound to it.
@@ -707,6 +742,13 @@ fn press(widget: &gtk::Widget) -> bool {
         }
     } else if let Some(switch) = widget.downcast_ref::<gtk::Switch>() {
         switch.set_active(!switch.is_active());
+    } else if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
+        // Enter in it: the text inside it activates, and with
+        // `activates-default` the dialog's default response with it.
+        let Some(text) = entry.delegate().and_downcast::<gtk::Text>() else {
+            return false;
+        };
+        text.emit_by_name::<()>("activate", &[]);
     } else {
         return widget.activate();
     }
@@ -732,6 +774,18 @@ fn select(target: &str, position: u32) -> Result<(), Error> {
             .downcast_ref::<gtk::DropDown>()
             .ok_or_else(|| unsupported(node, target, "select an item"))?;
         dropdown.set_selected(position);
+        Ok(())
+    })
+}
+
+fn set_text(target: &str, text: &str) -> Result<(), Error> {
+    with_target(target, |widget, node| {
+        typable(node, target)?;
+        let entry = widget
+            .downcast_ref::<gtk::Entry>()
+            .ok_or_else(|| unsupported(node, target, "take text"))?;
+        entry.set_text(text);
+        entry.set_position(-1);
         Ok(())
     })
 }
@@ -882,12 +936,16 @@ fn read(widget: &gtk::Widget) -> Node {
 fn read_text(widget: &gtk::Widget, node: &mut Node) {
     if let Some(label) = widget.downcast_ref::<gtk::Label>() {
         node.label = text(label.text());
+        node.classes = classes(widget);
     } else if let Some(button) = widget.downcast_ref::<gtk::Button>() {
         node.label = button.label().and_then(text);
     } else if let Some(check) = widget.downcast_ref::<gtk::CheckButton>() {
         node.label = check.label().and_then(text);
     } else if let Some(image) = widget.downcast_ref::<gtk::Image>() {
         node.icon = image.icon_name().and_then(text);
+    } else if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
+        node.text = Some(entry.text().into());
+        node.classes = classes(widget);
     }
 
     if let Some(window) = widget.downcast_ref::<gtk::Window>() {
@@ -909,6 +967,16 @@ fn read_text(widget: &gtk::Widget, node: &mut Node) {
         node.title = text(page.title());
         node.description = page.description().and_then(text);
     }
+}
+
+/// A widget's style classes: read for entries and labels only, enough to
+/// tell one marked as an `error`.
+fn classes(widget: &gtk::Widget) -> Vec<String> {
+    widget
+        .css_classes()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn read_state(widget: &gtk::Widget, node: &mut Node) {
@@ -1128,6 +1196,10 @@ mod tests {
             Call::Select("device-dropdown".into(), 1)
         );
         assert_eq!(
+            parse("SetText", ("rename-entry", "Test Pods").to_variant()).unwrap(),
+            Call::SetText("rename-entry".into(), "Test Pods".into())
+        );
+        assert_eq!(
             parse("Settle", (500u32,).to_variant()).unwrap(),
             Call::Settle(500)
         );
@@ -1192,7 +1264,7 @@ mod tests {
     }
 
     /// Absent text and state are left out rather than written as null, and so
-    /// is an empty list of children.
+    /// are an empty list of children and of style classes.
     #[test]
     fn json_leaves_out_what_a_widget_lacks() {
         let tree = tree();
@@ -1230,6 +1302,15 @@ mod tests {
         let level = serde_json::to_value(&level).unwrap();
         assert_eq!(level["value"], json!(0.5));
         assert_eq!(level["label"], json!("50%"));
+        // An entry's text is there even empty; style classes only where set.
+        let entry = Node {
+            text: Some(String::new()),
+            classes: vec!["error".into()],
+            ..Node::default()
+        };
+        let entry = serde_json::to_value(&entry).unwrap();
+        assert_eq!(entry["text"], json!(""));
+        assert_eq!(entry["classes"], json!(["error"]));
     }
 
     /// Nothing is recorded until the interface is served; from then on, each
@@ -1322,6 +1403,30 @@ mod tests {
         assert_eq!(
             toggle_state(label, "/0/0").unwrap_err().to_string(),
             "/0/0 (GtkLabel) cannot be switched on or off"
+        );
+    }
+
+    /// Only an entry takes text, and only one a user could type in.
+    #[test]
+    fn only_entries_take_text() {
+        let entry = Node {
+            text: Some("Test Pods".into()),
+            ..widget("GtkEntry", Some("rename-entry"), vec![])
+        };
+        assert_eq!(typable(&entry, "rename-entry"), Ok(()));
+        let grayed = Node {
+            sensitive: false,
+            ..entry
+        };
+        assert_eq!(
+            typable(&grayed, "rename-entry"),
+            Err(Error::Insensitive("rename-entry".into()))
+        );
+
+        let label = widget("GtkLabel", Some("device-name"), vec![]);
+        assert_eq!(
+            typable(&label, "device-name").unwrap_err().to_string(),
+            "device-name (GtkLabel) cannot take text"
         );
     }
 
