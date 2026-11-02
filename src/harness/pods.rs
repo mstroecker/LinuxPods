@@ -33,6 +33,7 @@ use crate::aap::conversation;
 use crate::aap::ear::{EarReport, Place, ear_packet, primary_packet};
 use crate::aap::keys::{KeyType, ProximityKey, key_packet};
 use crate::aap::message::HEADER;
+use crate::aap::name;
 use crate::aap::noise::{self, NoiseMode};
 use crate::ble::decrypt::{KEY_LEN, Plaintext, ZEROED_SUFFIX, encrypt, random_key};
 use crate::ble::parser::{Cleartext, PodSide, proximity_message};
@@ -129,6 +130,18 @@ const OP_HANDSHAKE: u8 = 0x01;
 const OP_NOTIFICATIONS: u8 = 0x0F;
 const OP_KEY_REQUEST: u8 = 0x30;
 
+/// The name the pods are given out of the box: what [`Pods::new`] holds
+/// until [`Pods::set_name`] or a rename changes it.
+pub const DEFAULT_NAME: &str = "AirPods Pro";
+
+/// The longest name the pods keep, in bytes: a Pro 3 cut a longer one to its
+/// first 127 bytes, silently, in the name run of #160. The real value.
+pub const NAME_KEPT: usize = 127;
+
+/// What the device information packet carries after the name, made up: the
+/// hardware's holds the model number and serial numbers.
+const INFO_REST: [&str; 3] = ["A0000", "FAKESERIAL0", "FAKESERIAL1"];
+
 /// The answer to the handshake, all 18 bytes, as a Pro 3 sent it in every #71
 /// capture. The app, like LibrePods, matches the first four.
 const HANDSHAKE_ACK: [u8; 18] = [
@@ -202,7 +215,8 @@ enum Dumped {
     ConversationAwareness,
     /// Another setting of the 0x09 family: its sub-command and value.
     Setting(u8, &'static [u8]),
-    /// 0x1D, which carries the device's name and model number: synthetic.
+    /// 0x1D, the device information: the pair's name, then made-up stand-ins
+    /// for the model number and the serial numbers, laid out as a Pro 3's.
     DeviceInfo,
     /// A packet nothing reads, by its opcode: a short stand-in for one that
     /// ran to hundreds of bytes on the hardware.
@@ -210,7 +224,7 @@ enum Dumped {
 }
 
 impl Dumped {
-    fn packet(self, mode: NoiseMode, conversation_awareness: bool) -> Vec<u8> {
+    fn packet(self, mode: NoiseMode, conversation_awareness: bool, name: &[u8]) -> Vec<u8> {
         match self {
             // The mode packet serves both directions: this is the report.
             Self::Mode => noise::set_packet(mode).to_vec(),
@@ -219,15 +233,7 @@ impl Dumped {
                 conversation::set_packet(conversation_awareness).to_vec()
             }
             Self::Setting(sub_cmd, value) => noise::settings_report(sub_cmd, value).to_vec(),
-            Self::DeviceInfo => {
-                let text = b"Fake AirPods\0A0000\0";
-                let len = u16::try_from(text.len()).expect("a short text");
-                let mut packet = header(0x1D);
-                packet.push(0x02);
-                packet.extend_from_slice(&len.to_le_bytes());
-                packet.extend_from_slice(text);
-                packet
-            }
+            Self::DeviceInfo => name::info_packet(name, &INFO_REST),
             Self::Other(opcode) => {
                 let mut packet = header(opcode);
                 packet.extend_from_slice(&[0x00, 0x00]);
@@ -325,14 +331,14 @@ fn report_packets(
 }
 
 /// The second 0x0C, naming this host, and the startup dump after it, with
-/// `mode` and the Conversation Awareness setting in it - and with that on,
-/// level 09 after it, unasked, as in the #150 run.
-fn startup_dump(mode: NoiseMode, conversation_awareness: bool) -> Vec<Vec<u8>> {
+/// `mode`, the Conversation Awareness setting and the pair's name in it - and
+/// with the setting on, level 09 after it, unasked, as in the #150 run.
+fn startup_dump(mode: NoiseMode, conversation_awareness: bool, name: &[u8]) -> Vec<Vec<u8>> {
     std::iter::once(in_use_packet(THIS_HOST, true))
         .chain(
             STARTUP_DUMP
                 .iter()
-                .map(|dumped| dumped.packet(mode, conversation_awareness)),
+                .map(|dumped| dumped.packet(mode, conversation_awareness, name)),
         )
         .chain(conversation_awareness.then(|| conversation::level_packet(LEVEL_IDLE).to_vec()))
         .collect()
@@ -645,6 +651,9 @@ pub struct Pods {
     noise_mode: NoiseMode,
     allow_off: bool,
     conversation_awareness: bool,
+    /// The pair's own name, as the pods hold it: bytes, as a rename cut at
+    /// [`NAME_KEPT`] may leave a character half there.
+    name: Vec<u8>,
     /// A stretch of speech, while one is under way.
     speaking: Option<Speaking>,
     keys: Keys,
@@ -663,7 +672,7 @@ impl Pods {
     /// left at 80%, right at 70% and the case at 50% - different, so a
     /// left/right mix-up shows - nothing charging, white, left primary, noise
     /// cancellation, Off not allowed, Conversation Awareness off, as in every
-    /// #71 capture, and connected to nothing.
+    /// #71 capture, named [`DEFAULT_NAME`], and connected to nothing.
     pub fn new(product_id: u16, mac: Address) -> Self {
         Self::with_keys(product_id, mac, Keys::generate())
     }
@@ -695,6 +704,7 @@ impl Pods {
             noise_mode: NoiseMode::NoiseCancellation,
             allow_off: false,
             conversation_awareness: false,
+            name: DEFAULT_NAME.as_bytes().to_vec(),
             speaking: None,
             keys,
             connected: false,
@@ -738,6 +748,11 @@ impl Pods {
     /// Whether Conversation Awareness is on, the setting `0x28` writes.
     pub fn conversation_awareness(&self) -> bool {
         self.conversation_awareness
+    }
+
+    /// The pair's own name, as the pods hold it and send it in 0x1D.
+    pub fn name(&self) -> &[u8] {
+        &self.name
     }
 
     /// Whether a stretch of speech is under way at `now` - see
@@ -863,6 +878,13 @@ impl Pods {
     /// connection's dump carries it.
     pub fn set_conversation_awareness(&mut self, enabled: bool) {
         self.conversation_awareness = enabled;
+    }
+
+    /// Names the pair, as it was named when paired, or from elsewhere: kept
+    /// whole, whatever its length. Over AAP nothing reports it; the next
+    /// connection's startup dump carries it.
+    pub fn set_name(&mut self, name: &str) {
+        self.name = name.as_bytes().to_vec();
     }
 
     /// The user speaks at `now` for `length`, and the pods hear it. With
@@ -1214,6 +1236,8 @@ impl Pods {
     ///   echo, the refused Off's too, as a Pro 3 sent them (#150);
     /// - `0x34` sets allow-Off, and `0x28` Conversation Awareness. What
     ///   either answers is not recorded, so the fake answers nothing.
+    /// - a rename (0x1A) the pair's name, answering nothing, as a Pro 3
+    ///   answered nothing (#160); the next connection's 0x1D carries it.
     ///
     /// Anything else is recorded and otherwise ignored, as is everything
     /// arriving with no connection open or on a silent one.
@@ -1231,6 +1255,7 @@ impl Pods {
             Some(OP_HANDSHAKE) => self.answer_handshake(now),
             Some(OP_NOTIFICATIONS) => self.start_notifications(now),
             Some(OP_KEY_REQUEST) => self.send(now, self.key_packet()),
+            Some(name::RENAME_OPCODE) => self.rename(packet),
             _ => self.settings_command(packet, now),
         }
     }
@@ -1296,7 +1321,7 @@ impl Pods {
                 }
                 Due::Dump => {
                     let mode = self.noise_mode;
-                    let dump = startup_dump(mode, self.conversation_awareness);
+                    let dump = startup_dump(mode, self.conversation_awareness, &self.name);
                     actions.extend(dump.into_iter().map(Action::Send));
                     session.mode = Some(mode);
                 }
@@ -1529,6 +1554,25 @@ impl Pods {
             session.schedule(at, report);
             session.schedule(dump_at, Due::Dump);
         }
+    }
+
+    /// A rename, `1A 00 01 [length] 00 [name]` after the header: the pods
+    /// take the name at once and answer nothing, as a Pro 3 did in #160. A
+    /// name over [`NAME_KEPT`] bytes is cut to its first 127, as a Pro 3 cut
+    /// it, inside a character if one falls there. What the pods do with a
+    /// packet shaped otherwise, or an empty name, is not recorded; the fake
+    /// ignores either.
+    fn rename(&mut self, packet: &[u8]) {
+        let Some(&[0x00, 0x01, len, 0x00]) = packet.get(OPCODE + 1..OPCODE + 5) else {
+            return;
+        };
+        let Some(given) = packet.get(OPCODE + 5..) else {
+            return;
+        };
+        if given.len() != usize::from(len) || given.is_empty() {
+            return;
+        }
+        self.name = given[..given.len().min(NAME_KEPT)].to_vec();
     }
 
     /// A command in the 0x09 settings family.
@@ -2462,6 +2506,50 @@ mod tests {
         let dump = dump_of(&mut pods, ms(20_000));
         assert_eq!(setting(&dump), [true]);
         assert_eq!(dump.last(), Some(&level(0x09)));
+    }
+
+    /// The name in a startup dump, as the app reads it.
+    fn dumped_name(dump: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        dump.iter()
+            .filter_map(|p| name::info_name_bytes(p).map(<[u8]>::to_vec))
+            .collect()
+    }
+
+    /// The name is in the startup dump's 0x1D, laid out as a Pro 3's, with
+    /// the `04 00` before it. A rename is taken and answered with nothing;
+    /// the next connection's dump carries the new name.
+    #[test]
+    fn the_dump_carries_the_name_and_a_rename_sets_it() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        let dump = dump_of(&mut pods, ms(0));
+        assert_eq!(
+            dump.iter()
+                .filter_map(|p| name::parse_info_name(p).ok())
+                .collect::<Vec<_>>(),
+            [DEFAULT_NAME]
+        );
+
+        pods.receive(&name::rename_packet("Test Pods").unwrap(), ms(10));
+        assert_eq!(pods.name(), b"Test Pods");
+        assert!(pods.poll(ms(10_000)).is_empty(), "nothing answers it");
+
+        pods.aap_closed();
+        let dump = dump_of(&mut pods, ms(20_000));
+        assert_eq!(dumped_name(&dump), [b"Test Pods".to_vec()]);
+    }
+
+    /// Past 127 bytes the pods keep the first 127, as a Pro 3 did in the
+    /// name run of #160, a character cut in two included. A name named from
+    /// elsewhere is kept whole.
+    #[test]
+    fn a_long_name_is_cut_at_127_bytes() {
+        let mut pods = subscribed();
+        let long = "ü".repeat(100);
+        pods.receive(&name::rename_packet_unchecked(long.as_bytes()), ms(10));
+        assert_eq!(pods.name(), &long.as_bytes()[..NAME_KEPT]);
+
+        pods.set_name(&long);
+        assert_eq!(pods.name(), long.as_bytes());
     }
 
     /// A pair subscribed as [`subscribed`] is, `setup` run on it first, the

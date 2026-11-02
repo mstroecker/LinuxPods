@@ -41,8 +41,8 @@
 //!
 //! | Method | Does |
 //! |---|---|
-//! | `AddPods(s mac, q model, s alias)` | Pairs new AirPods with the world's first adapter - model by product ID, such as `0x2027` for Pro 3 - in range and disconnected |
-//! | `AddPodsOn(s adapter, s mac, q model, s alias)` | The same, with the adapter called `adapter` |
+//! | `AddPods(s mac, q model, s name)` | Pairs new AirPods with the world's first adapter - model by product ID, such as `0x2027` for Pro 3 - in range and disconnected, named `name`, with no alias set |
+//! | `AddPodsOn(s adapter, s mac, q model, s name)` | The same, with the adapter called `adapter` |
 //! | `AddAdapter(s name, b powered)` | Plugs in an adapter at `/org/bluez/<name>`; one plugged in before has its pairs back, disconnected |
 //! | `RemoveAdapter(s name)` | Unplugs it: its pairs disconnect, and its devices and battery providers go |
 //! | `SetPowered(s name, b powered)` | Powers it on or off; off, discovery there ends and its pairs disconnect |
@@ -53,6 +53,8 @@
 //! | `SetLid(s mac, b open)` | Opens or closes the case; closed on both pods, it drops their link. The pods in the closed case stop advertising 4 s later, and come back under new addresses once it opens, the right pod 1 s later, the left 5.5 s |
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
+//! | `SetAlias(s mac, s alias)` | Sets the pair's BlueZ alias, as GNOME Settings' rename does; `""` clears it, and the alias is the name again |
+//! | `Name(s mac) → s` | The pods' own name, as they hold it: what a rename set, which the next AAP connection's startup dump carries, and BlueZ's `Name` once they connect again. Not UTF-8 where a rename cut a character, which shows as U+FFFD |
 //! | `SetConversationAwareness(s mac, b on)` | Turns Conversation Awareness on or off, as from a phone: nothing reports it over AAP, the next connection's startup dump does |
 //! | `Speak(s mac, u length_ms)` | The user speaks for that long. With Conversation Awareness on, the pods send speech levels and switch to Transparency and back, at the #150 run's times - see [`Pods::speak`]; with it off, nothing. Fails with no AAP connection |
 //! | `SetPlaying(s mac, b playing)` | Audio to a connected pair starts or stops, as the audio server's: its A2DP transport `active`, set up at a new path if it has none, at the pair's own volume; or `idle` - see [`FakeBluez::set_playing`] |
@@ -247,11 +249,12 @@ impl World {
 
     /// Pairs new AirPods with the host's first adapter, of those it has now:
     /// `product_id` as `parse_proximity_data` reads it, fresh keys, in range
-    /// and disconnected.
-    pub async fn add_pods(&self, mac: Address, product_id: u16, alias: &str) -> Result<()> {
+    /// and disconnected. `name` is the pods' own, which the fake BlueZ shows
+    /// as `Name` and, with no alias set, `Alias`.
+    pub async fn add_pods(&self, mac: Address, product_id: u16, name: &str) -> Result<()> {
         let adapters = self.0.bluez.adapters();
         let adapter = adapters.first().context("the world has no adapter")?;
-        self.add_pods_on(adapter, mac, product_id, alias).await
+        self.add_pods_on(adapter, mac, product_id, name).await
     }
 
     /// [`World::add_pods`], with the adapter called `adapter`.
@@ -260,7 +263,7 @@ impl World {
         adapter: &str,
         mac: Address,
         product_id: u16,
-        alias: &str,
+        name: &str,
     ) -> Result<()> {
         let mut pairs = self.0.pairs.lock().await;
         anyhow::ensure!(!pairs.contains_key(&mac), "{mac} is paired already");
@@ -272,17 +275,19 @@ impl World {
         }
         let listener = UnixSeqpacketListener::bind(&path)
             .with_context(|| format!("failed to listen at {}", path.display()))?;
-        self.0.bluez.add_device(adapter, mac, alias).await?;
+        self.0.bluez.add_device(adapter, mac, name).await?;
+        let mut pods = Pods::new(product_id, mac);
+        pods.set_name(name);
         pairs.insert(
             mac,
             Pair {
-                pods: Pods::new(product_id, mac),
+                pods,
                 link: None,
                 aap_attempts: 0,
             },
         );
         tokio::spawn(self.clone().accept(mac, listener));
-        tracing::info!("fake world: {alias} paired at {mac} with {adapter}");
+        tracing::info!("fake world: {name} paired at {mac} with {adapter}");
         Ok(())
     }
 
@@ -317,6 +322,14 @@ impl World {
         let mut pairs = self.0.pairs.lock().await;
         let pair = pairs.get_mut(&mac).ok_or_else(|| no_pair(mac))?;
         if connected {
+            // bluetoothd reads the pair's name as it connects: a rename on
+            // the pods shows in `Name` from here (#160). Ahead of
+            // `Connected`, the fake's choice, so that whoever reads the names
+            // on `Connected=true` reads this one.
+            if self.0.bluez.can_connect(mac) {
+                let name = String::from_utf8_lossy(pair.pods.name()).into_owned();
+                self.0.bluez.set_name(mac, &name).await?;
+            }
             // BlueZ first, as it turns away a pair whose adapter is off.
             self.0.bluez.set_connected(mac, true).await?;
             pair.pods.set_connected(true);
@@ -505,6 +518,18 @@ impl World {
         self.flush(mac, pair, self.now()).await;
         self.0.due.notify_one();
         Ok(result)
+    }
+
+    /// Sets a pair's BlueZ alias, or clears it - see
+    /// [`FakeBluez::set_alias`].
+    pub async fn set_alias(&self, mac: Address, alias: Option<&str>) -> Result<()> {
+        anyhow::ensure!(self.0.pairs.lock().await.contains_key(&mac), no_pair(mac));
+        self.0.bluez.set_alias(mac, alias).await
+    }
+
+    /// The pods' own name, as they hold it - see [`Pods::name`].
+    pub async fn name(&self, mac: Address) -> Result<Vec<u8>> {
+        self.with_pods(mac, |pods| pods.name().to_vec()).await
     }
 
     /// A pair's keys, for a test to hand the app's keystore.
@@ -806,9 +831,9 @@ struct FakeWorld1 {
 
 #[interface(name = "io.github.mstroecker.LinuxPods.FakeWorld1")]
 impl FakeWorld1 {
-    async fn add_pods(&self, mac: &str, model: u16, alias: &str) -> fdo::Result<()> {
+    async fn add_pods(&self, mac: &str, model: u16, name: &str) -> fdo::Result<()> {
         let mac = parse_mac(mac)?;
-        self.world.add_pods(mac, model, alias).await.map_err(failed)
+        self.world.add_pods(mac, model, name).await.map_err(failed)
     }
 
     async fn add_pods_on(
@@ -816,11 +841,11 @@ impl FakeWorld1 {
         adapter: &str,
         mac: &str,
         model: u16,
-        alias: &str,
+        name: &str,
     ) -> fdo::Result<()> {
         let mac = parse_mac(mac)?;
         self.world
-            .add_pods_on(adapter, mac, model, alias)
+            .add_pods_on(adapter, mac, model, name)
             .await
             .map_err(failed)
     }
@@ -877,6 +902,16 @@ impl FakeWorld1 {
 
     async fn hang_up(&self, mac: &str) -> fdo::Result<()> {
         self.world.hang_up(parse_mac(mac)?).await.map_err(failed)
+    }
+
+    async fn set_alias(&self, mac: &str, alias: &str) -> fdo::Result<()> {
+        let mac = parse_mac(mac)?;
+        self.world.set_alias(mac, Some(alias)).await.map_err(failed)
+    }
+
+    async fn name(&self, mac: &str) -> fdo::Result<String> {
+        let name = self.world.name(parse_mac(mac)?).await.map_err(failed)?;
+        Ok(String::from_utf8_lossy(&name).into_owned())
     }
 
     async fn set_conversation_awareness(&self, mac: &str, enabled: bool) -> fdo::Result<()> {
@@ -1034,20 +1069,37 @@ mod tests {
 
     /// Whether the fake BlueZ shows the pair connected, read afresh.
     async fn bluez_connected(bus: &PrivateBus, mac: Address) -> bool {
+        device_proxy(bus, mac)
+            .await
+            .get_property("Connected")
+            .await
+            .unwrap()
+    }
+
+    /// The pair's `Name` and `Alias` in the fake BlueZ, read afresh.
+    async fn bluez_names(bus: &PrivateBus, mac: Address) -> (String, String) {
+        let device = device_proxy(bus, mac).await;
+        (
+            device.get_property("Name").await.unwrap(),
+            device.get_property("Alias").await.unwrap(),
+        )
+    }
+
+    /// The pair's `Device1` in the fake BlueZ, its properties uncached.
+    async fn device_proxy(bus: &PrivateBus, mac: Address) -> zbus::Proxy<'static> {
         let conn = bus.connect().await.unwrap();
         let path = device_path(DEFAULT_ADAPTER, mac);
-        let device = zbus::proxy::Builder::<zbus::Proxy>::new(&conn)
+        zbus::proxy::Builder::<zbus::Proxy>::new(&conn)
             .destination(BLUEZ_SERVICE)
             .unwrap()
-            .path(path.as_str())
+            .path(path)
             .unwrap()
             .interface("org.bluez.Device1")
             .unwrap()
             .cache_properties(CacheProperties::No)
             .build()
             .await
-            .unwrap();
-        device.get_property("Connected").await.unwrap()
+            .unwrap()
     }
 
     #[test]
@@ -1121,6 +1173,40 @@ mod tests {
         assert!(!world.with_pods(MAC, |pods| pods.has_aap()).await.unwrap());
         assert!(bluez_connected(&bus, MAC).await, "the link stays");
         assert!(world.hang_up(MAC).await.is_err(), "nothing left to hang up");
+    }
+
+    /// BlueZ reads the pods' name as the pair connects, not before: renamed
+    /// while connected, `Name` and `Alias` keep the old name until the next
+    /// connection, and then both take the new one while no alias is set
+    /// (#160). An alias set stays, whatever the pods are called, and cleared,
+    /// the alias is the name again. A rename over AAP, and the pods taking
+    /// it, is the pipeline's to drive.
+    #[tokio::test]
+    async fn bluez_reads_the_pods_name_as_they_connect() {
+        let (bus, world, _dir) = world().await;
+        world.connect(MAC).await.unwrap();
+        world
+            .with_pods(MAC, |pods| pods.set_name("Test Pods"))
+            .await
+            .unwrap();
+        let fake = "Fake AirPods".to_string();
+        assert_eq!(bluez_names(&bus, MAC).await, (fake.clone(), fake));
+
+        world.disconnect(MAC).await.unwrap();
+        world.connect(MAC).await.unwrap();
+        let renamed = "Test Pods".to_string();
+        assert_eq!(
+            bluez_names(&bus, MAC).await,
+            (renamed.clone(), renamed.clone())
+        );
+
+        world.set_alias(MAC, Some("Kitchen")).await.unwrap();
+        assert_eq!(
+            bluez_names(&bus, MAC).await,
+            (renamed.clone(), "Kitchen".to_string())
+        );
+        world.set_alias(MAC, None).await.unwrap();
+        assert_eq!(bluez_names(&bus, MAC).await, (renamed.clone(), renamed));
     }
 
     /// Disconnecting takes the AAP connection along, and BlueZ says so first:
@@ -1401,6 +1487,18 @@ mod tests {
             .call_method("SetConversationAwareness", &(&other, true))
             .await
             .unwrap();
+        let name: String = control.call("Name", &(&other,)).await.unwrap();
+        assert_eq!(name, "Other");
+        control
+            .call_method("SetAlias", &(&other, "Kitchen"))
+            .await
+            .unwrap();
+        assert_eq!(bluez_names(&bus, OTHER).await.1, "Kitchen");
+        control
+            .call_method("SetAlias", &(&other, ""))
+            .await
+            .unwrap();
+        assert_eq!(bluez_names(&bus, OTHER).await.1, "Other");
         let (left, case, echo_every, repaired, conversation_awareness) = world
             .with_pods(OTHER, |pods| {
                 (
