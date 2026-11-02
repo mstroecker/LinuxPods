@@ -334,6 +334,7 @@ pub async fn watch_snapshots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bluez::DeviceNames;
     use crate::podstate::Identity;
 
     const PAIR: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x01]);
@@ -625,7 +626,11 @@ mod tests {
             (PAIR, aap([Some(15), Some(50), None])),
             (OTHER, aap([Some(50), Some(4), None])),
         ]);
-        snap.device_names.insert(PAIR, "Marcel’s AirPods".into());
+        let names = DeviceNames {
+            alias: "Marcel’s AirPods".into(),
+            name: None,
+        };
+        snap.device_names.insert(PAIR, names);
         let mut other = snap.states[&OTHER].clone();
         other.identity = Some(Identity {
             product_id: 0x2024,

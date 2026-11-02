@@ -46,7 +46,7 @@ use zbus::Connection;
 
 use linuxpods::aap::ear::ROLE_SWITCH_HOLD;
 use linuxpods::aap::noise::{allow_off_packet, set_packet};
-use linuxpods::aap::{NoiseMode, conversation};
+use linuxpods::aap::{NoiseMode, conversation, name};
 use linuxpods::attachment::Attachment;
 use linuxpods::ble::decrypt::random_key;
 use linuxpods::ble::decrypt_for_device;
@@ -1415,6 +1415,152 @@ async fn conversation_awareness_is_read_from_the_dump_and_switched() {
         conversation_awareness(s, PAIR) == Some(true)
     })
     .await;
+}
+
+/// The pods' own name, as the snapshot shows it.
+fn pods_name(snapshot: &Snapshot, mac: Address) -> Option<String> {
+    snapshot.states.get(&mac).and_then(|s| s.name.clone())
+}
+
+/// The rename packets the app has sent a pair, over all its connections.
+async fn renames_sent(fixture: &Fixture, mac: Address) -> Vec<Vec<u8>> {
+    let received = fixture.world.received(mac).await.unwrap();
+    received
+        .into_iter()
+        .filter(|packet| packet.get(4) == Some(&name::RENAME_OPCODE))
+        .collect()
+}
+
+/// The name comes from the startup dump, and a rename goes out as 0x1A, the
+/// snapshot showing it at once, as nothing answers it. The pods take it, the
+/// next connection's dump reports it, and BlueZ's `Name`, and so its alias,
+/// follow once the pair has connected again (#160). An alias set in BlueZ is
+/// left alone, and stays on show in the switcher.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rename_is_recorded_and_the_next_connection_reports_it() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    let snapshot = app
+        .until("the name from the startup dump", |s| {
+            pods_name(s, PAIR).as_deref() == Some("Fake AirPods")
+        })
+        .await;
+    assert_eq!(snapshot.device_name(PAIR), Some("Fake AirPods"));
+    assert!(!snapshot.has_alias(PAIR));
+
+    app.coordinator
+        .command(PAIR, Command::Rename("Test Pods".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        pods_name(&app.updates.borrow(), PAIR).as_deref(),
+        Some("Test Pods")
+    );
+    let world = &fixture.world;
+    eventually("the pair to take the name", move || async move {
+        world.name(PAIR).await.unwrap() == b"Test Pods"
+    })
+    .await;
+    assert_eq!(
+        renames_sent(&fixture, PAIR).await,
+        [name::rename_packet("Test Pods").unwrap()]
+    );
+
+    app.detach(PAIR).await;
+    let snapshot = app.updates.borrow().clone();
+    assert_eq!(
+        pods_name(&snapshot, PAIR),
+        None,
+        "the name goes with the link"
+    );
+    assert_eq!(snapshot.device_name(PAIR), Some("Fake AirPods"));
+    app.attach(PAIR).await;
+    let snapshot = app
+        .until("the new name, from the dump and from BlueZ", |s| {
+            pods_name(s, PAIR).as_deref() == Some("Test Pods")
+                && s.device_name(PAIR) == Some("Test Pods")
+        })
+        .await;
+    assert!(!snapshot.has_alias(PAIR));
+
+    // An alias set in GNOME Settings: the switcher keeps it, whatever the
+    // pods are called.
+    app.detach(PAIR).await;
+    fixture
+        .world
+        .set_alias(PAIR, Some("Kitchen"))
+        .await
+        .unwrap();
+    app.attach(PAIR).await;
+    let snapshot = app
+        .until("the alias, read as the pair connects", |s| {
+            s.device_name(PAIR) == Some("Kitchen")
+        })
+        .await;
+    assert!(snapshot.has_alias(PAIR));
+    app.until("the pods' own name", |s| {
+        pods_name(s, PAIR).as_deref() == Some("Test Pods")
+    })
+    .await;
+}
+
+/// A name the pods would not take - empty, with a NUL, over 127 bytes, in
+/// bytes rather than characters - is refused, and never sent; nor is any
+/// rename without a link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_name_the_pods_would_not_take_is_never_sent() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    let unlinked = app
+        .coordinator
+        .command(PAIR, Command::Rename("Test Pods".into()))
+        .await;
+    assert!(
+        format!("{:#}", unlinked.unwrap_err()).contains("no AAP connection"),
+        "no link, no rename"
+    );
+
+    app.attach(PAIR).await;
+    app.until("the name from the startup dump", |s| {
+        pods_name(s, PAIR).is_some()
+    })
+    .await;
+    // 43 characters, 129 bytes.
+    for refused in [
+        String::new(),
+        "a\0b".into(),
+        "a".repeat(128),
+        "’".repeat(43),
+    ] {
+        let failed = app
+            .coordinator
+            .command(PAIR, Command::Rename(refused.clone()))
+            .await;
+        assert!(failed.is_err(), "{refused:?} refused");
+    }
+    assert_eq!(
+        pods_name(&app.updates.borrow(), PAIR).as_deref(),
+        Some("Fake AirPods")
+    );
+
+    // Sent after them, and the first to arrive.
+    let allowed = "’".repeat(42);
+    app.coordinator
+        .command(PAIR, Command::Rename(allowed.clone()))
+        .await
+        .unwrap();
+    let world = &fixture.world;
+    let expected = allowed.clone();
+    eventually("the pair to take the allowed name", move || {
+        let expected = expected.clone();
+        async move { world.name(PAIR).await.unwrap() == expected.as_bytes() }
+    })
+    .await;
+    assert_eq!(
+        renames_sent(&fixture, PAIR).await,
+        [name::rename_packet(&allowed).unwrap()]
+    );
 }
 
 /// What a snapshot shows of the pair while the user speaks: the noise mode,
