@@ -17,8 +17,8 @@
 //! it next advertises - which, lid closed in the case, can be a long wait. AAP
 //! state is only ever the live link's and goes with it. While the link is up,
 //! the device's snapshot takes from its cached advertisement what AAP does not
-//! carry: lid, connection state and primary pod - and in-ear until the link has
-//! reported it, see [`EarState`].
+//! carry: lid and connection state - and in-ear until the link has reported
+//! it, see [`EarState`].
 //!
 //! A link supersedes the cached reading from its first battery packet, not
 //! from when it comes up: in between - about a second on one pair - the
@@ -207,18 +207,13 @@ pub struct PodState {
 
     /// Decoded with `ble::decode_connection_state`.
     ///
-    /// Only advertisements carry it, along with the lid and the primary pod.
+    /// Only advertisements carry it, along with the lid.
     /// Unlike the identity these change as the earbuds are used, so for a
     /// device on AAP they are taken from its cached advertisement each time a
     /// snapshot is built, and they expire with that cache entry. `None` while
     /// no advertisement is cached. A connected pair's payload changes seldom
     /// and lags what it reports - 4 reached the app in 70 s in #142.
     pub connection_state: Option<u8>,
-
-    /// From an advertisement like the
-    /// [connection state](PodState::connection_state), for a device on AAP
-    /// too: the link's own primary pod maps its ear reports, and is not shown.
-    pub primary_pod: Option<PodSide>,
 
     /// Active noise control mode. `None` until the connected device reports one:
     /// BLE advertisements do not carry it, and a default would show the wrong
@@ -254,7 +249,6 @@ impl PodState {
             right_in_ear: None,
             lid_open: None,
             connection_state: None,
-            primary_pod: None,
             noise_mode: None,
             identity: None,
             current_ble_mac: None,
@@ -386,16 +380,21 @@ struct Link {
 /// taken out, the lid opened, a call coming in. A linked device's snapshot
 /// takes them from its cached advertisement, all but in-ear once its link has
 /// reported that: AAP carries in-ear too, and at once, where a connected
-/// pair's payload changes seldom and lags its ears (#142). The lid, the
-/// connection state and the primary pod it does not carry, as far as is
-/// known.
+/// pair's payload changes seldom and lags its ears (#142). The lid and the
+/// connection state it does not carry, as far as is known.
+///
+/// Not the primary pod: each pod advertises as itself and calls itself
+/// primary (#71), so an advertisement's primary flag says only which pod
+/// sent it, and two from the two pods of a pair in one state differ in it.
+/// Taken into a snapshot, it broadcast one for a linked pair whenever the
+/// other pod was heard (#152). The link's own primary pod maps its ear
+/// reports, and is not shown.
 #[derive(Clone, Copy, PartialEq)]
 struct Live {
     left_in_ear: Option<bool>,
     right_in_ear: Option<bool>,
     lid_open: Option<bool>,
     connection_state: Option<u8>,
-    primary_pod: Option<PodSide>,
 }
 
 impl Live {
@@ -405,7 +404,6 @@ impl Live {
             right_in_ear: state.right_in_ear,
             lid_open: state.lid_open,
             connection_state: state.connection_state,
-            primary_pod: state.primary_pod,
         }
     }
 
@@ -414,7 +412,6 @@ impl Live {
         state.right_in_ear = self.right_in_ear;
         state.lid_open = self.lid_open;
         state.connection_state = self.connection_state;
-        state.primary_pod = self.primary_pod;
     }
 }
 
@@ -1016,7 +1013,6 @@ impl Coordinator {
             right_in_ear: Some(data.right_in_ear),
             lid_open: data.lid_open,
             connection_state: Some(data.connection_state),
-            primary_pod: Some(data.primary_pod()),
             // BLE carries no noise control mode; `snapshot` attaches the one
             // reported over AAP for the connected device.
             noise_mode: None,
@@ -1306,9 +1302,8 @@ impl Coordinator {
     ///
     /// A battery packet carries battery only. [`Inner::snapshot`] merges in
     /// the rest: the identity the link holds, the mode, in-ear from the link's
-    /// ear reports, and what the cached advertisement says about lid,
-    /// connection state and primary pod - and about ears, until the link has
-    /// reported them.
+    /// ear reports, and what the cached advertisement says about lid and
+    /// connection state - and about ears, until the link has reported them.
     async fn handle_battery_info(
         &self,
         info: aap::BatteryInfo,
@@ -1328,7 +1323,6 @@ impl Coordinator {
             right_in_ear: None,
             lid_open: None,
             connection_state: None,
-            primary_pod: None,
             noise_mode: None,
             identity: None,
             // AAP knows only the real address, and is always live.
@@ -2390,8 +2384,8 @@ mod tests {
     /// advertisement until the link has reported it, and then from the link
     /// (#142): a connected pair's payload changes seldom, so the icons lagged
     /// or missed changes. The link's in-ear goes with the link, not with the
-    /// advertisement's cache entry; the lid, connection state and primary pod
-    /// still come from that.
+    /// advertisement's cache entry; the lid and connection state still come
+    /// from that.
     #[tokio::test]
     async fn a_device_on_aap_shows_in_ear_from_its_link_once_reported() {
         let (coordinator, client, _dir) = linked();
@@ -2414,7 +2408,6 @@ mod tests {
             "the advertisement's, before the link has reported"
         );
         assert_eq!(state.connection_state, Some(0x05));
-        assert_eq!(state.primary_pod, Some(PodSide::Left));
 
         // The right pod primary and worn, the left out: not what the
         // advertisement said, nor its primary.
@@ -2429,11 +2422,7 @@ mod tests {
             (state.left_in_ear, state.right_in_ear),
             (Some(false), Some(true))
         );
-        assert_eq!(
-            state.primary_pod,
-            Some(PodSide::Left),
-            "the advertisement's still, as before #142"
-        );
+        assert_eq!(state.connection_state, Some(0x05), "the advertisement's");
 
         assert!(
             coordinator
@@ -2450,8 +2439,110 @@ mod tests {
             "the link's, which outlives the advertisement"
         );
         assert_eq!(state.connection_state, None);
-        assert_eq!(state.primary_pod, None);
         assert_eq!(state.identity, Some(PRO_3), "the link's, unlike these");
+    }
+
+    /// The address each pod of MAC's pair advertises from in
+    /// [`left_worn_right_in_case`].
+    fn pod_address(side: PodSide) -> Address {
+        match side {
+            PodSide::Left => BLE_MAC,
+            PodSide::Right => Address::new([0x6A, 0x15, 0x2E, 0x93, 0x07, 0xC4]),
+        }
+    }
+
+    /// What the pod on `side` of MAC's pair advertises with the left pod worn
+    /// and the right one in the open case, as in the #71 captures: each pod
+    /// calls itself primary, its battery first in the encrypted portion, and
+    /// the worn one has no lid to report, only status bit 4. Encrypted with
+    /// KEY here, and parsed as the scanner would.
+    fn left_worn_right_in_case(side: PodSide) -> ProximityData {
+        use crate::ble::decrypt::{Plaintext, ZEROED_SUFFIX, encrypt};
+        use crate::ble::parser::{Cleartext, parse_proximity_data, proximity_message};
+
+        let (left, right, case) = ((Some(70), false), (Some(90), true), Some(50));
+        let in_case = side == PodSide::Right;
+        let cleartext = Cleartext {
+            product_id: PRO_3.product_id,
+            primary: side,
+            this_in_case: in_case,
+            both_in_case: false,
+            one_in_case: true,
+            left_battery: left.0,
+            right_battery: right.0,
+            case_battery: case,
+            left_charging: left.1,
+            right_charging: right.1,
+            case_charging: false,
+            left_in_ear: true,
+            right_in_ear: false,
+            lid_open: in_case.then_some(true),
+            color: PRO_3.color,
+            connection_state: 0x04,
+        };
+        let (this, other) = match side {
+            PodSide::Left => (left, right),
+            PodSide::Right => (right, left),
+        };
+        let plaintext = Plaintext {
+            header: 0x04,
+            primary_battery: this.0,
+            primary_charging: this.1,
+            secondary_battery: other.0,
+            secondary_charging: other.1,
+            case_battery: case,
+            case_charging: false,
+            mac_suffix: ZEROED_SUFFIX,
+            tail: [u8::from(in_case); 4],
+        };
+        let encrypted = encrypt(&plaintext.to_bytes(), &KEY);
+        parse_proximity_data(&proximity_message(&cleartext.to_bytes(), &encrypted)).unwrap()
+    }
+
+    /// Regression (#152): each pod advertises as itself and calls itself
+    /// primary, so a snapshot that took the primary pod from the last
+    /// advertisement broadcast for a pair on AAP every time the other pod
+    /// was heard - with a pod in the case, at every payload change of either.
+    /// The two pods' advertisements of one state show the same, and only the
+    /// first is worth a broadcast.
+    #[tokio::test]
+    async fn the_other_pods_advertisement_of_the_same_state_is_not_broadcast() {
+        let (coordinator, client, _dir) = linked();
+        coordinator
+            .handle_battery_info(battery_packet(83), MAC, &client)
+            .await;
+        let mut rx = coordinator.subscribe();
+        rx.mark_unchanged();
+
+        coordinator
+            .handle_advertisement(
+                left_worn_right_in_case(PodSide::Right),
+                pod_address(PodSide::Right),
+            )
+            .await;
+        assert!(
+            rx.has_changed().unwrap(),
+            "the model, lid and ears are news"
+        );
+        rx.mark_unchanged();
+
+        for side in [PodSide::Left, PodSide::Right, PodSide::Left] {
+            coordinator
+                .handle_advertisement(left_worn_right_in_case(side), pod_address(side))
+                .await;
+            assert!(
+                !rx.has_changed().unwrap(),
+                "the {side:?} pod's advertisement shows nothing new"
+            );
+        }
+        let state = rx.borrow().states[&MAC].clone();
+        assert_eq!(state.source, DataSource::Aap);
+        assert_eq!(
+            (state.left_in_ear, state.right_in_ear),
+            (Some(true), Some(false))
+        );
+        assert_eq!(state.lid_open, Some(true), "the pod in the case's");
+        assert_eq!(state.connection_state, Some(0x04));
     }
 
     /// An ear report: the primary pod's place, then the secondary's.

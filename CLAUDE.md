@@ -228,9 +228,12 @@ advertisement: each pod calls itself primary in its own (#71), and a connected p
 payload changes seldom and lags its ears - 4 reached the app in 70 s (#142). At a role switch the `0x06` in the new order comes 1-31 ms before the
 `0x08`, and read with the old primary it swaps the pods; `EarState` holds such a report
 for the `0x08`, at most `ROLE_SWITCH_HOLD`. `Inner::snapshot` merges in the rest: model
-and color from the identity the link holds; lid, activity and primary pod from the cached
-advertisement. The noise control mode is kept on the link (`Link::noise_mode`), apart
-from the reading every battery packet replaces, and goes with the link like `Link::ear`.
+and color from the identity the link holds; lid and activity from the cached
+advertisement. A snapshot shows no primary pod: the advertisement's flag says only which
+pod was heard last, and for a pair on AAP every advertisement from the other pod broadcast
+a snapshot that differed in nothing else (#152). The noise control mode is kept on the
+link (`Link::noise_mode`), apart from the reading every battery packet replaces, and goes
+with the link like `Link::ear`.
 
 **Off needs sub-command 0x34 first.** Recent firmware refuses a bare `0x0D 01` with an
 error chime - confirmed on Pro 3 and Pro Gen 2, while the other three modes work
