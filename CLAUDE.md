@@ -29,7 +29,7 @@ src/
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
 ├── volume.rs      # The pair's volume lowered while the user speaks (MediaTransport1)
-├── ui/            # GTK4/libadwaita: window, Control page, Preferences, notifications, automation
+├── ui/            # GTK4/libadwaita: window, Control page, rename dialog, Preferences, notifications, automation
 ├── harness/       # Harness only: fake AirPods, fake BlueZ, the fake world
 └── bin/fakepods.rs # Harness only: the fake world's process, which `make fake-world` runs
 ```
@@ -291,6 +291,20 @@ switch to Transparency and back themselves, as ordinary mode reports, taken like
 other. The link's last level is in the snapshot (`PodState::speech_level`), and every
 level goes to the volume as an event.
 
+**Rename is fire and forget, and never touches BlueZ's alias.**
+`04 00 04 00 1A 00 01 [length] 00 [UTF-8 name]`, the length in bytes, renames the pods -
+the name they report to a host as it connects, in the device information packet (`0x1D`).
+Nothing answers it (a Pro 3, #160; `docs/aap-rename.md` has both runs): `Command::Rename`
+records the name on the link (`Link::name`) once the packet is away, and it goes with the
+link. The pods keep 127 bytes and cut a longer name silently, so a name that is empty,
+has a NUL or runs over 127 bytes is refused, never sent - by the dialog, by
+`Coordinator::command` before it queues, and by `aap::name` - and never cut by bytes
+before it is sent; the entry's `max-length` stops a text at 127 characters.
+`Device1.Alias` is never set or cleared (`docs/aap-rename.md` says why). `0x1D` is read
+only with `02` at byte 6 and `04 00` at bytes 9-10, and the rest of it holds serial
+numbers: only the name is read or logged, and `aap::keys::redacted_hex` cuts any `0x1D`
+to its preamble.
+
 **The volume lowered while the user speaks is the pair's own, through BlueZ.** The
 pair's A2DP transport's `org.bluez.MediaTransport1.Volume` (0-127, AVRCP absolute
 volume), never the default output, never PipeWire, never a volume in software: set by
@@ -374,7 +388,7 @@ deadlocked every command sent meanwhile.
 ## Patterns
 
 - Keep protocol parsing pure and tested. `aap::battery`, `aap::conversation`, `aap::ear`,
-  `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
+  `aap::keys`, `aap::name`, `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
   return values, and carry the bulk of the test suite; `noise::ModeState`,
   `ear::EarState`, `rpa::ResolvedAddresses`, `notify::Alerts` and `volume::Ducking` take
   the time as an argument for the same reason; `volume::a2dp_in` reads BlueZ's objects
@@ -394,8 +408,9 @@ deadlocked every command sent meanwhile.
   ones the coordinator later drops; `BLE decryptable:` reports identification. Noisy
   non-proximity Apple data goes to `trace`.
 - Bytes in logs and probe output go through `linuxpods::hex`, and a packet that may carry
-  keys through `aap::keys::redacted_hex`, which shows a key packet's preamble only. No
-  log, probe or example prints key bytes: their output gets pasted into issues.
+  keys or serial numbers through `aap::keys::redacted_hex`, which shows only the preamble
+  of a key packet or a device information packet (`0x1D`). No log, probe or example
+  prints key bytes or serial numbers: their output gets pasted into issues.
 - Log text describing control flow goes stale like comments, and is more visible.
 - Tasks on the system bus (`ble_task`, `attachment::run`) never return for good: they set
   themselves up again with `bluez::Backoff`, which counts a run under a minute as a
@@ -416,12 +431,16 @@ event, never a control's state, so the noise radios keep showing the recorded mo
 setting is not device state: its switch is bound to an app action and shows that action's
 state, as Battery notifications does with `app.battery-notifications`. Read
 a selection *before* mutating the widget - splicing a `StringList` makes `GtkDropDown`
-emit `selected-notify`, clobbering the user's choice. Noise Control and Conversation
-Awareness are commands, so they stay insensitive unless the device is on AAP - and the
-switch until the setting is reported, as a switch cannot show unknown; BLE is
-receive-only. A snapshot turns that switch under `ControlView::syncing_features`, so its
-`notify::active` does not send the setting back out, and a failed command draws the last
-snapshot again, which puts it back.
+emit `selected-notify`, clobbering the user's choice. Noise Control, Conversation
+Awareness and the Info group's Name row are commands, so they stay insensitive unless
+the device is on AAP - and the switch until the setting is reported, as a switch cannot
+show unknown, and the Name row until the pods' name is known; BLE is receive-only. A
+snapshot turns that switch under `ControlView::syncing_features`, so its `notify::active`
+does not send the setting back out, and a failed command draws the last snapshot again,
+which puts it back. The Name row shows the pods' own name where the link has it, else
+BlueZ's alias, as the switcher does, and the rename dialog starts from the pods' name,
+never the alias; it refuses what `aap::name` would, and the name the pods have, and a
+failed rename is a toast.
 Low battery notifications are worked out on the tokio side (`notify::Alerts`) and sent
 from the main context as `GNotification`s, one per pair. They warn once per crossing, never
 per snapshot - the worst band stands until the part charges or clears
@@ -460,4 +479,6 @@ A `Co-Authored-By:` trailer is fine.
   lowered on the levels through `MediaTransport1`
 - `docs/aap-ear-detection.md` - the ear report (0x06) and primary pod (0x08), the role
   switch
+- `docs/aap-rename.md` - the rename packet (0x1A), the name in the device information
+  packet (0x1D), the pods' name and BlueZ's alias, the hardware and name runs, 127 bytes
 - `docs/releasing.md` - release steps, what a release contains, verifying one

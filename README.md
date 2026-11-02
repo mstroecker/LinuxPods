@@ -58,7 +58,7 @@ own. This is the only channel that can *send* commands.
 | Key retrieval - IRK and encryption key - which identifies the pair over BLE | ✅ |
 | Noise control - Transparency, Adaptive, ANC, Off | ✅ |
 | Conversation Awareness | ✅ |
-| Device rename | 📋 |
+| Device rename - the pods' own name, which they report to a host as it connects | 🚧 |
 | Press-and-hold gesture configuration | 📋 |
 | Personalized and adaptive volume | 📋 |
 | Loud sound reduction | 📋 |
@@ -72,6 +72,13 @@ levels the pods send. Only while audio plays to the pair and no call is on, and 
 you change meanwhile is left as you set it. The switch, the lowering and the fade were
 checked on a Pro 3 (2026-11-02); a call, a volume changed while lowered, and the setting
 changed on a phone are still to be checked (#150).
+
+Device rename changes the name the pods give every host, from the Name row at the bottom
+of the window, up to 127 bytes. The packet is confirmed on a Pro 3 (#160); the window's
+rename is still to be checked on a pair. The pods take the name at once; this computer
+shows it once the pair connects again - unless you gave the pair a name in GNOME
+Settings, which stays - and Apple devices keep the name they have. See
+[`docs/aap-rename.md`](docs/aap-rename.md).
 
 ### Linux integration
 
@@ -288,7 +295,11 @@ nothing stored, to debug a request that fails; `noise_probe <MAC>` cycles
 the noise control modes and classifies every packet that comes back;
 `conversation_awareness <MAC>` logs the Conversation Awareness setting and every speech
 level and mode report with its time, optionally turning the setting on for the run, and
-with `--duck` lowers the volume on the levels as the app does; `apple_sniff` logs
+with `--duck` lowers the volume on the levels as the app does; `rename_probe <MAC>
+[NAME]` reads the pods' name and, given a new one, renames them and reads what comes
+back - a second session's name and BlueZ's - printing the name alone of the packet that
+carries it, as the rest holds serial numbers, and with `--sweep` tries names beyond
+ASCII and past the 127 bytes the pods keep; `apple_sniff` logs
 Apple manufacturer data as it arrives; `decrypt_probe` decrypts captured payloads
 offline and shows the plaintext of each the app's suffix rule accepts; `irk_probe <MAC>...` asks
 pairs for their keys, keeps them in memory, and reports per advertising address whether
@@ -300,7 +311,7 @@ src/
 ├── main.rs        # GTK main loop on the main thread, tokio runtime alongside it
 ├── lib.rs         # Library target, so the layers can be driven from tests
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
-├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control, Conversation Awareness
+├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control, Conversation Awareness, the pods' name
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
 ├── bluez.rs       # Adapters, the device watch, a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
@@ -309,7 +320,7 @@ src/
 ├── indicator.rs   # System tray (StatusNotifierItem)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
 ├── volume.rs      # The volume lowered while the user speaks, through BlueZ's MediaTransport1
-├── ui/            # GTK4/libadwaita: window, Control page, Preferences, notifications; automation.rs, harness only
+├── ui/            # GTK4/libadwaita: window, Control page, rename dialog, Preferences, notifications; automation.rs, harness only
 ├── harness/       # harness only: fake AirPods (pods.rs), fake BlueZ (bluez.rs), the world (world.rs)
 └── bin/           # harness only: fakepods.rs, the fake world make fake-world runs
 ```

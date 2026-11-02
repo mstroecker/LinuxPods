@@ -44,7 +44,9 @@ where the logs are. Only one world runs at a time.
 | `empty` | nothing; add pairs with `AddPods` |
 
 Each new pair starts with both pods in the open case: left 80%, right 70%, case 50%,
-Noise Cancellation, Conversation Awareness off. A scenario's pairs have their keys - IRK and ENC_KEY - saved in the
+Noise Cancellation, Conversation Awareness off, named as `AddPods` names it - a
+scenario's `AirPods Pro 3 (fake)` and `AirPods Pro 2 (fake)` - with no alias set. A
+scenario's pairs have their keys - IRK and ENC_KEY - saved in the
 app's keystore before it starts, as though each had connected once before. A pair added
 later with `AddPods` has no keys until it connects, so until then the app shows nothing of
 it.
@@ -75,13 +77,15 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 
 | Method | Does |
 |---|---|
-| `AddPods(s mac, q model, s alias)` | pairs new AirPods with the first adapter there is now, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C) |
+| `AddPods(s mac, q model, s name)` | pairs new AirPods with the first adapter there is now, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C); `name` is the pods' own, BlueZ's `Name`, and its `Alias` until one is set |
 | `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP right after BlueZ's `Connected=false`, as the hardware's AAP dies with the link. BlueZ signals `ServicesResolved=true` 4 s after `Connected=true`, and `false` just before `Connected=false`, as bluetoothd does; nothing in the app waits on it |
 | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case` |
 | `SetLid(s mac, b open)` | the case lid; closed on both pods in the case, the pods drop their link, as real ones do. Over BLE, a pod in the closed case stops advertising 4 s after it closes; opened, the pods come back under new addresses, the right one 1 s later and the left 5.5 s |
 | `Repair(s mac)` | new keys, sent at the next key request; the old IRK stops resolving the pair's addresses, and the old key stops decrypting BLE |
 | `HangUp(s mac)` | closes AAP from the pods' end; the link stays, and the app links the pair again after a second, longer after repeated hang-ups (#49) |
 | `SetConversationAwareness(s mac, b on)` | the setting, as from a phone: nothing reports it over AAP; the next connection's startup dump carries it |
+| `SetAlias(s mac, s alias)` | the pair's BlueZ alias, as GNOME Settings' rename sets it; `''` clears it, and the alias is the name again. The app reads names on the next connection event BlueZ confirms, so `Disconnect` and `Connect` after it |
+| `Name(s mac) → s` | the pods' own name: what a rename set at once, which the next AAP connection's startup dump (`0x1D`) carries, and BlueZ's `Name` from the next `Connect`, as bluetoothd reads it then. A rename over 127 bytes is cut there, as the hardware cuts it |
 | `Speak(s mac, u length_ms)` | the user speaks that long. With Conversation Awareness on, the pods send speech levels and switch to Transparency and back at the #150 run's times: level `01`, the mode in use reported 20 ms later, Transparency at 0.31 s, `02` at 0.82 s; at the end `03`, `07`, `08` within 0.1 s, the mode back at 0.46 s and `09` at 0.48 s. With it off, nothing. Fails without AAP, or while a stretch is under way |
 | `SetPlaying(s mac, b playing)` | audio to a connected pair starts or stops, as PipeWire's: its A2DP transport (`org.bluez.MediaTransport1` at `<device>/sep1/fd<n>`, a new `n` to the pair with each setup - bluetoothd numbers them from the count of all its transports instead) `active` at the pair's own volume, 64 at first; or `idle`. Fails unless connected |
 | `SetCall(s mac, b on)` | a call begins or ends: A2DP `idle`, as a call is assumed to leave it, and playing again after if it did |
@@ -111,7 +115,7 @@ scripts/fake-world.sh world RestartBluez
 | `SetPowered(s adapter, b powered)` | off: discovery there ends, the devices it only heard advertising go, its pairs disconnect (AAP with them) and cannot connect until it is on; providers stay. On again, the pairs stay disconnected until `Connect` |
 | `AddAdapter(s adapter, b powered)` | plugs one in at `/org/bluez/<adapter>`; one plugged in before is the same controller, its pairs back, disconnected |
 | `RemoveAdapter(s adapter)` | unplugs it: stopped as when off, then its devices, its battery providers and their batteries go |
-| `AddPodsOn(s adapter, s mac, q model, s alias)` | `AddPods`, with that adapter |
+| `AddPodsOn(s adapter, s mac, q model, s name)` | `AddPods`, with that adapter |
 | `RestartBluez()` | bluetoothd restarting without powering off, as after a crash: it comes back under a new unique name, `org.bluez` changes hands twice, and every client's discovery and battery providers are forgotten; adapters and connections stay. For a `systemctl restart`, which powers off first: `SetPowered` false, `RestartBluez`, `SetPowered` true |
 
 `RestartBluez` is a crash, and a narrow one: only `NameOwnerChanged` tells, and nothing is
@@ -132,6 +136,7 @@ scripts/fake-world.sh app Settle 10000
 scripts/fake-world.sh tree | jq '.. | objects | select(.id? == "battery-left") | .label'
 scripts/fake-world.sh app SetActive noise-off true
 scripts/fake-world.sh app Select device-dropdown 1
+scripts/fake-world.sh app SetText rename-entry 'Test Pods'   # as typed or pasted
 scripts/fake-world.sh app Screenshot main-window    # prints the PNG's path: Read it
 scripts/fake-world.sh app Notifications             # every notification sent and withdrawn, as JSON
 ```
@@ -141,6 +146,20 @@ scripts/fake-world.sh app Notifications             # every notification sent an
 where a user's click would fail, so Noise Control refuses presses while the device is
 on BLE, and so does the `conversation-awareness` switch, until the startup dump has
 reported the setting too.
+
+Renaming (#160), with the pair on AAP and its name reported - the `rename` row is
+insensitive until the startup dump's `0x1D` has come: `app Click rename` opens the
+dialog, `app SetText rename-entry 'Test Pods'` types the name, and `app Click
+rename-entry` presses Enter in it, which renames; the dialog's Cancel and Rename are
+buttons labeled `_Cancel` and `_Rename`, clicked by path. `_Rename` is insensitive for
+an empty name and for the name the pods have. The `device-name` label shows the new name
+at once, `world Name` the pods', and `world Received` the `0x1a` packet. Over 127 bytes
+needs fewer than 128 characters beyond ASCII - `’` × 43, say: the entry has the `error`
+class in the tree, `rename-error` is visible and `_Rename` insensitive, and Enter does
+nothing. ASCII stops at 127 characters, which `max-length` cuts a longer `SetText` to,
+and so is never over. The dialog's body changes once an alias is set: `world SetAlias
+... Kitchen`, then `Disconnect` and `Connect`. A rename sent just after `world HangUp`
+fails, and the `toasts` overlay holds `Couldn’t rename the AirPods`.
 
 Conversation Awareness: `app SetActive conversation-awareness true` turns it on (`world
 Received` shows `0x28 01` sent); then `world Speak 00:00:5E:00:53:01 4000`, and the
