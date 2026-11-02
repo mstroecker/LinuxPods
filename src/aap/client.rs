@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use tokio_seqpacket::UnixSeqpacket;
 use tracing::Instrument;
 
-use crate::aap::{battery, keys, noise};
+use crate::aap::{battery, conversation, keys, noise};
 
 /// L2CAP Protocol/Service Multiplexer for AAP.
 pub(crate) const AAP_PSM: u16 = 0x1001; // 4097
@@ -362,9 +362,9 @@ impl Client {
     /// Switches the noise control mode.
     ///
     /// Fire and forget: no answer confirms it on every model. AirPods 4 sent
-    /// a generic settings-changed notification that names neither the
-    /// sub-command nor the mode, and the 0x0D echo carrying the new mode only
-    /// sometimes; AirPods Pro 3 echo every change, but about a second later.
+    /// the 0x0D echo carrying the new mode only sometimes; AirPods Pro 3 echo
+    /// every change, but about a second later. With Conversation Awareness
+    /// on, its levels 08 and 09 come around the change, naming no mode.
     /// There is nothing here to wait for - the caller updates its own state
     /// optimistically.
     /// `enable_special_features` must have been sent first, or Adaptive is
@@ -385,6 +385,17 @@ impl Client {
             "allow off listening mode",
         )
         .await
+    }
+
+    /// Turns Conversation Awareness on or off.
+    ///
+    /// The packet is LibrePods': whether the pods take it is still to be
+    /// checked (#150). Fire and forget, as the mode is: the pods are not
+    /// known to report the setting again once changed, so the caller records
+    /// it itself.
+    pub async fn set_conversation_awareness(&self, enabled: bool) -> Result<()> {
+        self.send_packet(&conversation::set_packet(enabled), "Conversation Awareness")
+            .await
     }
 
     /// Sends a packet, verifying the whole thing was written.

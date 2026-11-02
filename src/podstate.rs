@@ -95,14 +95,26 @@ impl std::fmt::Display for DataSource {
 pub enum Command {
     /// Switches the noise control mode, and records it.
     NoiseControl(aap::NoiseMode),
+    /// Turns Conversation Awareness on or off, and records it.
+    ConversationAwareness(bool),
 }
 
 impl std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoiseControl(mode) => write!(f, "switch to {mode}"),
+            Self::ConversationAwareness(enabled) => write!(
+                f,
+                "switch of Conversation Awareness {}",
+                if *enabled { "on" } else { "off" }
+            ),
         }
     }
+}
+
+/// How a setting's state reads in a log.
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
 }
 
 /// A command in a link's queue, and where its result goes.
@@ -220,6 +232,19 @@ pub struct PodState {
     /// mode as selected in the interface.
     pub noise_mode: Option<aap::NoiseMode>,
 
+    /// Whether Conversation Awareness is on. `None` until the connected
+    /// device reports it in its startup dump, and without a link: only AAP
+    /// carries it. A change made here is recorded at once; one made on
+    /// another device may never be reported, as far as is known.
+    pub conversation_awareness: Option<bool>,
+
+    /// The last speech level the link brought - see
+    /// [`aap::conversation::Speech`] - while Conversation Awareness is on:
+    /// what the media's volume should be as the user speaks or has just
+    /// stopped. `None` until one comes, and without a link. A level is a
+    /// target, so a consumer that skips one in between misses nothing.
+    pub speech_level: Option<u8>,
+
     /// `None` until an advertisement has identified the device. For one on
     /// AAP it is the link's, which outlives the cached advertisement.
     pub identity: Option<Identity>,
@@ -250,6 +275,8 @@ impl PodState {
             lid_open: None,
             connection_state: None,
             noise_mode: None,
+            conversation_awareness: None,
+            speech_level: None,
             identity: None,
             current_ble_mac: None,
             last_seen: None,
@@ -362,6 +389,13 @@ struct Link {
     /// session would show as selected after a reconnect, though it may have
     /// been changed from a phone meanwhile.
     noise_mode: ModeState,
+    /// Whether Conversation Awareness is on: `None` until the startup dump
+    /// reports it or a command sets it. Kept apart from the reading like the
+    /// mode, and goes with the link like it.
+    conversation_awareness: Option<bool>,
+    /// The last speech level: `None` until one comes. Kept apart from the
+    /// reading like the mode, and goes with the link like it.
+    speech_level: Option<u8>,
     /// Which pod is in an ear, as the device's ear reports and primary pod
     /// packets tell it. Kept apart from the reading like the mode, and goes
     /// with the link like it: after a disconnect the cached advertisement
@@ -482,6 +516,8 @@ impl Inner {
     fn linked_state(&self, mac: Address, link: &Link) -> Option<PodState> {
         let mut state = link.reading.clone()?;
         state.noise_mode = link.noise_mode.mode();
+        state.conversation_awareness = link.conversation_awareness;
+        state.speech_level = link.speech_level;
         // Merged here rather than copied into each battery packet: a
         // reading that arrived before the first advertisement kept a blank
         // model until the next packet, which over AAP comes only when a
@@ -1014,8 +1050,11 @@ impl Coordinator {
             lid_open: data.lid_open,
             connection_state: Some(data.connection_state),
             // BLE carries no noise control mode; `snapshot` attaches the one
-            // reported over AAP for the connected device.
+            // reported over AAP for the connected device. Nor Conversation
+            // Awareness, nor its levels.
             noise_mode: None,
+            conversation_awareness: None,
+            speech_level: None,
             identity: Some(identity),
             current_ble_mac: Some(ble_mac),
             // Stamped from the entry in `snapshot`.
@@ -1133,6 +1172,8 @@ impl Coordinator {
                     reading: None,
                     // Reported by the startup dump, once the read loop is up.
                     noise_mode: ModeState::default(),
+                    conversation_awareness: None,
+                    speech_level: None,
                     // Reported as the link comes up, waiting in the socket.
                     ear: EarState::with_hold(self.role_switch_hold),
                     identity,
@@ -1292,11 +1333,16 @@ impl Coordinator {
                     }
                     Err(e) => tracing::warn!("AAP key packet rejected: {e}"),
                 },
-                Ok(
-                    Message::ConversationAwareness(_)
-                    | Message::SpeechLevel(_)
-                    | Message::Unknown { .. },
-                ) => {}
+                // The startup dump's, or a change made elsewhere, should the
+                // pods report one.
+                Ok(Message::ConversationAwareness(enabled)) => {
+                    self.handle_conversation_awareness(enabled, mac_addr, client)
+                        .await;
+                }
+                Ok(Message::SpeechLevel(level)) => {
+                    self.handle_speech_level(level, mac_addr, client).await;
+                }
+                Ok(Message::Unknown { .. }) => {}
                 Err(e) => tracing::warn!("AAP {e}"),
             }
         }
@@ -1328,6 +1374,8 @@ impl Coordinator {
             lid_open: None,
             connection_state: None,
             noise_mode: None,
+            conversation_awareness: None,
+            speech_level: None,
             identity: None,
             // AAP knows only the real address, and is always live.
             current_ble_mac: None,
@@ -1460,6 +1508,51 @@ impl Coordinator {
         tracing::info!("Noise control mode reported by {mac_addr}: {mode}");
     }
 
+    /// Records whether Conversation Awareness is on, as the device reported
+    /// it on `client`'s link, and broadcasts if that changed it. The startup
+    /// dump reports it; whether a change made on another device is reported
+    /// is not known.
+    async fn handle_conversation_awareness(
+        &self,
+        enabled: bool,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+    ) {
+        {
+            let mut inner = self.inner.write().await;
+            // A packet read just before a disconnect must not land on a
+            // newer link.
+            let Some(link) = inner.live_link(mac_addr, client) else {
+                return;
+            };
+            if link.conversation_awareness.replace(enabled) == Some(enabled) {
+                return;
+            }
+            self.broadcast(&inner);
+        }
+        tracing::info!(
+            "Conversation Awareness reported by {mac_addr}: {}",
+            on_off(enabled)
+        );
+    }
+
+    /// Records a speech level from `client`'s link, and broadcasts if it is
+    /// another than the last. Nothing acts on it yet: lowering the media's
+    /// volume while the user speaks is to come (#150).
+    async fn handle_speech_level(&self, level: u8, mac_addr: Address, client: &Arc<aap::Client>) {
+        tracing::debug!(
+            "AAP speech level {}",
+            aap::conversation::describe_level(level)
+        );
+        let mut inner = self.inner.write().await;
+        let Some(link) = inner.live_link(mac_addr, client) else {
+            return;
+        };
+        if link.speech_level.replace(level) != Some(level) {
+            self.broadcast(&inner);
+        }
+    }
+
     /// Sends a command to one device, over its AAP link, and resolves to how
     /// it went: every command goes this way, the window's and the tray's, and
     /// every caller hears whether it was done (#54).
@@ -1536,6 +1629,10 @@ impl Coordinator {
     ) -> Result<()> {
         match command {
             Command::NoiseControl(mode) => self.set_noise_control(mac_addr, client, mode).await,
+            Command::ConversationAwareness(enabled) => {
+                self.set_conversation_awareness(mac_addr, client, enabled)
+                    .await
+            }
         }
     }
 
@@ -1579,6 +1676,39 @@ impl Coordinator {
         // that dropped and came back meanwhile is a new session, and the
         // device reports its mode there itself.
         if inner.record_noise_mode(mac_addr, client, mode) {
+            self.broadcast(&inner);
+        }
+        Ok(())
+    }
+
+    /// Turns one connected device's Conversation Awareness on or off, with
+    /// LibrePods' packet, which has not yet been sent to a pair from here
+    /// (#150).
+    ///
+    /// Recorded once the packet is away, as the mode is: the pods are not
+    /// known to report the setting again when it changes - LibrePods says
+    /// they do not - so nothing would ever confirm it. Should one come, it
+    /// is taken as any report is. A change made on another device meanwhile
+    /// may never be reported, and the setting on show can drift from the
+    /// pods' until the next connection's startup dump; that is accepted.
+    async fn set_conversation_awareness(
+        &self,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+        enabled: bool,
+    ) -> Result<()> {
+        client.set_conversation_awareness(enabled).await?;
+        tracing::info!(
+            "Conversation Awareness of {mac_addr} turned {}",
+            on_off(enabled)
+        );
+
+        let mut inner = self.inner.write().await;
+        // On the link the command went out on, and only while it lasts.
+        let Some(link) = inner.live_link(mac_addr, client) else {
+            return Ok(());
+        };
+        if link.conversation_awareness.replace(enabled) != Some(enabled) {
             self.broadcast(&inner);
         }
         Ok(())
@@ -1692,6 +1822,8 @@ mod tests {
             client: Arc::new(aap::Client::new(Address::any())),
             reading,
             noise_mode: ModeState::default(),
+            conversation_awareness: None,
+            speech_level: None,
             ear: EarState::default(),
             identity: None,
             since: Instant::now(),
@@ -2187,6 +2319,77 @@ mod tests {
             coordinator.inner.read().await.snapshot().states[&AA].noise_mode,
             None
         );
+    }
+
+    /// Conversation Awareness and the speech level are the link's, as the
+    /// mode is: shown for the device on AAP once reported, kept across
+    /// battery packets, and gone with the link - and a stale read loop's
+    /// report lands nowhere.
+    #[tokio::test]
+    async fn conversation_awareness_and_the_level_go_with_the_link() {
+        let mut inner = inner_with(vec![(BB, Duration::from_secs(1))]);
+        inner.links.insert(AA, link(Some(aap_state(80))));
+        let (coordinator, _dir) = coordinator_with(inner);
+        let client = client_of(&coordinator, AA).await;
+        let shown = |coordinator: &Coordinator, mac| {
+            let snapshot = coordinator.subscribe().borrow().clone();
+            let state = &snapshot.states[&mac];
+            (state.conversation_awareness, state.speech_level)
+        };
+        assert_eq!(shown(&coordinator, AA), (None, None));
+
+        coordinator
+            .handle_conversation_awareness(true, AA, &client)
+            .await;
+        coordinator.handle_speech_level(0x09, AA, &client).await;
+        assert_eq!(shown(&coordinator, AA), (Some(true), Some(0x09)));
+        assert_eq!(shown(&coordinator, BB), (None, None), "BLE carries neither");
+        coordinator
+            .handle_battery_info(aap::BatteryInfo::default(), AA, &client)
+            .await;
+        assert_eq!(shown(&coordinator, AA), (Some(true), Some(0x09)));
+
+        let stale = link(None).client;
+        coordinator
+            .handle_conversation_awareness(false, AA, &stale)
+            .await;
+        coordinator.handle_speech_level(0x01, AA, &stale).await;
+        assert_eq!(shown(&coordinator, AA), (Some(true), Some(0x09)));
+
+        assert!(coordinator.drop_link(AA, Some(&client)).await);
+        coordinator
+            .inner
+            .write()
+            .await
+            .links
+            .insert(AA, link(Some(aap_state(80))));
+        let snapshot = coordinator.inner.read().await.snapshot();
+        assert_eq!(snapshot.states[&AA].conversation_awareness, None);
+        assert_eq!(snapshot.states[&AA].speech_level, None);
+    }
+
+    /// A level, or a setting, the same as the last is not worth waking the
+    /// window, tray, attachment and notifier for.
+    #[tokio::test]
+    async fn an_unchanged_level_or_setting_is_not_broadcast() {
+        let mut inner = inner_with(vec![]);
+        inner.links.insert(AA, link(Some(aap_state(80))));
+        let (coordinator, _dir) = coordinator_with(inner);
+        let client = client_of(&coordinator, AA).await;
+        coordinator.handle_speech_level(0x09, AA, &client).await;
+        coordinator
+            .handle_conversation_awareness(true, AA, &client)
+            .await;
+        let mut updates = coordinator.subscribe();
+        updates.borrow_and_update();
+
+        coordinator.handle_speech_level(0x09, AA, &client).await;
+        coordinator
+            .handle_conversation_awareness(true, AA, &client)
+            .await;
+        assert!(!updates.has_changed().unwrap());
+        coordinator.handle_speech_level(0x01, AA, &client).await;
+        assert!(updates.has_changed().unwrap());
     }
 
     /// A report of the mode a command just replaced neither puts it back on
@@ -3095,6 +3298,12 @@ mod tests {
             format!("{:#}", failed.unwrap_err()),
             "switch to Off not sent: no AAP connection to AA:AA:AA:AA:AA:AA"
         );
+        let on = Command::ConversationAwareness(true);
+        let failed = coordinator.command(AA, on).await;
+        assert_eq!(
+            format!("{:#}", failed.unwrap_err()),
+            "switch of Conversation Awareness on not sent: no AAP connection to AA:AA:AA:AA:AA:AA"
+        );
     }
 
     #[test]
@@ -3473,6 +3682,33 @@ mod tests {
                 .states[&MAC]
                 .clone();
             assert_eq!(state.noise_mode, None, "the mode of a command not sent");
+            drop(fake);
+            timeout(TIMEOUT, run).await.unwrap().unwrap();
+        }
+
+        /// Conversation Awareness goes out as the 0x28 setting, and is
+        /// recorded once it is away: nothing the pods send confirms it.
+        #[tokio::test]
+        async fn conversation_awareness_goes_out_and_is_recorded() {
+            let (coordinator, link, fake, _dir) = opened().await;
+            let run = tokio::spawn(link.run());
+            fake.send(&BATTERY).await.unwrap();
+            let mut rx = coordinator.subscribe();
+            timeout(TIMEOUT, rx.wait_for(|s| s.states.contains_key(&MAC)))
+                .await
+                .unwrap()
+                .unwrap();
+
+            for enabled in [true, false] {
+                let command = Command::ConversationAwareness(enabled);
+                timeout(TIMEOUT, coordinator.command(MAC, command))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(recv(&fake).await, aap::conversation::set_packet(enabled));
+                let shown = rx.borrow_and_update().states[&MAC].conversation_awareness;
+                assert_eq!(shown, Some(enabled));
+            }
             drop(fake);
             timeout(TIMEOUT, run).await.unwrap().unwrap();
         }
