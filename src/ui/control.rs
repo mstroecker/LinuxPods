@@ -1,13 +1,13 @@
 //! The Control page: battery display, status text, device switcher, Noise
 //! Control and Features.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use adw::prelude::*;
 use bluer::Address;
 use gtk::{gio, glib};
 
-use super::{RESOURCE_PREFIX, last_seen_text, unavailable_row};
+use super::{RESOURCE_PREFIX, last_seen_text};
 use crate::aap::NoiseMode;
 use crate::ble::{decode_color, decode_connection_state};
 use crate::podstate::{DataSource, PodState, Snapshot};
@@ -98,6 +98,16 @@ pub struct ControlView {
     /// `win.noise-mode`, enabled only while the device shown is on AAP. The Noise
     /// Control group's sensitivity is bound to it.
     pub noise_action: gio::SimpleAction,
+    /// The Features group's Conversation Awareness switch. It shows the
+    /// setting as the snapshot has it; turned by the user, it sends the
+    /// command - see `window::activate`.
+    pub conversation_awareness: gtk::Switch,
+    /// Its row, sensitive only while the device shown is on AAP and has
+    /// reported the setting.
+    pub conversation_row: adw::ActionRow,
+    /// Set while a snapshot turns the switch, whose `notify::active` would
+    /// otherwise send the snapshot's setting back out as a command.
+    pub syncing_features: Cell<bool>,
 }
 
 /// The Control page. An `AdwPreferencesPage` for its scrolling, width clamp and
@@ -276,14 +286,23 @@ pub(super) fn create_control_view() -> ControlView {
     }
     page.add(&noise_control_group);
 
-    // Features. The command behind Conversation Awareness is still unknown, so
-    // its row stays grayed out whatever the connection: on AAP, a live switch
-    // would claim a setting the AirPods never received.
+    // Features. Conversation Awareness is a setting of the AirPods', changed
+    // by a command like the noise mode. The switch stays off and insensitive
+    // until the device on AAP has reported it: a switch cannot show
+    // "unknown", and off would claim a setting the AirPods may not have.
     let features_group = adw::PreferencesGroup::builder().title("Features").build();
-    features_group.add(&unavailable_row(
-        "conversation-awareness",
-        "Conversation Awareness",
-    ));
+    let conversation_awareness = gtk::Switch::builder()
+        .name("conversation-awareness")
+        .valign(gtk::Align::Center)
+        .build();
+    let conversation_row = adw::ActionRow::builder()
+        .title("Conversation Awareness")
+        .subtitle("Switch to Transparency while you speak")
+        .activatable_widget(&conversation_awareness)
+        .sensitive(false)
+        .build();
+    conversation_row.add_suffix(&conversation_awareness);
+    features_group.add(&conversation_row);
     page.add(&features_group);
 
     let content = gtk::Stack::builder().name("content").build();
@@ -298,6 +317,9 @@ pub(super) fn create_control_view() -> ControlView {
         device_macs: RefCell::new(Vec::new()),
         device_labels: RefCell::new(Vec::new()),
         noise_action,
+        conversation_awareness,
+        conversation_row,
+        syncing_features: Cell::default(),
     }
 }
 
@@ -393,7 +415,8 @@ pub(super) fn choose_device(current: Option<Address>, snapshot: &Snapshot) -> Op
         .or_else(|| snapshot.default_device())
 }
 
-/// Draws one device, and gates noise control on how the data arrived.
+/// Draws one device, and gates noise control and the features on how the
+/// data arrived.
 pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<Address>) {
     let state = mac.and_then(|m| snapshot.states.get(&m));
     let connected = mac.is_some_and(|m| snapshot.is_connected(m));
@@ -406,6 +429,7 @@ pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option
             let interactive = state.source == DataSource::Aap;
             view.noise_action.set_enabled(interactive);
             show_noise_mode(view, state.noise_mode);
+            show_conversation_awareness(view, state.conversation_awareness.filter(|_| interactive));
         }
         // Listed device, nothing heard from it yet: show it as empty rather than
         // hiding it, so the switcher and the display agree. Distinguish a device
@@ -420,7 +444,27 @@ pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option
             clear_battery_display(&view.battery, status);
             view.noise_action.set_enabled(false);
             show_noise_mode(view, None);
+            show_conversation_awareness(view, None);
         }
+    }
+}
+
+/// Shows Conversation Awareness as `enabled` says, the switch sensitive, or
+/// off and insensitive while it is unknown or the device is not on AAP.
+/// Turned here, the switch sends nothing: `syncing_features` tells its
+/// handler so.
+///
+/// Only turned when it shows otherwise: `gtk_switch_set_active` ends a
+/// toggle animation under way, and a click on the switch takes effect only
+/// as its animation ends. Set on every render - and speech levels bring
+/// renders in bursts - a click could be cut short there, sending nothing.
+fn show_conversation_awareness(view: &ControlView, enabled: Option<bool>) {
+    view.conversation_row.set_sensitive(enabled.is_some());
+    let active = enabled.unwrap_or(false);
+    if view.conversation_awareness.is_active() != active {
+        view.syncing_features.set(true);
+        view.conversation_awareness.set_active(active);
+        view.syncing_features.set(false);
     }
 }
 
