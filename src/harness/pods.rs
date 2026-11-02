@@ -64,16 +64,6 @@ pub const RIGHT_RESUMES: Duration = Duration::from_secs(1);
 /// The same for the left pod: 5.4-5.6 s in the #71 captures. The real value.
 pub const LEFT_RESUMES: Duration = Duration::from_millis(5500);
 
-/// How long a pod advertises the same payload when nothing changes. Real
-/// AirPods repeat a payload for hundreds of advertisements - about 5 a second
-/// from each pod, with bursts of 30-35 a second after the lid opens or the
-/// pods go back in the case - and change it when something happens: a
-/// battery, charging, an ear, the case, the lid, a connection. Otherwise they
-/// change it every 20-30 s (#71). The fake's payload changes as its state
-/// does, and otherwise every 25 s, the left pod's half a refresh off the
-/// right's.
-pub const PAYLOAD_REFRESH: Duration = Duration::from_secs(25);
-
 /// How long a pair with the silent quirk holds a connection before hanging up,
 /// as the one time it was seen.
 pub const SILENT_HANG_UP: Duration = Duration::from_secs(9);
@@ -362,7 +352,10 @@ pub enum Part {
 ///   [`Quirks::dump_delay`], none or short where the hardware takes a second
 ///   or more;
 /// - the closed case, which [`Pods::poll`] reports the moment the lid
-///   closes, where the hardware took about 4.5 s.
+///   closes, where the hardware took about 4.5 s;
+/// - the payload, which changes only with the state, where real pods change
+///   it again about 5 s, 30 s and 60 s after an event, and once about 2 s
+///   after discovery starts - see [`Pods::advertisement`].
 ///
 /// AirPods 4 answered a mode change otherwise (`docs/aap-noise-control.md`):
 /// a 0x4B on every change, an echo on about one in four, and no report of the
@@ -882,9 +875,24 @@ impl Pods {
     /// The cleartext gives the batteries in 10% steps. The encrypted portion,
     /// under the pair's ENC_KEY, gives them exact, with the real address's
     /// last three bytes in bytes 7-9 - zeroed unless both pods are in the
-    /// case, status bit 2, connected or not (#71) - and a tail that changes
-    /// every [`PAYLOAD_REFRESH`]. Its byte 0 is cleartext byte 8, the
-    /// connection state, as in all 111 payloads of the second capture.
+    /// case, status bit 2, connected or not (#71) - and a tail, bytes 12-15,
+    /// that follows from the rest of the payload, as a MIC would. Its byte 0
+    /// is cleartext byte 8, the connection state, as in all 111 payloads of
+    /// the second capture.
+    ///
+    /// So the payload is the state's, and changes as the state does and only
+    /// then: a battery, charging, an ear, the case, the lid, a connection.
+    /// Real AirPods repeat a payload for hundreds of advertisements - about 5
+    /// a second from each pod - and change it when something happens. In the
+    /// #71 captures and the hardware checks since, with the pods worn and
+    /// connected to this host or to nothing, it changed again about 5 s, 30 s
+    /// and 60 s after such a change with nothing else changing, and then
+    /// stayed - 163 s in the longest stretch. Those gaps of 25 and 30 s are
+    /// most likely the 20-30 s refresh once recorded here. On 2026-11-02 a
+    /// pair idle in the open case, connected to a phone, sent the same
+    /// payload for minutes (#153). The fake leaves out the three changes
+    /// after an event, which carry nothing new to read: the app reads the
+    /// state, and the state is the same.
     ///
     /// A pod out of the case while the other is in the closed case cannot
     /// reach the case, and sends its level as unknown, as the worn pod did in
@@ -929,8 +937,7 @@ impl Pods {
         } else {
             ZEROED_SUFFIX
         };
-        let tail = self.derive(b'T', side, period(side, now, PAYLOAD_REFRESH));
-        let plaintext = Plaintext {
+        let mut plaintext = Plaintext {
             header: connection_state,
             primary_battery: this.battery,
             primary_charging: this.charging,
@@ -939,14 +946,31 @@ impl Pods {
             case_battery,
             case_charging: self.case_charging,
             mac_suffix,
-            tail: [tail[0], tail[1], tail[2], tail[3]],
+            tail: [0; 4],
         };
+        let cleartext = cleartext.to_bytes();
+        plaintext.tail = self.tail(side, &cleartext, &plaintext.to_bytes());
         let encrypted = encrypt(&plaintext.to_bytes(), &self.keys.enc_key);
 
         Advertisement {
             address: self.address_at(side, now),
-            data: proximity_message(&cleartext.to_bytes(), &encrypted),
+            data: proximity_message(&cleartext, &encrypted),
         }
+    }
+
+    /// Bytes 12-15 of the plaintext the pod on `side` sends with `cleartext`,
+    /// `head` the plaintext without them. On the hardware they change
+    /// whenever the payload does, and may be a MIC (#71); here they follow
+    /// from the rest of the payload, as a MIC would, so they change with it
+    /// and only with it.
+    fn tail(&self, side: PodSide, cleartext: &[u8], head: &[u8; 16]) -> [u8; 4] {
+        let mut block = encrypt(head, &self.keys.irk);
+        for (byte, clear) in block.iter_mut().zip(cleartext) {
+            *byte ^= clear;
+        }
+        block[15] ^= u8::from(side == PodSide::Right);
+        let mac = encrypt(&block, &self.keys.irk);
+        [mac[0], mac[1], mac[2], mac[3]]
     }
 
     /// The random address the pod on `side` advertises from at `now`. It
@@ -1207,9 +1231,8 @@ impl Pods {
     }
 
     /// Sixteen bytes that look random but follow from the IRK, a purpose, a
-    /// pod and a number, so the rotating addresses and the advertisements'
-    /// changing tails are a function of state and time like everything else
-    /// here.
+    /// pod and a number, so the rotating addresses are a function of state
+    /// and time like everything else here.
     fn derive(&self, purpose: u8, side: PodSide, n: u64) -> [u8; 16] {
         let mut block = [0u8; 16];
         block[0] = purpose;
@@ -1795,36 +1818,42 @@ mod tests {
         assert_ne!(others, right, "every pair has its own");
     }
 
-    /// A pod repeats its payload until something changes, or until
-    /// [`PAYLOAD_REFRESH`] brings a new tail - bytes 12-15 of the plaintext,
-    /// and the ciphertext with them. The left pod refreshes half a refresh
-    /// off the right.
+    /// A pod repeats its payload for as long as nothing changes - for
+    /// minutes, as a pair idle in the open case did on 2026-11-02 (#153) -
+    /// whatever address it sends it from. A change of state changes it at
+    /// once, and the tail - bytes 12-15 of the plaintext - with it, even a
+    /// change only the cleartext carries.
     #[test]
-    fn the_payload_changes_with_the_state_or_its_refresh() {
+    fn the_payload_changes_with_the_state_and_only_then() {
         let mut pods = Pods::new(PRO_3, MAC);
         let data = |pods: &Pods, side, now| pods.advertisement(side, now).data;
+        let later = Duration::from_secs(600);
+        assert_ne!(
+            pods.address_at(PodSide::Right, later),
+            pods.address_at(PodSide::Right, ms(0)),
+            "rotated meanwhile"
+        );
         let first = data(&pods, PodSide::Right, ms(0));
-        let repeated = data(&pods, PodSide::Right, PAYLOAD_REFRESH - ms(1));
-        assert_eq!(repeated, first);
-        assert_ne!(data(&pods, PodSide::Right, PAYLOAD_REFRESH), first);
-        let tail_only = |a: [u8; 16], b: [u8; 16]| a[..12] == b[..12] && a[12..] != b[12..];
-        assert!(tail_only(
-            plaintext(&pods, PodSide::Right, ms(0)),
-            plaintext(&pods, PodSide::Right, PAYLOAD_REFRESH)
-        ));
-
-        let half = PAYLOAD_REFRESH / 2;
+        assert_eq!(data(&pods, PodSide::Right, later), first);
         let left = data(&pods, PodSide::Left, ms(0));
         assert_ne!(left, first, "a payload each");
-        assert_eq!(data(&pods, PodSide::Left, half - ms(1)), left);
-        assert_ne!(data(&pods, PodSide::Left, half), left);
+        assert_eq!(data(&pods, PodSide::Left, later), left);
 
+        let tail = |pods: &Pods| plaintext(pods, PodSide::Right, later)[12..].to_vec();
+        let before = tail(&pods);
         pods.set_battery(Part::Case, Some(49));
         assert_ne!(
-            data(&pods, PodSide::Right, ms(0)),
+            data(&pods, PodSide::Right, later),
             first,
             "a change at once"
         );
+        assert_ne!(tail(&pods), before, "the tail with it");
+
+        let before = (plaintext(&pods, PodSide::Right, later), tail(&pods));
+        pods.set_lid(false);
+        let after = plaintext(&pods, PodSide::Right, later);
+        assert_eq!(after[..12], before.0[..12], "the lid is in the clear");
+        assert_ne!(tail(&pods), before.1, "the tail all the same");
     }
 
     #[test]
