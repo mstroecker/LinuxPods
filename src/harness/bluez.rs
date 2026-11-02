@@ -81,6 +81,17 @@
 //! - An address not heard for [`TEMPORARY_TIMEOUT`] goes with
 //!   `InterfacesRemoved`: 29.8-30.7 s after its last advertisement in the
 //!   captures, and an address heard again after that is announced afresh.
+//! - Once no client discovers on an adapter any more, the devices it heard
+//!   lose their `RSSI`, signaled as invalidated, as bluetoothd's
+//!   `discovery_cleanup` (`src/adapter.c`) does it, while each keeps its
+//!   `ManufacturerData` and stays for [`TEMPORARY_TIMEOUT`] after it was last
+//!   heard: bluetoothd removes a device it only heard at once only if its
+//!   advertisements were not connectable, and the pods' proximity pairing
+//!   advertisements are mostly `ADV_IND` in the captures. A client starting
+//!   discovery again finds them in `GetManagedObjects` that way, with no
+//!   `InterfacesAdded`; the next advertisement from one brings its `RSSI`
+//!   back, signaled as bluetoothd signals a strength that was invalidated,
+//!   and its data only if that changed (#153).
 //!
 //! An adapter hears advertisements only while some client has discovery on
 //! there, as it hears them only while it scans. Every adapter that does hears
@@ -148,8 +159,8 @@ const PAIR_UUIDS: [&str; 6] = [
     AIRPODS_UUID,
 ];
 
-/// The signal strength every advertisement arrives at. Nothing reads it, but
-/// every advertisement signals it.
+/// The signal strength every advertisement arrives at. Every advertisement
+/// signals it; the scanner reads only whether a device has one.
 const RSSI: i16 = -60;
 
 const DEVICE_INTERFACE: &str = "org.bluez.Device1";
@@ -1048,6 +1059,7 @@ impl FakeBluez {
             address,
             adapter: adapter_object(adapter),
             apple_data: apple_data.to_vec(),
+            rssi: Some(RSSI),
         };
         // `at` announces the object with its properties.
         if !heard_before && server.at(&path, advertiser()).await? {
@@ -1058,7 +1070,8 @@ impl FakeBluez {
                 let mut advertiser = iface.get_mut().await;
                 // One signal, as bluetoothd sends it: the strength every time,
                 // and the data with it if it changed.
-                let mut changed = HashMap::from([("RSSI", Value::from(advertiser.rssi()))]);
+                advertiser.rssi = Some(RSSI);
+                let mut changed = HashMap::from([("RSSI", Value::from(RSSI))]);
                 if advertiser.apple_data != apple_data {
                     advertiser.apple_data = apple_data.to_vec();
                     let data = Value::from(advertiser.manufacturer_data());
@@ -1204,10 +1217,40 @@ impl FakeBluez {
             (stopped, state.forget_providers(|p| p.owner == name))
         };
         for adapter in stopped {
+            self.discovery_ended(&adapter).await;
             let _ = self.signal_discovering(&adapter).await;
         }
         for device in devices {
             self.sync_battery(&device).await;
+        }
+    }
+
+    /// What bluetoothd's `discovery_cleanup` does once no client discovers
+    /// on the adapter called `adapter`: every device it heard loses its
+    /// `RSSI`, signaled as invalidated, and keeps its data - see the module
+    /// docs. The devices go only [`TEMPORARY_TIMEOUT`] after they were last
+    /// heard, by [`FakeBluez::prune`].
+    async fn discovery_ended(&self, adapter: &str) {
+        let conn = self.conn();
+        let server = conn.object_server();
+        for address in self.advertisers_on(adapter) {
+            let path = device_path(adapter, address);
+            let Ok(iface) = server.interface::<_, Advertiser>(&path).await else {
+                continue;
+            };
+            if iface.get_mut().await.rssi.take().is_none() {
+                continue;
+            }
+            let invalidated = zbus::fdo::Properties::properties_changed(
+                iface.signal_emitter(),
+                InterfaceName::from_static_str_unchecked(DEVICE_INTERFACE),
+                HashMap::new(),
+                Cow::Borrowed(&["RSSI"]),
+            )
+            .await;
+            if let Err(e) = invalidated {
+                tracing::warn!("fake BlueZ: failed to invalidate the RSSI of {path}: {e}");
+            }
         }
     }
 
@@ -1535,6 +1578,7 @@ impl Adapter1 {
             clients.is_empty()
         };
         if stopped {
+            self.bluez.discovery_ended(&self.name).await;
             self.discovering_changed(&emitter).await?;
         }
         Ok(())
@@ -1689,6 +1733,10 @@ struct Advertiser {
     adapter: OwnedObjectPath,
     /// The value of the Apple entry in its manufacturer data.
     apple_data: Vec<u8>,
+    /// Its strength, from the last advertisement heard while some client
+    /// discovered: `None` once discovery there ended, as bluetoothd
+    /// invalidates it, until it is heard again.
+    rssi: Option<i16>,
 }
 
 #[interface(name = "org.bluez.Device1")]
@@ -1734,9 +1782,12 @@ impl Advertiser {
         false
     }
 
+    /// Absent while invalidated, as bluetoothd has it: left out of
+    /// `GetAll` and `GetManagedObjects`, and an error to `Get`.
     #[zbus(property, name = "RSSI")]
-    fn rssi(&self) -> i16 {
-        RSSI
+    fn rssi(&self) -> zbus::fdo::Result<i16> {
+        self.rssi
+            .ok_or_else(|| zbus::fdo::Error::InvalidArgs("No such property 'RSSI'".to_string()))
     }
 
     #[zbus(property)]
@@ -2366,6 +2417,106 @@ mod tests {
             .unwrap();
         assert_eq!(object, path);
         assert_eq!(interfaces, ["org.bluez.Device1"]);
+    }
+
+    /// Once no client discovers, a device heard advertising loses its
+    /// strength and keeps its data, as in bluetoothd: a client starting
+    /// again finds it in `GetManagedObjects`, with no `InterfacesAdded`, and
+    /// the next advertisement brings the strength back alone, its data
+    /// unchanged (#153). Whether the last client stops or leaves the bus.
+    #[tokio::test]
+    async fn a_device_heard_keeps_its_data_and_loses_its_strength_once_discovery_ends() {
+        let (bus, bluez) = served().await;
+        let path = device_path(ADAPTER, RANDOM);
+        let device = |conn: Connection| {
+            let path = path.clone();
+            async move {
+                let om = zbus::fdo::ObjectManagerProxy::builder(&conn)
+                    .destination(BLUEZ_SERVICE)
+                    .unwrap()
+                    .path("/")
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                let mut objects = om.get_managed_objects().await.unwrap();
+                let mut interfaces = objects.remove(&path)?;
+                interfaces.remove(DEVICE_INTERFACE)
+            }
+        };
+        let client = bus.connect().await.unwrap();
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender(BLUEZ_SERVICE)
+            .unwrap()
+            .path(path.as_str())
+            .unwrap()
+            .build();
+        let mut signals = MessageStream::for_match_rule(rule, &client, None)
+            .await
+            .unwrap();
+        let mut next_change = async || {
+            let msg = timeout(TIMEOUT, signals.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            msg.body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                .unwrap()
+        };
+        let adapter_path = adapter_path(ADAPTER);
+        let adapter = proxy(&client, &adapter_path, "org.bluez.Adapter1").await;
+
+        for leave in [false, true] {
+            let discovering = if leave {
+                bus.connect().await.unwrap()
+            } else {
+                client.clone()
+            };
+            let scanner = Scanner::with_connection(discovering.clone());
+            scanner.start_discovery().await.unwrap();
+            assert!(bluez.advertise(RANDOM, &[0x07, 0x19]).await.unwrap());
+            let heard = device(client.clone()).await.expect("a device");
+            assert_eq!(i16::try_from(heard["RSSI"].clone()).unwrap(), RSSI);
+
+            if leave {
+                drop(scanner);
+                drop(discovering);
+            } else {
+                adapter.call_method("StopDiscovery", &()).await.unwrap();
+            }
+            loop {
+                let (_, changed, invalidated) = next_change().await;
+                if invalidated == ["RSSI"] {
+                    assert!(changed.is_empty());
+                    break;
+                }
+            }
+            assert!(!bluez.is_discovering(ADAPTER));
+            let kept = device(client.clone()).await.expect("kept");
+            assert_eq!(apple_data(&kept), [0x07, 0x19]);
+            assert!(!kept.contains_key("RSSI"), "invalidated");
+            let rssi = proxy(&client, path.as_str(), DEVICE_INTERFACE).await;
+            assert!(rssi.get_property::<i16>("RSSI").await.is_err());
+
+            Scanner::with_connection(client.clone())
+                .start_discovery()
+                .await
+                .unwrap();
+            assert!(bluez.advertise(RANDOM, &[0x07, 0x19]).await.unwrap());
+            let (_, changed, invalidated) = next_change().await;
+            assert_eq!(changed.keys().collect::<Vec<_>>(), ["RSSI"], "heard again");
+            assert!(invalidated.is_empty());
+            let heard = device(client.clone()).await.expect("a device");
+            assert_eq!(i16::try_from(heard["RSSI"].clone()).unwrap(), RSSI);
+            adapter.call_method("StopDiscovery", &()).await.unwrap();
+            let (_, _, invalidated) = next_change().await;
+            assert_eq!(invalidated, ["RSSI"]);
+        }
+
+        bluez.prune(Instant::now() + TEMPORARY_TIMEOUT).await;
+        assert!(device(client.clone()).await.is_none(), "gone in time");
     }
 
     /// Every adapter that discovers hears an advertisement, and makes a device
