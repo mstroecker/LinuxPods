@@ -27,8 +27,8 @@
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
 //!   change, and again when [`Pods::next_due`] says, for what comes late:
-//!   the handshake's answer, the startup dump, the echo of a mode change, the
-//!   silent pair's hang-up. A pair that drops its link, as with both pods in
+//!   the handshake's answer, the startup dump, the echo of a mode change, a
+//!   stretch of speech, the silent pair's hang-up. A pair that drops its link, as with both pods in
 //!   the closed case, is disconnected in the fake BlueZ, then its AAP
 //!   connection closed, as a disconnect is - see [`World::disconnect`].
 //!
@@ -53,6 +53,8 @@
 //! | `SetLid(s mac, b open)` | Opens or closes the case; closed on both pods, it drops their link. The pods in the closed case stop advertising 4 s later, and come back under new addresses once it opens, the right pod 1 s later, the left 5.5 s |
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
+//! | `SetConversationAwareness(s mac, b on)` | Turns Conversation Awareness on or off, as from a phone: nothing reports it over AAP, the next connection's startup dump does |
+//! | `Speak(s mac, u length_ms)` | The user speaks for that long. With Conversation Awareness on, the pods send speech levels and switch to Transparency and back, at the #150 run's times - see [`Pods::speak`]; with it off, nothing. Fails with no AAP connection |
 //! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, the durations by theirs with `_ms` - `echo_delay_ms`, `handshake_delay_ms`, `report_delay_ms`, `dump_delay_ms`, `stale_report_ms` - in milliseconds, a `stale_report_ms` of 0 for none |
 //! | `Flood(u count)` | That many advertisers no key decrypts and no IRK resolves, each from an address of its own |
 //! | `Received(s mac) → aay` | Every AAP packet the app sent the pair, in order |
@@ -406,6 +408,18 @@ impl World {
         }
     }
 
+    /// The user of a pair speaks for `length`, from now - see
+    /// [`Pods::speak`]. With Conversation Awareness off the pods do nothing.
+    /// Fails with no AAP connection open, and while a stretch is under way.
+    pub async fn speak(&self, mac: Address, length: Duration) -> Result<()> {
+        let now = self.now();
+        self.with_pods(mac, |pods| pods.speak(now, length))
+            .await?
+            .map_err(|e| anyhow::anyhow!("{mac}: {e}"))?;
+        tracing::info!("fake world: {mac} hears speech for {length:?}");
+        Ok(())
+    }
+
     /// Closes a pair's AAP connection from its end. The Bluetooth link stays.
     pub async fn hang_up(&self, mac: Address) -> Result<()> {
         let mut pairs = self.0.pairs.lock().await;
@@ -712,7 +726,7 @@ fn set_quirk(quirks: &mut Quirks, name: &str, value: &Value<'_>) -> Result<(), S
     };
     match name {
         "off_needs_allow" => quirks.off_needs_allow = flag()?,
-        "settings_changed" => quirks.settings_changed = flag()?,
+        "idle_level_only" => quirks.idle_level_only = flag()?,
         "echo_every" => quirks.echo_every = count()?,
         "echo_delay_ms" => quirks.echo_delay = Duration::from_millis(count()?.into()),
         "silent_handshake" => quirks.silent_handshake = flag()?,
@@ -811,6 +825,22 @@ impl FakeWorld1 {
 
     async fn hang_up(&self, mac: &str) -> fdo::Result<()> {
         self.world.hang_up(parse_mac(mac)?).await.map_err(failed)
+    }
+
+    async fn set_conversation_awareness(&self, mac: &str, enabled: bool) -> fdo::Result<()> {
+        let mac = parse_mac(mac)?;
+        self.world
+            .with_pods(mac, |pods| pods.set_conversation_awareness(enabled))
+            .await
+            .map_err(failed)
+    }
+
+    async fn speak(&self, mac: &str, length_ms: u32) -> fdo::Result<()> {
+        let length = Duration::from_millis(length_ms.into());
+        self.world
+            .speak(parse_mac(mac)?, length)
+            .await
+            .map_err(failed)
     }
 
     async fn set_quirk(&self, mac: &str, quirk: &str, value: OwnedValue) -> fdo::Result<()> {
@@ -926,7 +956,9 @@ mod tests {
         set_quirk(&mut quirks, "echo_every", &Value::from(1i32)).unwrap();
         set_quirk(&mut quirks, "echo_delay_ms", &Value::from(20u32)).unwrap();
         set_quirk(&mut quirks, "refuse_aap", &Value::from(3i32)).unwrap();
+        set_quirk(&mut quirks, "idle_level_only", &Value::from(true)).unwrap();
         assert!(quirks.silent_handshake);
+        assert!(quirks.idle_level_only);
         assert_eq!(quirks.refuse_aap, 3);
         assert_eq!(quirks.echo_every, 1);
         assert_eq!(quirks.echo_delay, Duration::from_millis(20));
@@ -1260,19 +1292,25 @@ mod tests {
             .await
             .unwrap();
         control.call_method("Repair", &(&other,)).await.unwrap();
-        let (left, case, echo_every, repaired) = world
+        control
+            .call_method("SetConversationAwareness", &(&other, true))
+            .await
+            .unwrap();
+        let (left, case, echo_every, repaired, conversation_awareness) = world
             .with_pods(OTHER, |pods| {
                 (
                     pods.battery(Part::Left),
                     pods.battery(Part::Case),
                     pods.quirks.echo_every,
                     pods.keys() != &keys,
+                    pods.conversation_awareness(),
                 )
             })
             .await
             .unwrap();
         assert_eq!((left, case, echo_every), (Some(42), None, 2));
         assert!(repaired);
+        assert!(conversation_awareness);
 
         control.call_method("Connect", &(&other,)).await.unwrap();
         assert!(bluez_connected(&bus, OTHER).await);
@@ -1331,6 +1369,10 @@ mod tests {
             ),
             (
                 control.call_method("HangUp", &(&other,)).await,
+                "org.freedesktop.DBus.Error.Failed",
+            ),
+            (
+                control.call_method("Speak", &(&other, 3000u32)).await,
                 "org.freedesktop.DBus.Error.Failed",
             ),
             (

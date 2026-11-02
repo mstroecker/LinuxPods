@@ -92,6 +92,33 @@ pub const PRIMARY_AFTER_EAR: Duration = Duration::from_millis(10);
 /// comes: 30-90 ms in the #142 captures.
 pub const SECOND_PRIMARY: Duration = Duration::from_millis(60);
 
+// A stretch of speech with Conversation Awareness on, as the first of the
+// #150 run went: the real values, each from the start of the speech - level
+// 01 - or from its end, level 03. See `Pods::speak`.
+
+/// From the start to the report of the mode the pods are in: 0.02 s.
+pub const SPEECH_MODE_REPORT: Duration = Duration::from_millis(20);
+/// From the start to the pods' switch to Transparency: 0.31 s.
+pub const SPEECH_TRANSPARENCY: Duration = Duration::from_millis(310);
+/// From the start to level 02, still speaking: 0.82 s.
+pub const SPEECH_STILL: Duration = Duration::from_millis(820);
+/// From the end, level 03, to 07 and 08, the way back up: 0.07 s and 0.10 s.
+pub const SPEECH_RAMP: [(Duration, u8); 2] = [
+    (Duration::from_millis(70), 0x07),
+    (Duration::from_millis(100), 0x08),
+];
+/// From the end to the pods' switch back to the user's mode: 0.46 s.
+pub const SPEECH_MODE_BACK: Duration = Duration::from_millis(460);
+/// From the end to level 09, idle: 0.48 s.
+pub const SPEECH_IDLE: Duration = Duration::from_millis(480);
+
+/// The speech levels the fake sends - see `aap::conversation::Speech`.
+const LEVEL_SPEAKING: u8 = 0x01;
+const LEVEL_STILL_SPEAKING: u8 = 0x02;
+const LEVEL_SPEECH_ENDED: u8 = 0x03;
+const LEVEL_NORMAL: u8 = 0x08;
+const LEVEL_IDLE: u8 = 0x09;
+
 // The requests a link sends as it comes up - `aap::Client::open`'s, and the key
 // request `Coordinator::open_aap` adds - known by their command byte, as a
 // device would know them: not by the packets beside the app's parsers, which a
@@ -129,6 +156,8 @@ pub const DUMP_DELAY: Duration = Duration::from_millis(200);
 /// are valid mode bytes - 0x25's 01 reads as Off, 0x26's 02 as Noise
 /// Cancellation - so taking a mode from any 0x09 packet without checking byte
 /// 6 reads them as one. Neither 0x34, allow-Off, nor 0x1A was ever in it.
+/// Conversation Awareness, 0x28, carries the pair's setting: `02` in every
+/// #71 capture, `01` in the #150 run.
 const STARTUP_DUMP: [Dumped; 30] = [
     Dumped::Other(0x02),
     Dumped::DeviceInfo,
@@ -139,7 +168,7 @@ const STARTUP_DUMP: [Dumped; 30] = [
     Dumped::Setting(0x23, &[0x00]),
     Dumped::Setting(0x1F, &[0x50, 0x50]),
     Dumped::Setting(0x24, &[0x00, 0x03]),
-    Dumped::Setting(0x28, &[0x02]),
+    Dumped::ConversationAwareness,
     Dumped::Other(0x63),
     Dumped::Other(0x4E),
     Dumped::Setting(0x26, &[0x02]),
@@ -165,8 +194,10 @@ const STARTUP_DUMP: [Dumped; 30] = [
 /// One packet of the startup dump.
 #[derive(Debug, Clone, Copy)]
 enum Dumped {
-    /// The noise control mode, the one setting the app reads.
+    /// The noise control mode, which the app reads.
     Mode,
+    /// Conversation Awareness, which the app reads too.
+    ConversationAwareness,
     /// Another setting of the 0x09 family: its sub-command and value.
     Setting(u8, &'static [u8]),
     /// 0x1D, which carries the device's name and model number: synthetic.
@@ -177,10 +208,14 @@ enum Dumped {
 }
 
 impl Dumped {
-    fn packet(self, mode: NoiseMode) -> Vec<u8> {
+    fn packet(self, mode: NoiseMode, conversation_awareness: bool) -> Vec<u8> {
         match self {
             // The mode packet serves both directions: this is the report.
             Self::Mode => noise::set_packet(mode).to_vec(),
+            // So does the setting's.
+            Self::ConversationAwareness => {
+                conversation::set_packet(conversation_awareness).to_vec()
+            }
             Self::Setting(sub_cmd, value) => noise::settings_report(sub_cmd, value).to_vec(),
             Self::DeviceInfo => {
                 let text = b"Fake AirPods\0A0000\0";
@@ -288,10 +323,16 @@ fn report_packets(
 }
 
 /// The second 0x0C, naming this host, and the startup dump after it, with
-/// `mode` in it.
-fn startup_dump(mode: NoiseMode) -> Vec<Vec<u8>> {
+/// `mode` and the Conversation Awareness setting in it - and with that on,
+/// level 09 after it, unasked, as in the #150 run.
+fn startup_dump(mode: NoiseMode, conversation_awareness: bool) -> Vec<Vec<u8>> {
     std::iter::once(in_use_packet(THIS_HOST, true))
-        .chain(STARTUP_DUMP.iter().map(|dumped| dumped.packet(mode)))
+        .chain(
+            STARTUP_DUMP
+                .iter()
+                .map(|dumped| dumped.packet(mode, conversation_awareness)),
+        )
+        .chain(conversation_awareness.then(|| conversation::level_packet(LEVEL_IDLE).to_vec()))
         .collect()
 }
 
@@ -359,9 +400,10 @@ pub enum Part {
 ///   after discovery starts - see [`Pods::advertisement`].
 ///
 /// AirPods 4 answered a mode change otherwise (`docs/aap-noise-control.md`):
-/// a 0x4B on every change, an echo on about one in four, and no report of the
-/// mode an Off replaced. Their answers are `settings_changed: true,
-/// echo_every: 4, stale_report: None`.
+/// an echo on about one in four, no report of the mode an Off replaced, and
+/// with Conversation Awareness on, as theirs was, level 09 on every change.
+/// Their answers are `idle_level_only: true, echo_every: 4, stale_report:
+/// None`, with [`Pods::set_conversation_awareness`] on.
 ///
 /// Each one is read when it applies, so a change takes effect from the next
 /// packet, advertisement or connection.
@@ -371,9 +413,11 @@ pub struct Quirks {
     /// nothing on the wire, where recent firmware on Pro 3 and Pro 2 plays an
     /// error chime.
     pub off_needs_allow: bool,
-    /// Answer every mode change with the 0x4B settings-changed notification,
-    /// as AirPods 4 do. A Pro 3 sent none, so off by default.
-    pub settings_changed: bool,
+    /// With Conversation Awareness on, answer a mode change with level 09
+    /// alone, at once, as AirPods 4 did (`docs/aap-noise-control.md`),
+    /// rather than as a Pro 3 did: level 08 at once, the echo, and level 09
+    /// after it. Off by default. With the setting off, neither sends a 0x4B.
+    pub idle_level_only: bool,
     /// Echo every n-th mode change with a 0x0D report of the mode set: 1
     /// echoes every change, 0 none. Counted rather than drawn at random, so
     /// tests are never flaky. The default 1 is a Pro 3's; AirPods 4 echoed
@@ -432,7 +476,7 @@ impl Default for Quirks {
     fn default() -> Self {
         Self {
             off_needs_allow: true,
-            settings_changed: false,
+            idle_level_only: false,
             echo_every: 1,
             echo_delay: ECHO_DELAY,
             stale_report: Some(STALE_REPORT),
@@ -532,6 +576,20 @@ enum Due {
     /// The second 0x0C, naming this host, and the startup dump after it,
     /// carrying the mode as it is when it falls due.
     Dump,
+    /// A stretch of speech switching the pods to Transparency.
+    SpeechTransparency,
+    /// A stretch of speech over, switching them back.
+    SpeechBack,
+}
+
+/// A stretch of speech under way - see [`Pods::speak`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Speaking {
+    /// When its last packet, level 09, is due.
+    until: Duration,
+    /// The mode to go back to once it is over, from the switch to
+    /// Transparency on: the mode before it, or one set meanwhile.
+    back_to: Option<NoiseMode>,
 }
 
 impl Session {
@@ -584,6 +642,9 @@ pub struct Pods {
     primary: PodSide,
     noise_mode: NoiseMode,
     allow_off: bool,
+    conversation_awareness: bool,
+    /// A stretch of speech, while one is under way.
+    speaking: Option<Speaking>,
     keys: Keys,
     connected: bool,
     session: Option<Session>,
@@ -599,7 +660,8 @@ impl Pods {
     /// It starts as if just taken out of the box: both pods in the open case,
     /// left at 80%, right at 70% and the case at 50% - different, so a
     /// left/right mix-up shows - nothing charging, white, left primary, noise
-    /// cancellation, Off not allowed, and connected to nothing.
+    /// cancellation, Off not allowed, Conversation Awareness off, as in every
+    /// #71 capture, and connected to nothing.
     pub fn new(product_id: u16, mac: Address) -> Self {
         Self::with_keys(product_id, mac, Keys::generate())
     }
@@ -630,6 +692,8 @@ impl Pods {
             primary: PodSide::Left,
             noise_mode: NoiseMode::NoiseCancellation,
             allow_off: false,
+            conversation_awareness: false,
+            speaking: None,
             keys,
             connected: false,
             session: None,
@@ -667,6 +731,17 @@ impl Pods {
     /// Whether Off is allowed as a listening mode, the setting `0x34` writes.
     pub fn allow_off(&self) -> bool {
         self.allow_off
+    }
+
+    /// Whether Conversation Awareness is on, the setting `0x28` writes.
+    pub fn conversation_awareness(&self) -> bool {
+        self.conversation_awareness
+    }
+
+    /// Whether a stretch of speech is under way at `now` - see
+    /// [`Pods::speak`].
+    pub fn is_speaking(&self, now: Duration) -> bool {
+        self.speaking.is_some_and(|s| now <= s.until)
     }
 
     /// Whether the pair is connected to a host - this one or another.
@@ -766,9 +841,84 @@ impl Pods {
     }
 
     /// Changes the noise control mode from elsewhere - a stem press, or a
-    /// phone. Over AAP, the next [`Pods::poll`] reports it.
+    /// phone. Over AAP, the next [`Pods::poll`] reports it. During a stretch
+    /// of speech, it is also the mode the pods go back to after it.
     pub fn set_noise_mode(&mut self, mode: NoiseMode) {
         self.noise_mode = mode;
+        if let Some(Speaking {
+            back_to: Some(back_to),
+            ..
+        }) = &mut self.speaking
+        {
+            *back_to = mode;
+        }
+    }
+
+    /// Turns Conversation Awareness on or off from elsewhere - a phone. Over
+    /// AAP nothing reports it: LibrePods says the pods report the setting
+    /// only in the startup dump, and whether a change on a phone reaches
+    /// this host is a hardware check still to do (#150). The next
+    /// connection's dump carries it.
+    pub fn set_conversation_awareness(&mut self, enabled: bool) {
+        self.conversation_awareness = enabled;
+    }
+
+    /// The user speaks at `now` for `length`, and the pods hear it. With
+    /// Conversation Awareness off they do nothing. With it on they send, as
+    /// the first stretch of the #150 run went - levels and the mode switch at
+    /// the real offsets, `SPEECH_*`:
+    ///
+    /// - level 01 at once, and a report of the mode they are in 20 ms later;
+    /// - their switch to Transparency at 0.31 s, reported as a mode change;
+    /// - level 02 at 0.82 s, while still speaking;
+    /// - once `length` is over, 03, then 07 and 08 within 0.1 s;
+    /// - their switch back at 0.46 s after that, reported, and level 09.
+    ///
+    /// Each part only if `length` leaves room for it before the end: a
+    /// stretch shorter than 0.31 s never switches the mode. A mode set during
+    /// the stretch takes effect at once, and is the one the pods go back to
+    /// after it - the fake's choice, where the hardware's is not recorded.
+    /// Mode changes are reported from the startup dump on, as always.
+    ///
+    /// Fails with no AAP connection open - the pods would speak to nobody -
+    /// and while a stretch is under way.
+    pub fn speak(&mut self, now: Duration, length: Duration) -> Result<(), String> {
+        if self.is_speaking(now) {
+            return Err("a stretch of speech is under way".into());
+        }
+        let mode = self.noise_mode;
+        let Some(session) = self.session.as_mut().filter(|s| !s.silent) else {
+            return Err("no AAP connection".into());
+        };
+        if !self.conversation_awareness {
+            return Ok(());
+        }
+        let level = |level| conversation::level_packet(level).to_vec();
+        let end = now + length;
+        session.send(now, level(LEVEL_SPEAKING));
+        if session.mode.is_some() {
+            session.send(now + SPEECH_MODE_REPORT, noise::set_packet(mode).to_vec());
+        }
+        let switched = length > SPEECH_TRANSPARENCY;
+        if switched {
+            session.schedule(now + SPEECH_TRANSPARENCY, Due::SpeechTransparency);
+        }
+        if length > SPEECH_STILL {
+            session.send(now + SPEECH_STILL, level(LEVEL_STILL_SPEAKING));
+        }
+        session.send(end, level(LEVEL_SPEECH_ENDED));
+        for (after, ramp) in SPEECH_RAMP {
+            session.send(end + after, level(ramp));
+        }
+        if switched {
+            session.schedule(end + SPEECH_MODE_BACK, Due::SpeechBack);
+        }
+        session.send(end + SPEECH_IDLE, level(LEVEL_IDLE));
+        self.speaking = Some(Speaking {
+            until: end + SPEECH_IDLE,
+            back_to: None,
+        });
+        Ok(())
     }
 
     /// Re-pairs, which gives the pair new keys. Connections are left to the
@@ -1018,7 +1168,17 @@ impl Pods {
     /// The app closed the AAP connection, or it dropped. Whatever was still
     /// due on it goes with it.
     pub fn aap_closed(&mut self) {
+        self.end_session();
+    }
+
+    /// Ends the AAP connection, and what was due on it. A stretch of speech
+    /// still under way ends with it, the pods back in the mode they were
+    /// switched from: the switch back was due on the connection.
+    fn end_session(&mut self) {
         self.session = None;
+        if let Some(back_to) = self.speaking.take().and_then(|s| s.back_to) {
+            self.noise_mode = back_to;
+        }
     }
 
     /// A packet the app sent at `now`. Whatever it calls for comes out of the
@@ -1047,9 +1207,11 @@ impl Pods {
     ///
     /// - a mode change its delayed echo, and an Off a report of the mode it
     ///   replaced ahead of that, as a Pro 3 answers; or nothing, for an Off not
-    ///   allowed - see [`Quirks`], which switch to AirPods 4's answers too;
-    /// - `0x34` sets allow-Off. What it answers is not recorded, so the fake
-    ///   answers nothing.
+    ///   allowed - see [`Quirks`], which switch to AirPods 4's answers too.
+    ///   With Conversation Awareness on, levels 08 and 09 come around the
+    ///   echo, the refused Off's too, as a Pro 3 sent them (#150);
+    /// - `0x34` sets allow-Off, and `0x28` Conversation Awareness. What
+    ///   either answers is not recorded, so the fake answers nothing.
     ///
     /// Anything else is recorded and otherwise ignored, as is everything
     /// arriving with no connection open or on a silent one.
@@ -1095,11 +1257,10 @@ impl Pods {
         if self.connected && self.left.in_case && self.right.in_case && !self.lid_open {
             // Both pods in the closed case: the pods drop the link (#142).
             self.connected = false;
-            self.session = None;
+            self.end_session();
             return vec![Action::Disconnect];
         }
         let batteries = self.aap_batteries();
-        let mode = self.noise_mode;
         let ears = self.ears();
         let mac = self.mac;
         let Some(session) = &mut self.session else {
@@ -1107,17 +1268,19 @@ impl Pods {
         };
         if !self.connected {
             // The link went down under the connection, and takes it along.
-            self.session = None;
+            self.end_session();
             return vec![Action::HangUp];
         }
 
         let due = session.scheduled.partition_point(|(at, _)| *at <= now);
         let mut actions = Vec::new();
         for (_, due) in session.scheduled.drain(..due).collect::<Vec<_>>() {
+            // The mode a stretch of speech switches to, if this is one.
+            let mut switched = None;
             match due {
                 Due::Act(Action::HangUp) => {
                     actions.push(Action::HangUp);
-                    self.session = None;
+                    self.end_session();
                     return actions;
                 }
                 Due::Act(action) => actions.push(action),
@@ -1130,11 +1293,34 @@ impl Pods {
                     session.ears_reported = Some(placed);
                 }
                 Due::Dump => {
-                    actions.extend(startup_dump(mode).into_iter().map(Action::Send));
+                    let mode = self.noise_mode;
+                    let dump = startup_dump(mode, self.conversation_awareness);
+                    actions.extend(dump.into_iter().map(Action::Send));
                     session.mode = Some(mode);
+                }
+                Due::SpeechTransparency => {
+                    if let Some(speaking) = &mut self.speaking {
+                        speaking.back_to = Some(self.noise_mode);
+                        switched = Some(NoiseMode::Transparency);
+                    }
+                }
+                Due::SpeechBack => {
+                    switched = self.speaking.as_mut().and_then(|s| s.back_to.take());
+                }
+            }
+            // Reported in its place among what falls due, where the report
+            // of a change below would come after all of it.
+            if let Some(mode) = switched {
+                self.noise_mode = mode;
+                if let Some(reported) = &mut session.mode
+                    && *reported != mode
+                {
+                    actions.push(Action::Send(noise::set_packet(mode).to_vec()));
+                    *reported = mode;
                 }
             }
         }
+        let mode = self.noise_mode;
 
         // Where the pods are, first: the hardware sends the battery after it.
         if let Some(reported) = &mut session.ears_reported
@@ -1177,8 +1363,9 @@ impl Pods {
 
     /// When the next timed action falls due, for the caller to [`Pods::poll`]
     /// at: the handshake's answer, the answer to the notification request,
-    /// the startup dump, an echo or a stale report of a mode, a role switch's
-    /// primary pod packets, or the silent pair's hang-up. `None` with nothing
+    /// the startup dump, an echo or a stale report of a mode, a speech level
+    /// or a stretch of speech's switch of mode, a role switch's primary pod
+    /// packets, or the silent pair's hang-up. `None` with nothing
     /// scheduled. Replies due at once - the key packet, say - are counted
     /// too; changes made through the setters are not: poll after each.
     pub fn next_due(&self) -> Option<Duration> {
@@ -1348,16 +1535,40 @@ impl Pods {
             self.allow_off = allowed;
             return;
         }
+        if let Ok(enabled) = conversation::parse_setting_packet(packet) {
+            // What it answers is not recorded; LibrePods says the setting
+            // is not reported again, so the fake answers nothing.
+            self.conversation_awareness = enabled;
+            return;
+        }
         let Ok(mode) = noise::parse_noise_mode_packet(packet) else {
             return;
         };
+        let levels = self.conversation_awareness && !self.quirks.idle_level_only;
         if mode == NoiseMode::Off && !self.allow_off && self.quirks.off_needs_allow {
-            // The error chime: the mode stays, and nothing is sent.
+            // The error chime: the mode stays. With Conversation Awareness
+            // on, a Pro 3 framed even this one in levels 08 and 09 around a
+            // report of the mode it stayed in (#150); otherwise nothing.
+            let (current, delay) = (self.noise_mode, self.quirks.echo_delay);
+            if levels && let Some(session) = &mut self.session {
+                let level = |level| conversation::level_packet(level).to_vec();
+                session.send(now, level(LEVEL_NORMAL));
+                session.send(now + delay, noise::set_packet(current).to_vec());
+                session.send(now + delay, level(LEVEL_IDLE));
+            }
             return;
         }
 
         let previous = std::mem::replace(&mut self.noise_mode, mode);
         self.mode_changes += 1;
+        if let Some(Speaking {
+            back_to: Some(back_to),
+            ..
+        }) = &mut self.speaking
+        {
+            // In Transparency for speech: this is the mode to go back to.
+            *back_to = mode;
+        }
         let Some(session) = &mut self.session else {
             return;
         };
@@ -1366,8 +1577,11 @@ impl Pods {
         if let Some(reported) = &mut session.mode {
             *reported = mode;
         }
-        if self.quirks.settings_changed {
-            session.send(now, conversation::level_packet(0x09).to_vec());
+        let level = |level| conversation::level_packet(level).to_vec();
+        if self.conversation_awareness {
+            // A Pro 3's 08 now and 09 after the echo, or AirPods 4's 09.
+            let first = if levels { LEVEL_NORMAL } else { LEVEL_IDLE };
+            session.send(now, level(first));
         }
         // Stale, so not what the app was told: `session.mode` keeps the mode
         // set, and only the echo corrects the report.
@@ -1385,6 +1599,10 @@ impl Pods {
                 now + self.quirks.echo_delay,
                 noise::set_packet(mode).to_vec(),
             );
+        }
+        // After the echo, whether one comes for this change or not.
+        if levels {
+            session.send(now + self.quirks.echo_delay, level(LEVEL_IDLE));
         }
     }
 }
@@ -2085,12 +2303,14 @@ mod tests {
         }
     }
 
-    /// AirPods 4's answers, through the quirks: the 0x4B notification on every
-    /// change; the echo on every fourth, after the delay, carrying the mode.
+    /// AirPods 4's answers, through the quirks and with Conversation
+    /// Awareness on, as theirs was: level 09 on every change; the echo on
+    /// every fourth, after the delay, carrying the mode.
     #[test]
     fn answers_mode_changes_as_airpods_4_do() {
         let mut pods = subscribed();
-        pods.quirks.settings_changed = true;
+        pods.set_conversation_awareness(true);
+        pods.quirks.idle_level_only = true;
         pods.quirks.echo_every = 4;
         pods.quirks.echo_delay = ms(500);
         pods.quirks.stale_report = None;
@@ -2157,10 +2377,12 @@ mod tests {
         }
     }
 
+    /// No echo, and no level with Conversation Awareness off: nothing at all.
     #[test]
-    fn the_echo_and_the_notification_can_be_switched() {
+    fn the_echo_and_the_levels_can_be_switched() {
         let mut pods = subscribed();
-        pods.quirks.settings_changed = true;
+        pods.set_conversation_awareness(true);
+        pods.quirks.idle_level_only = true;
         pods.quirks.echo_delay = Duration::ZERO;
         pods.receive(&noise::set_packet(NoiseMode::Adaptive), ms(10));
         assert_eq!(
@@ -2172,11 +2394,211 @@ mod tests {
         );
 
         pods.quirks.echo_every = 0;
-        pods.quirks.settings_changed = false;
+        pods.set_conversation_awareness(false);
         for mode in NoiseMode::ALL {
             pods.receive(&noise::set_packet(mode), ms(20));
         }
         assert!(pods.poll(ms(10_000)).is_empty());
+    }
+
+    /// A level packet.
+    fn level(level: u8) -> Vec<u8> {
+        conversation::level_packet(level).to_vec()
+    }
+
+    /// A Pro 3 with Conversation Awareness on, as on 2026-11-01 (#150):
+    /// every mode change answered level 08 at once, the echo, then 09 - the
+    /// refused bare Off too, around a report of the mode it stayed in.
+    #[test]
+    fn with_conversation_awareness_a_pro_3_frames_a_change_in_levels() {
+        let mut pods = subscribed();
+        pods.set_conversation_awareness(true);
+        let echo = ms(10) + ECHO_DELAY;
+        pods.receive(&noise::set_packet(NoiseMode::Transparency), ms(10));
+        assert_eq!(sent(&pods.poll(ms(10))), [level(0x08)]);
+        assert_eq!(
+            sent(&pods.poll(echo)),
+            [
+                noise::set_packet(NoiseMode::Transparency).to_vec(),
+                level(0x09)
+            ]
+        );
+
+        let later = ms(5000);
+        pods.receive(&noise::set_packet(NoiseMode::Off), later);
+        assert_eq!(pods.noise_mode(), NoiseMode::Transparency, "refused");
+        assert_eq!(sent(&pods.poll(later)), [level(0x08)]);
+        assert_eq!(
+            sent(&pods.poll(later + ECHO_DELAY)),
+            [
+                noise::set_packet(NoiseMode::Transparency).to_vec(),
+                level(0x09)
+            ]
+        );
+    }
+
+    /// The setting is in the startup dump, as `0x28 01` or `02`, and with it
+    /// on level 09 follows the dump. Turned here, it is taken and answered
+    /// with nothing; the next connection's dump carries it.
+    #[test]
+    fn the_dump_carries_conversation_awareness_and_the_command_sets_it() {
+        let setting = |dump: &[Vec<u8>]| {
+            dump.iter()
+                .filter_map(|p| conversation::parse_setting_packet(p).ok())
+                .collect::<Vec<_>>()
+        };
+        let mut pods = Pods::new(PRO_3, MAC);
+        let dump = dump_of(&mut pods, ms(0));
+        assert_eq!(setting(&dump), [false]);
+        assert!(!dump.contains(&level(0x09)));
+
+        pods.receive(&conversation::set_packet(true), ms(10));
+        assert!(pods.conversation_awareness());
+        assert!(pods.poll(ms(10_000)).is_empty(), "nothing answers it");
+
+        pods.aap_closed();
+        let dump = dump_of(&mut pods, ms(20_000));
+        assert_eq!(setting(&dump), [true]);
+        assert_eq!(dump.last(), Some(&level(0x09)));
+    }
+
+    /// A pair subscribed as [`subscribed`] is, `setup` run on it first, the
+    /// replies and the dump taken.
+    fn subscribed_with(setup: impl FnOnce(&mut Pods)) -> Pods {
+        let mut pods = Pods::new(PRO_3, MAC);
+        setup(&mut pods);
+        pods.quirks.dump_delay = Duration::ZERO;
+        pods.aap_opened(ms(0));
+        for packet in [&HANDSHAKE[..], &NOTIFICATIONS, &FEATURES, &KEY_REQUEST] {
+            pods.receive(packet, ms(0));
+        }
+        pods.poll(ms(0));
+        pods
+    }
+
+    /// The startup dump of `pods`, connected and subscribed at `at`.
+    fn dump_of(pods: &mut Pods, at: Duration) -> Vec<Vec<u8>> {
+        pods.quirks.dump_delay = Duration::ZERO;
+        pods.aap_opened(at);
+        pods.receive(&HANDSHAKE, at);
+        pods.receive(&NOTIFICATIONS, at);
+        sent(&pods.poll(at))
+            .into_iter()
+            .skip_while(|p| *p != in_use_packet(THIS_HOST, true))
+            .collect()
+    }
+
+    /// Every packet `pods` sends from `from` to `to`, polled when each falls
+    /// due, with the time it went.
+    fn timeline(pods: &mut Pods, from: Duration, to: Duration) -> Vec<(Duration, Vec<u8>)> {
+        let mut packets: Vec<_> = sent(&pods.poll(from))
+            .into_iter()
+            .map(|p| (from, p))
+            .collect();
+        while let Some(at) = pods.next_due().filter(|at| *at <= to) {
+            packets.extend(sent(&pods.poll(at)).into_iter().map(|p| (at, p)));
+        }
+        packets
+    }
+
+    /// The first stretch of the #150 run, 6.36 s of speech: level 01, the
+    /// mode in use reported, the switch to Transparency, 02; and at the end
+    /// 03, 07, 08, the switch back and 09 - each at the run's offset.
+    #[test]
+    fn a_stretch_of_speech_goes_as_on_the_hardware() {
+        let mut pods = subscribed_with(|pods| pods.set_conversation_awareness(true));
+        let start = ms(22_030);
+        let end = start + ms(6360);
+        pods.speak(start, end - start).unwrap();
+        assert!(pods.is_speaking(start));
+        let nc = noise::set_packet(NoiseMode::NoiseCancellation).to_vec();
+        let transparency = noise::set_packet(NoiseMode::Transparency).to_vec();
+        assert_eq!(
+            timeline(&mut pods, start, end + ms(10_000)),
+            [
+                (start, level(0x01)),
+                (start + SPEECH_MODE_REPORT, nc.clone()),
+                (start + SPEECH_TRANSPARENCY, transparency),
+                (start + SPEECH_STILL, level(0x02)),
+                (end, level(0x03)),
+                (end + ms(70), level(0x07)),
+                (end + ms(100), level(0x08)),
+                (end + SPEECH_MODE_BACK, nc),
+                (end + SPEECH_IDLE, level(0x09)),
+            ]
+        );
+        assert_eq!(pods.noise_mode(), NoiseMode::NoiseCancellation);
+        assert!(!pods.is_speaking(end + SPEECH_IDLE + ms(1)));
+    }
+
+    /// A stretch too short for the switch sends the levels alone, and one
+    /// too short for 02 leaves it out.
+    #[test]
+    fn a_short_stretch_leaves_out_what_it_has_no_room_for() {
+        let mut pods = subscribed_with(|pods| pods.set_conversation_awareness(true));
+        pods.speak(ms(100), ms(300)).unwrap();
+        let (modes, levels): (Vec<_>, Vec<_>) = timeline(&mut pods, ms(100), ms(10_000))
+            .into_iter()
+            .map(|(_, p)| p)
+            .partition(|p| is_noise_mode_packet(p));
+        assert_eq!(levels, [0x01, 0x03, 0x07, 0x08, 0x09].map(level), "no 02");
+        assert_eq!(
+            modes,
+            [noise::set_packet(NoiseMode::NoiseCancellation).to_vec()],
+            "the mode in use, and no switch"
+        );
+        assert_eq!(pods.noise_mode(), NoiseMode::NoiseCancellation);
+    }
+
+    /// With the setting off, speech brings nothing; with no connection, or
+    /// a stretch under way, it is refused.
+    #[test]
+    fn speech_needs_the_setting_and_a_connection() {
+        let mut pods = subscribed();
+        pods.speak(ms(10), ms(3000)).unwrap();
+        assert_eq!(pods.next_due(), None);
+        assert!(!pods.is_speaking(ms(10)));
+
+        pods.set_conversation_awareness(true);
+        pods.speak(ms(10), ms(3000)).unwrap();
+        assert!(pods.speak(ms(1000), ms(3000)).is_err(), "under way");
+        let mut idle = Pods::new(PRO_3, MAC);
+        idle.set_conversation_awareness(true);
+        assert!(idle.speak(ms(10), ms(3000)).is_err(), "no connection");
+    }
+
+    /// A mode set during the stretch takes effect at once, and is the one
+    /// the pods go back to: their switch back changes nothing then, and
+    /// reports nothing.
+    #[test]
+    fn a_mode_set_during_speech_is_the_one_gone_back_to() {
+        let mut pods = subscribed_with(|pods| pods.set_conversation_awareness(true));
+        pods.quirks.echo_every = 0;
+        pods.speak(ms(0), ms(3000)).unwrap();
+        timeline(&mut pods, ms(0), ms(1000));
+        assert_eq!(pods.noise_mode(), NoiseMode::Transparency);
+
+        pods.receive(&noise::set_packet(NoiseMode::Adaptive), ms(1000));
+        assert_eq!(pods.noise_mode(), NoiseMode::Adaptive);
+        let rest = timeline(&mut pods, ms(1000), ms(10_000));
+        assert!(
+            rest.iter().all(|(_, p)| !is_noise_mode_packet(p)),
+            "{rest:02x?}"
+        );
+        assert_eq!(pods.noise_mode(), NoiseMode::Adaptive);
+    }
+
+    /// A connection that closes in the middle of a stretch takes the switch
+    /// back with it, and the pods are back in their mode at once.
+    #[test]
+    fn a_stretch_cut_short_by_a_hang_up_leaves_the_mode_as_it_was() {
+        let mut pods = subscribed_with(|pods| pods.set_conversation_awareness(true));
+        pods.speak(ms(0), ms(3000)).unwrap();
+        timeline(&mut pods, ms(0), ms(1000));
+        assert_eq!(pods.noise_mode(), NoiseMode::Transparency);
+        pods.aap_closed();
+        assert_eq!(pods.noise_mode(), NoiseMode::NoiseCancellation);
+        assert!(!pods.is_speaking(ms(1000)));
     }
 
     /// The ear report, `primary` then `secondary`.

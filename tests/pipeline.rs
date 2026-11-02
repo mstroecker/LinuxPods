@@ -44,9 +44,9 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use zbus::Connection;
 
-use linuxpods::aap::NoiseMode;
 use linuxpods::aap::ear::ROLE_SWITCH_HOLD;
 use linuxpods::aap::noise::{allow_off_packet, set_packet};
+use linuxpods::aap::{NoiseMode, conversation};
 use linuxpods::attachment::Attachment;
 use linuxpods::ble::decrypt::random_key;
 use linuxpods::ble::decrypt_for_device;
@@ -1173,11 +1173,12 @@ async fn off_is_allowed_first_and_no_other_mode_is() {
     assert_eq!(settings, expected);
 }
 
-/// A pair that answers as AirPods 4 do - a 0x4B on every mode change, naming
-/// no mode, and an echo of one change in four - has every mode set taken and
-/// kept on show: the 0x4B changes nothing, and the echo, after the fourth
-/// change, confirms it. Each change waits for the one before to be on show,
-/// so no echo or 0x4B can be a stale report of a mode replaced meanwhile.
+/// A pair that answers as AirPods 4 do - with Conversation Awareness on, as
+/// theirs was, level 09 on every mode change, naming no mode, and an echo of
+/// one change in four - has every mode set taken and kept on show: the level
+/// changes no mode, and the echo, after the fourth change, confirms it. Each
+/// change waits for the one before to be on show, so no echo can be a stale
+/// report of a mode replaced meanwhile.
 ///
 /// The echo is out once the pair has nothing due; a battery change made
 /// then comes over the same connection after it, so once it shows, the
@@ -1191,7 +1192,8 @@ async fn a_pair_answering_as_airpods_4_do_has_every_mode_confirmed() {
     fixture
         .world
         .with_pods(PAIR, |pods| {
-            pods.quirks.settings_changed = true;
+            pods.set_conversation_awareness(true);
+            pods.quirks.idle_level_only = true;
             pods.quirks.echo_every = 4;
             pods.quirks.echo_delay = Duration::from_millis(500);
             pods.quirks.stale_report = None;
@@ -1251,6 +1253,7 @@ async fn a_pair_answering_as_airpods_4_do_has_every_mode_confirmed() {
         snapshot.states[&PAIR].noise_mode,
         Some(NoiseMode::NoiseCancellation)
     );
+    assert_eq!(snapshot.states[&PAIR].speech_level, Some(0x09));
 }
 
 /// After Off, a report of the mode it replaced does not bring that mode back:
@@ -1344,6 +1347,231 @@ async fn a_stale_report_after_off_does_not_bring_the_old_mode_back() {
         [Some(NoiseMode::NoiseCancellation), Some(NoiseMode::Off)],
         "Off, and nothing after it"
     );
+}
+
+/// The pair's Conversation Awareness, as the snapshot shows it.
+fn conversation_awareness(snapshot: &Snapshot, mac: Address) -> Option<bool> {
+    snapshot
+        .states
+        .get(&mac)
+        .and_then(|s| s.conversation_awareness)
+}
+
+/// Conversation Awareness comes from the startup dump, and a switch goes out
+/// as the 0x28 setting, the pair taking it and the snapshot showing it at
+/// once. Nothing reports it back, so the next connection's dump is what
+/// shows the pair kept it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_awareness_is_read_from_the_dump_and_switched() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    app.until("the setting from the startup dump: off", |s| {
+        conversation_awareness(s, PAIR) == Some(false)
+    })
+    .await;
+
+    app.coordinator
+        .command(PAIR, Command::ConversationAwareness(true))
+        .await
+        .unwrap();
+    assert_eq!(
+        conversation_awareness(&app.updates.borrow(), PAIR),
+        Some(true)
+    );
+    let world = &fixture.world;
+    eventually("the pair to take the setting", move || async move {
+        world
+            .with_pods(PAIR, |pods| pods.conversation_awareness())
+            .await
+            .unwrap()
+    })
+    .await;
+    let received = fixture.world.received(PAIR).await.unwrap();
+    assert!(received.contains(&conversation::set_packet(true).to_vec()));
+
+    app.detach(PAIR).await;
+    let off_aap = conversation_awareness(&app.updates.borrow(), PAIR);
+    assert_eq!(off_aap, None, "the setting goes with the link");
+    app.attach(PAIR).await;
+    app.until("the setting from the next dump: on", |s| {
+        conversation_awareness(s, PAIR) == Some(true)
+    })
+    .await;
+}
+
+/// What a snapshot shows of the pair while the user speaks: the noise mode,
+/// the speech level and the left pod's battery.
+type Speaking = (Option<NoiseMode>, Option<u8>, Option<u8>);
+
+fn speaking(updates: &mut watch::Receiver<Snapshot>) -> Speaking {
+    let snapshot = updates.borrow_and_update();
+    let state = snapshot.states.get(&PAIR);
+    (
+        state.and_then(|s| s.noise_mode),
+        state.and_then(|s| s.speech_level),
+        state.and_then(|s| s.left_battery),
+    )
+}
+
+/// The modes and the levels a test saw, each change once.
+type Seen = (Vec<Option<NoiseMode>>, Vec<Option<u8>>);
+
+/// Watches every snapshot from now on until the left pod is at `last`, and
+/// returns the modes and the levels shown, each change once. The first of
+/// each is read here, before anything is sent: a task first run after the
+/// change it waits for would miss the state before it.
+fn watch_speech(mut updates: watch::Receiver<Snapshot>, last: u8) -> JoinHandle<Seen> {
+    let (mode, level, _) = speaking(&mut updates);
+    let (mut modes, mut levels) = (vec![mode], vec![level]);
+    tokio::spawn(async move {
+        while updates.changed().await.is_ok() {
+            let (mode, level, left) = speaking(&mut updates);
+            if modes.last() != Some(&mode) {
+                modes.push(mode);
+            }
+            if levels.last() != Some(&level) {
+                levels.push(level);
+            }
+            if left == Some(last) {
+                return (modes, levels);
+            }
+        }
+        panic!("the coordinator went away");
+    })
+}
+
+/// Waits until the pair has nothing more due - every level and report of a
+/// stretch of speech, every echo, out - then changes the left pod to `last`,
+/// which comes over the same connection after all of them.
+async fn after_everything_due(fixture: &Fixture, last: u8) {
+    let world = &fixture.world;
+    eventually("every level and report", move || async move {
+        world
+            .with_pods(PAIR, |pods| pods.next_due().is_none())
+            .await
+            .unwrap()
+    })
+    .await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_battery(Part::Left, Some(last)))
+        .await
+        .unwrap();
+}
+
+/// A pair on AAP with Conversation Awareness on, its mode and the level the
+/// dump ends with on show.
+async fn aware_on_aap() -> (Fixture, App) {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_conversation_awareness(true))
+        .await
+        .unwrap();
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    app.until("the mode, the setting and level 09 from the dump", |s| {
+        s.states.get(&PAIR).is_some_and(|state| {
+            state.noise_mode == Some(NoiseMode::NoiseCancellation)
+                && state.conversation_awareness == Some(true)
+                && state.speech_level == Some(0x09)
+        })
+    })
+    .await;
+    (fixture, app)
+}
+
+/// A stretch of speech as the #150 run had it - levels 01 and 02, the pods
+/// switching to Transparency and back, 03 to 08 and 09 - arrives, and the
+/// mode on show follows the pods there and back: Transparency is what they
+/// are in. 3 s, as the run's second stretch.
+///
+/// Every snapshot from the speech on is watched, until a battery change made
+/// once the pair has nothing more due has arrived. A level is a target, and
+/// the window skips any it is too slow for, so the levels are checked as
+/// what can be seen in order, of which the ones held for long - speaking,
+/// for 3 s - must be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stretch_of_speech_arrives_and_the_mode_comes_back() {
+    /// A left pod level the pair has not had yet.
+    const LATER: u8 = 29;
+
+    let (fixture, app) = aware_on_aap().await;
+    let watching = watch_speech(app.coordinator.subscribe(), LATER);
+    fixture
+        .world
+        .speak(PAIR, Duration::from_secs(3))
+        .await
+        .unwrap();
+    after_everything_due(&fixture, LATER).await;
+
+    let (modes, levels) = timeout(TIMEOUT, watching)
+        .await
+        .expect("timed out waiting for the battery change")
+        .unwrap();
+    use NoiseMode::{NoiseCancellation, Transparency};
+    assert_eq!(
+        modes,
+        [
+            Some(NoiseCancellation),
+            Some(Transparency),
+            Some(NoiseCancellation)
+        ]
+    );
+    let stretch = [0x09, 0x01, 0x02, 0x03, 0x07, 0x08, 0x09].map(Some);
+    let mut rest = stretch.iter();
+    assert!(
+        levels.iter().all(|level| rest.any(|l| l == level)),
+        "{levels:02x?}: not in the order of {stretch:02x?}"
+    );
+    assert!(
+        levels.contains(&Some(0x01)) || levels.contains(&Some(0x02)),
+        "{levels:02x?}: no speaking level"
+    );
+    assert_eq!(levels.first(), Some(&Some(0x09)));
+    assert_eq!(levels.last(), Some(&Some(0x09)));
+}
+
+/// A mode set while the pods are in Transparency for speech stays on show:
+/// the fake pair goes back to it after the speech, so nothing reports
+/// Transparency or the mode before the speech again, and the echo and the
+/// levels framing the change, 08 and 09, bring no mode back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mode_set_during_speech_stays_on_show() {
+    /// A left pod level the pair has not had yet.
+    const LATER: u8 = 29;
+
+    let (fixture, mut app) = aware_on_aap().await;
+    fixture
+        .world
+        .speak(PAIR, Duration::from_secs(3))
+        .await
+        .unwrap();
+    app.until("Transparency for the speech", |s| {
+        s.states
+            .get(&PAIR)
+            .is_some_and(|state| state.noise_mode == Some(NoiseMode::Transparency))
+    })
+    .await;
+
+    let watching = watch_speech(app.coordinator.subscribe(), LATER);
+    app.coordinator
+        .command(PAIR, Command::NoiseControl(NoiseMode::Adaptive))
+        .await
+        .unwrap();
+    fixture.until_mode(PAIR, NoiseMode::Adaptive).await;
+    after_everything_due(&fixture, LATER).await;
+
+    let (modes, levels) = timeout(TIMEOUT, watching)
+        .await
+        .expect("timed out waiting for the battery change")
+        .unwrap();
+    assert_eq!(
+        modes,
+        [Some(NoiseMode::Transparency), Some(NoiseMode::Adaptive)]
+    );
+    assert_eq!(levels.last(), Some(&Some(0x09)));
 }
 
 /// Whether each pod is in an ear, left then right, while the pair's reading
