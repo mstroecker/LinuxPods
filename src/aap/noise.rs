@@ -21,8 +21,10 @@ const MODE: usize = 7;
 pub const OPCODE: u8 = CMD_SETTINGS;
 const CMD_SETTINGS: u8 = 0x09;
 
-/// Enables conversational awareness and adaptive transparency. Without it,
-/// Adaptive is unavailable - see [`set_packet`].
+/// Enables Conversation Awareness and adaptive transparency. Without it,
+/// Adaptive is unavailable - see [`set_packet`] - and, LibrePods says,
+/// Conversation Awareness works only while nothing plays - see
+/// [`crate::aap::conversation`].
 pub const ENABLE_FEATURES: [u8; 14] = [
     HEADER[0], HEADER[1], HEADER[2], HEADER[3], 0x4D, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00,

@@ -89,7 +89,8 @@ carries a GTK object toward tokio.
 - sends `0x34 01` anywhere other than immediately before Off;
 - waits for a `0x0D` echo after setting the noise mode, instead of recording it
   optimistically;
-- parses a noise report without checking both byte 4 and byte 6;
+- parses a noise report or another `0x09` setting (`0x28` Conversation Awareness) without
+  checking both byte 4 and byte 6, or a speech level (`0x4B`) without bytes 5-8;
 - drops an L2CAP socket while its connect is pending (zero `cid`, `L2CAP_CONNINFO` not
   yet readable), or retries a connect on a zero `cid`: closed in `BT_CONNECT`, the
   channel is deleted here and completed on the pods, and a retry shares its local
@@ -99,7 +100,7 @@ carries a GTK object toward tokio.
 - uses a sentinel (0, 255, -1) for an unknown battery instead of `None`, or lets a level
   above 100, or the level beside an AAP status Disconnected (`0x04`), through as a reading.
 
-**Parsing and tests.** `aap::battery`, `aap::ear`, `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`,
+**Parsing and tests.** `aap::battery`, `aap::conversation`, `aap::ear`, `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`,
 `ble::decrypt` and `ble::rpa` take bytes and return values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
 literals; flag what it cannot: a test reading the real keystore or settings
@@ -115,8 +116,10 @@ accepted exception), or a captured advertisement committed together with the key
   `app.battery-notifications`.
 - A `StringList` behind a `DropDown` spliced, appended or removed without reading
   `selected()` first.
-- Noise Control left sensitive when the device is not on AAP, or Features made
-  sensitive while the command behind it is unknown.
+- Noise Control or the Conversation Awareness switch left sensitive when the device is
+  not on AAP, or the switch sensitive before the startup dump has reported the setting;
+  a snapshot turning the switch outside `syncing_features`, which sends the setting
+  back out.
 - A resource path the UI loads that is missing from `assets/resources.gresource.xml`, or
   from the list in the `bundled_resources_resolve` test.
 - Placeholder UI the user has not built yet must stay visible but insensitive, with a

@@ -44,7 +44,7 @@ where the logs are. Only one world runs at a time.
 | `empty` | nothing; add pairs with `AddPods` |
 
 Each new pair starts with both pods in the open case: left 80%, right 70%, case 50%,
-Noise Cancellation. A scenario's pairs have their keys - IRK and ENC_KEY - saved in the
+Noise Cancellation, Conversation Awareness off. A scenario's pairs have their keys - IRK and ENC_KEY - saved in the
 app's keystore before it starts, as though each had connected once before. A pair added
 later with `AddPods` has no keys until it connects, so until then the app shows nothing of
 it.
@@ -81,7 +81,9 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 | `SetLid(s mac, b open)` | the case lid; closed on both pods in the case, the pods drop their link, as real ones do. Over BLE, a pod in the closed case stops advertising 4 s after it closes; opened, the pods come back under new addresses, the right one 1 s later and the left 5.5 s |
 | `Repair(s mac)` | new keys, sent at the next key request; the old IRK stops resolving the pair's addresses, and the old key stops decrypting BLE |
 | `HangUp(s mac)` | closes AAP from the pods' end; the link stays, and the app links the pair again after a second, longer after repeated hang-ups (#49) |
-| `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `settings_changed` (a 0x4B on every mode change), `echo_every`, `echo_delay_ms`, `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none), `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `handshake_delay_ms` (hold back the handshake's answer), `report_delay_ms` (hold back the battery and what comes with it), `dump_delay_ms` (from the battery to the startup dump and its mode) |
+| `SetConversationAwareness(s mac, b on)` | the setting, as from a phone: nothing reports it over AAP; the next connection's startup dump carries it |
+| `Speak(s mac, u length_ms)` | the user speaks that long. With Conversation Awareness on, the pods send speech levels and switch to Transparency and back at the #150 run's times: level `01`, the mode in use reported 20 ms later, Transparency at 0.31 s, `02` at 0.82 s; at the end `03`, `07`, `08` within 0.1 s, the mode back at 0.46 s and `09` at 0.48 s. With it off, nothing. Fails without AAP, or while a stretch is under way |
+| `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `idle_level_only` (with Conversation Awareness on, level 09 alone on every mode change, as AirPods 4), `echo_every`, `echo_delay_ms`, `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none), `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `handshake_delay_ms` (hold back the handshake's answer), `report_delay_ms` (hold back the battery and what comes with it), `dump_delay_ms` (from the battery to the startup dump and its mode) |
 | `Flood(u count)` | that many advertisers no key decrypts and no IRK resolves |
 | `Received(s mac) → aay` | every AAP packet the app sent the pair: check `0x34 01` precedes Off |
 | `Batteries() → a{sy}` | what GNOME Settings shows, by MAC |
@@ -131,7 +133,13 @@ scripts/fake-world.sh app Notifications             # every notification sent an
 `Tree` lists every widget with its `id` (if any), `path`, text and state;
 `src/ui/automation.rs` lists the IDs. A press is refused with `Hidden` or `Insensitive`
 where a user's click would fail, so Noise Control refuses presses while the device is
-on BLE.
+on BLE, and so does the `conversation-awareness` switch, until the startup dump has
+reported the setting too.
+
+Conversation Awareness: `app SetActive conversation-awareness true` turns it on (`world
+Received` shows `0x28 01` sent); then `world Speak 00:00:5E:00:53:01 4000`, and the
+Noise Control group shows Transparency from 0.31 s until 0.46 s after the speech, the
+app's log the levels at debug (`AAP speech level`).
 
 Change, settle, then read: `SetBattery`, `Settle`, `tree`.
 
@@ -214,9 +222,12 @@ the fake world's own config directory, never the user's -
   only with the startup dump, 200 ms later (1.4-1.5 s on the hardware; set
   `dump_delay_ms` for the real wait). Noise Control is sensitive as soon as the
   reading is on AAP, with no mode selected until the dump. A
-  mode change is confirmed by an echo 1 s later, with no 0x4B; an Off is followed by
-  a stale report of the mode it replaced at 0.33 s, which the app should ignore. For
-  AirPods 4's answers: `settings_changed` true, `echo_every` 4, `stale_report_ms` 0.
+  mode change is confirmed by an echo 1 s later; an Off is followed by a stale report
+  of the mode it replaced at 0.33 s, which the app should ignore. With Conversation
+  Awareness off there is no 0x4B; with it on, level 08 comes at once and 09 after the
+  echo, as on a Pro 3 (#150), and 09 after the startup dump. For AirPods 4's answers:
+  `SetConversationAwareness` true, `idle_level_only` true, `echo_every` 4,
+  `stale_report_ms` 0.
   The handshake is answered at once unless `handshake_delay_ms` says otherwise (about
   1 s on the hardware).
 - **Logs** are in `$XDG_RUNTIME_DIR/linuxpods-harness/world/log/`: `linuxpods.log` at
