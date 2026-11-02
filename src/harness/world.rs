@@ -19,7 +19,10 @@
 //!   changes, so most of what the fake BlueZ signals is the strength alone,
 //!   as with real AirPods. Every adapter that discovers hears it, whichever
 //!   the pair is paired with, as radios in one room do, so with two adapters
-//!   each advertisement is signaled twice, from a device under each.
+//!   each advertisement is signaled twice, from a device under each. When
+//!   the last client stops discovering, the pods' devices go, as
+//!   bluetoothd's do, and the next to discover hears each pod afresh at its
+//!   next advertisement - see [`FakeBluez`].
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
@@ -61,8 +64,8 @@
 //!
 //! Time is real: each pod rotates its address every ten seconds - far more
 //! often than real AirPods, every 4 to 8 minutes, so that tests meet rotation -
-//! and the fake BlueZ forgets an address after thirty. The model's clock
-//! starts with the world.
+//! and the fake BlueZ forgets an address after thirty, or as soon as nobody
+//! discovers. The model's clock starts with the world.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::Shutdown;
