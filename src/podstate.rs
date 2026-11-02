@@ -1639,10 +1639,10 @@ impl Coordinator {
     /// Switches one connected device's noise control mode.
     ///
     /// The new mode is recorded optimistically. Nothing the device answers
-    /// confirms it on every model: AirPods 4 sent a settings-changed
-    /// notification that names neither the sub-command nor the mode, and the
-    /// 0x0D echo carrying the mode back for one change in four; AirPods Pro 3
-    /// echo every change, but only about a second later. Waiting would leave
+    /// confirms it on every model: AirPods 4 sent the 0x0D echo carrying the
+    /// mode back for one change in four; AirPods Pro 3 echo every change, but
+    /// only about a second later. With Conversation Awareness on, its levels
+    /// 08 and 09 come around the change, naming no mode. Waiting would leave
     /// the interface on the old mode meanwhile, or for good. A later report
     /// confirms what we set - or,
     /// when it is of the mode replaced and comes within

@@ -108,7 +108,10 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
     // a command that failed. So a turn by the user sends the command, a
     // snapshot turns it under `syncing_features`, which keeps that from going
     // back out, and a command that failed draws the last snapshot again,
-    // putting the switch back.
+    // putting the switch back. A snapshot drawn between the click and the
+    // command's record - a speech level, say - puts it back for that moment
+    // too, and the next one forward: a flicker, accepted, never a wrong
+    // setting left on show.
     let coord = coordinator.clone();
     ui.control
         .conversation_awareness
@@ -124,12 +127,16 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
                 let Some(mac) = *ui.selected.borrow() else {
                     return;
                 };
-                let command = Command::ConversationAwareness(switch.is_active());
+                let enabled = switch.is_active();
+                let command = Command::ConversationAwareness(enabled);
                 let done = coord.command(mac, command);
                 let ui = ui.clone();
                 glib::spawn_future_local(async move {
                     if let Err(e) = done.await {
-                        tracing::warn!("failed to {command} for {mac}: {e:#}");
+                        let on = if enabled { "on" } else { "off" };
+                        tracing::warn!(
+                            "failed to turn Conversation Awareness {on} for {mac}: {e:#}"
+                        );
                         toasts.add_toast(adw::Toast::new(&command_failed(command, &e)));
                         ui.redraw();
                     }
