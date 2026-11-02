@@ -21,7 +21,8 @@ AirPods continuously broadcast BLE advertisements containing battery levels, cha
   [Device Identification](#solution-identification-by-irk-then-enc_key). The cleartext is what
   an unidentified pair advertises, and is still decoded: offering such a pair for pairing
   would read it (#131)
-- **Slow Updates**: The payload changes when something happens, and otherwise every 20-30 s
+- **Slow Updates**: The payload changes when something happens, and a few times in the
+  minute after; otherwise it stays the same, for minutes
 
 ### Use Cases
 
@@ -396,13 +397,30 @@ unidentified pair advertises - what offering such a pair for pairing would read
 
 ### Update Frequency
 
-From the #71 captures (AirPods Pro 3):
+From the #71 captures and the hardware checks since (AirPods Pro 3, and Pro 2
+USB-C where noted):
 
 - **Advertisements:** about 5 a second from each pod that advertises, in every
   steady state - open case, out of the case, connected or not - with bursts of
   30-35 a second for about 10 s after the lid opens or the pods go back in the case
 - **Payload:** repeated for hundreds of advertisements. It changes in bursts when
-  something happens, and otherwise every 20-30 s
+  something happens, and again about 5 s, 30 s and 60 s later with nothing else
+  changing, then stays: 163 s in the longest stretch, the pods worn, connected to
+  this host or to nothing, on both models. Those gaps of 25 and 30 s are most
+  likely what was once recorded here as a refresh every 20-30 s. On 2026-11-02 a
+  pair idle in the open case, connected to a phone, sent the same payload for
+  minutes, over 40 s of scanning and across 2 minutes before it (#153). In each
+  app run that day, each pod's payload also changed once about 2 s after
+  discovery started, then stayed; the cause is unknown
+- **Discovery:** bluetoothd removes the pods' devices when the last client stops
+  discovering, as it does every temporary device that is not connectable and not
+  connected (`discovery_cleanup` in BlueZ's `src/adapter.c`); the pods'
+  advertisements are not connectable. So with nobody else discovering, a discovery
+  start hears each pod at once, in the `InterfacesAdded` that announces its device:
+  the battery showed 36 ms after the app started discovering, on 2026-11-02. While
+  another client discovers - GNOME Settings' Bluetooth panel, say - the devices stay,
+  and a pod is heard only once its payload or address changes: after 2.1 s and 4.1 s
+  that day (#153)
 - **Closed lid:** the pods stop advertising about 4 s after the lid closes
 - **Which pod:** while either pod is in the case, both advertise, each from its
   own address. With both out of the case, worn or not, only the primary does:
@@ -452,7 +470,7 @@ Value  State
 | Battery Granularity | 10% steps | 1% |
 | Identifies the pair | No | Yes (IRK, then ENC_KEY) |
 | Shown by LinuxPods | No | Yes |
-| Update Rate | on events, else every 20-30 s | on events, else every 20-30 s |
+| Update Rate | on events | on events |
 | Connection Required | No | No (but needs key from AAP) |
 | Works with iPhone connected | Yes | Yes |
 | Control (Noise modes) | No | No |
@@ -651,8 +669,8 @@ device's first AAP connection.
 
 ## Known Limitations
 
-1. **Update latency** - the payload changes on events, and otherwise every 20-30 s
-   (inherent to protocol)
+1. **Update latency** - the payload changes on events, and otherwise stays the same
+   for minutes (inherent to protocol)
 2. **Cleartext batteries** - 10% steps, and nothing to tell which pair sent them
 3. **Key requirement** - identifying a pair, and with it any BLE reading in LinuxPods,
    requires one-time retrieval of its IRK and ENC_KEY via AAP connection
@@ -669,7 +687,7 @@ device's first AAP connection.
 
 ---
 
-**Last Updated:** 2026-10-28<br>
+**Last Updated:** 2026-11-02<br>
 **Tested With:**
  - AirPods Pro (Gen 2) (0x2024), Firmware 7A305
  - AirPods Pro 3 (0x2027), Firmware 8A353

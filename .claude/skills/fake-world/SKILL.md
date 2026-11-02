@@ -187,8 +187,9 @@ the fake world's own config directory, never the user's -
   its own, made from the pair's IRK, that rotates every 10 s, the left pod's half a
   rotation off the right's; the fake BlueZ drops an address 30 s after it goes quiet.
   Both pods advertise while one is in the case, only the primary while both are out.
-  A pod repeats its payload until something changes, or for 25 s, and the fake BlueZ
-  signals a repeat as `RSSI` alone, as bluetoothd does. So the app reads an address's
+  A pod repeats its payload until something changes - an idle pair's for minutes, as on
+  hardware (#153) - and the fake BlueZ signals a repeat as `RSSI` alone, as bluetoothd
+  does. So the app reads an address's
   first advertisement, in `InterfacesAdded`, and each change, in `PropertiesChanged`
   with `ManufacturerData`, and no repeat: a first reading within about a second of
   start, then one per change. A pod in the closed case stops advertising 4 s after the
@@ -199,11 +200,15 @@ the fake world's own config directory, never the user's -
   30-35 after the lid opens or the pods go back in the case, and in the rotation,
   every 4 to 8 minutes. The fake's rotation stays this fast on purpose, to exercise
   it.
-- **An app started late hears a pod only once it changes.** Started while the fake
-  BlueZ still has a pod's address - within 30 s of the last app's discovery, say - the
-  app gets no `InterfacesAdded` for it, and nothing of it until its payload or address
-  changes: up to 5 s while both pods advertise, 10 s while one does. bluetoothd does
-  the same for a device it keeps, and the app has the same gap on hardware (#153).
+- **Discovery's end takes the pods' devices.** When the last client stops discovering,
+  or leaves the bus - the app quitting, with nothing else discovering - the fake BlueZ
+  removes every device it only heard advertising, `RSSI` invalidated first, as
+  bluetoothd does with the pods' (#153). So an app started next hears each pod at once,
+  in an `InterfacesAdded` at its next advertisement. Started while another client
+  still discovers, it gets no `InterfacesAdded` for a pod the fake BlueZ kept, and
+  nothing of it until its payload or address changes: up to 5 s while both pods
+  advertise, 10 s while one does. On hardware that gap was 2.1-4.1 s, with GNOME
+  Settings' Bluetooth panel open.
 - **AAP timing.** The fake pods answer as AirPods Pro 3 do in the #71 captures, for
   every model: the battery and where the pods are come first, and the noise mode
   only with the startup dump, 200 ms later (1.4-1.5 s on the hardware; set
