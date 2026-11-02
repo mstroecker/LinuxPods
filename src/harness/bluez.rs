@@ -10,9 +10,11 @@
 //!   client and needs the adapter powered, and a `BatteryProviderManager1` of
 //!   its own
 //! - a `Device1` for each paired pair, under the adapter it is paired with, at
-//!   its real address: `Address`, `Adapter`, `Alias`, `Connected`,
+//!   its real address: `Address`, `Adapter`, `Name`, `Alias`, `Connected`,
 //!   `ServicesResolved`, `Paired` and `UUIDs`, the AirPods service among them
-//!   unless [`FakeBluez::set_airpods_service`] took it out
+//!   unless [`FakeBluez::set_airpods_service`] took it out. `Name` is the
+//!   pair's own, as read when it connects - see [`FakeBluez::set_name`] - and
+//!   `Alias` follows it until one is set - see [`FakeBluez::set_alias`]
 //! - a `Device1` for each random address an adapter heard an advertisement
 //!   from, under that adapter, with its `ManufacturerData`
 //! - `Battery1` on a device once a registered provider gives it a level - the
@@ -399,10 +401,13 @@ struct Audio {
     resume: bool,
 }
 
-/// A paired device's pairing: the adapter it is with, and its name.
+/// A paired device's pairing: the adapter it is with, and its names.
 struct Pairing {
     adapter: String,
-    alias: String,
+    /// The pair's own name, `Name`, and the alias set here, if one is - see
+    /// [`PairedDevice`].
+    name: String,
+    alias: Option<String>,
     /// How many times it has connected, so that services resolved late are
     /// resolved for the connection they were for. Kept here, as the
     /// pairing is, through its object going and coming with its adapter
@@ -671,18 +676,18 @@ impl FakeBluez {
             if powered {
                 state.powered.insert(name.to_string());
             }
-            let paired: Vec<(Address, String)> = state
+            let paired: Vec<(Address, Names)> = state
                 .paired
                 .iter()
                 .filter(|(_, pairing)| pairing.adapter == name)
-                .map(|(address, pairing)| (*address, pairing.alias.clone()))
+                .map(|(address, pairing)| (*address, Names::of(pairing)))
                 .collect();
             (address, paired)
         };
         self.export_adapter(&self.conn(), name, address).await?;
         // Loaded from its storage once it is there, as bluetoothd does.
-        for (address, alias) in paired {
-            self.export_paired(name, address, alias).await?;
+        for (address, names) in paired {
+            self.export_paired(name, address, names).await?;
         }
         Ok(())
     }
@@ -862,6 +867,7 @@ impl FakeBluez {
                 PairedDevice {
                     address,
                     adapter: device.adapter.clone(),
+                    name: device.name.clone(),
                     alias: device.alias.clone(),
                     connected: device.connected,
                     services_resolved: device.services_resolved,
@@ -929,8 +935,9 @@ impl FakeBluez {
             .is_some_and(|pairing| state.powered.contains(&pairing.adapter))
     }
 
-    /// Adds a device paired with the adapter called `adapter`, disconnected.
-    pub async fn add_device(&self, adapter: &str, address: Address, alias: &str) -> Result<()> {
+    /// Adds a device paired with the adapter called `adapter`, disconnected,
+    /// called `name` and with no alias set.
+    pub async fn add_device(&self, adapter: &str, address: Address, name: &str) -> Result<()> {
         {
             let mut state = self.state();
             anyhow::ensure!(state.has_adapter(adapter), "there is no adapter {adapter}");
@@ -940,7 +947,8 @@ impl FakeBluez {
             );
             let pairing = Pairing {
                 adapter: adapter.to_string(),
-                alias: alias.to_string(),
+                name: name.to_string(),
+                alias: None,
                 connections: 0,
                 volume: DEFAULT_VOLUME,
                 transports: 0,
@@ -948,16 +956,20 @@ impl FakeBluez {
             };
             state.paired.insert(address, pairing);
         }
-        self.export_paired(adapter, address, alias.to_string())
-            .await
+        let names = Names {
+            name: name.to_string(),
+            alias: None,
+        };
+        self.export_paired(adapter, address, names).await
     }
 
     /// Puts a paired device's object under its adapter, disconnected.
-    async fn export_paired(&self, adapter: &str, address: Address, alias: String) -> Result<()> {
+    async fn export_paired(&self, adapter: &str, address: Address, names: Names) -> Result<()> {
         let device = PairedDevice {
             address,
             adapter: adapter_object(adapter),
-            alias,
+            name: names.name,
+            alias: names.alias,
             connected: false,
             services_resolved: false,
             airpods_service: true,
@@ -1082,6 +1094,64 @@ impl FakeBluez {
     /// for the connections from here on: [`SERVICES_RESOLVED`] unless set.
     pub fn set_services_delay(&self, delay: Duration) {
         self.state().services_delay = Some(delay);
+    }
+
+    /// Sets a paired device's `Name`, the pair's own, as bluetoothd reads it
+    /// from the device when it connects - so a rename on the pods shows here
+    /// only once they connect again, as in #160. Signaled, and `Alias` with
+    /// it while no alias is set.
+    pub async fn set_name(&self, address: Address, name: &str) -> Result<()> {
+        let path = {
+            let mut state = self.state();
+            let path = state.paired_path(address)?;
+            if let Some(pairing) = state.paired.get_mut(&address) {
+                pairing.name = name.to_string();
+            }
+            path
+        };
+        let iface = self
+            .conn()
+            .object_server()
+            .interface::<_, PairedDevice>(path)
+            .await
+            .with_context(|| format!("no paired device {address}"))?;
+        let mut device = iface.get_mut().await;
+        if device.name == name {
+            return Ok(());
+        }
+        device.name = name.to_string();
+        device.name_changed(iface.signal_emitter()).await?;
+        if device.alias.is_none() {
+            device.alias_changed(iface.signal_emitter()).await?;
+        }
+        Ok(())
+    }
+
+    /// Sets a paired device's alias, as GNOME Settings' rename does, or
+    /// clears it with `None`, as setting an empty one does: `Alias` is the
+    /// `Name` again then. Signaled.
+    pub async fn set_alias(&self, address: Address, alias: Option<&str>) -> Result<()> {
+        let alias = alias.filter(|a| !a.is_empty()).map(str::to_string);
+        let path = {
+            let mut state = self.state();
+            let path = state.paired_path(address)?;
+            if let Some(pairing) = state.paired.get_mut(&address) {
+                pairing.alias.clone_from(&alias);
+            }
+            path
+        };
+        let iface = self
+            .conn()
+            .object_server()
+            .interface::<_, PairedDevice>(path)
+            .await
+            .with_context(|| format!("no paired device {address}"))?;
+        let mut device = iface.get_mut().await;
+        if device.alias != alias {
+            device.alias = alias;
+            device.alias_changed(iface.signal_emitter()).await?;
+        }
+        Ok(())
     }
 
     /// Lists the AirPods service among a paired device's services, or takes it
@@ -2056,11 +2126,30 @@ impl BatteryProviderManager1 {
     }
 }
 
+/// A paired device's names, as its pairing keeps them.
+struct Names {
+    name: String,
+    alias: Option<String>,
+}
+
+impl Names {
+    fn of(pairing: &Pairing) -> Self {
+        Self {
+            name: pairing.name.clone(),
+            alias: pairing.alias.clone(),
+        }
+    }
+}
+
 /// A pair paired with an adapter, at its real address.
 struct PairedDevice {
     address: Address,
     adapter: OwnedObjectPath,
-    alias: String,
+    /// The pair's own name.
+    name: String,
+    /// The alias set on this computer, if one is. bluetoothd's `Alias` is
+    /// the name while none is set.
+    alias: Option<String>,
     connected: bool,
     services_resolved: bool,
     /// Whether `UUIDs` lists the AirPods service.
@@ -2081,12 +2170,12 @@ impl PairedDevice {
 
     #[zbus(property)]
     fn name(&self) -> String {
-        self.alias.clone()
+        self.name.clone()
     }
 
     #[zbus(property)]
     fn alias(&self) -> String {
-        self.alias.clone()
+        self.alias.clone().unwrap_or_else(|| self.name.clone())
     }
 
     #[zbus(property)]
