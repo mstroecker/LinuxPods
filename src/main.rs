@@ -3,10 +3,11 @@
 //! GTK owns the main thread; a multi-threaded tokio runtime carries the BLE, AAP
 //! and D-Bus work, and the two meet over channels: snapshots come to the UI on a
 //! watch channel, commands go to the AirPods on their link's queue - see
-//! `Coordinator::command` - and the tray's window commands and the low battery
-//! notifications to the GTK main context on async channels.
+//! `Coordinator::command` - and the tray's window commands, the low battery
+//! notifications and a quit asked for by SIGTERM or SIGINT to the GTK main
+//! context on async channels.
 
-use linuxpods::{APP_ID, attachment, ble, indicator, notify, podstate, settings, ui};
+use linuxpods::{APP_ID, attachment, ble, indicator, notify, podstate, settings, ui, volume};
 
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
@@ -92,6 +93,9 @@ struct Primary {
     /// instance, and the window from the first is the one to raise. Building a
     /// second would leave two windows on one coordinator.
     window: RefCell<Option<adw::ApplicationWindow>>,
+    /// Puts back the volumes lowered while the user speaks, as the app
+    /// quits.
+    volume: volume::VolumeControl,
 }
 
 impl Primary {
@@ -110,6 +114,11 @@ impl Primary {
         runtime.spawn(ble_task(coordinator.clone()));
         runtime.spawn(attachment::run(coordinator.clone()));
         runtime.spawn(expiry_task(coordinator.clone()));
+        // On the system bus, where BlueZ is, connected once a level asks for
+        // it, and again whenever the connection failed.
+        let (lowering, volume) =
+            volume::Volume::new(&coordinator, Box::new(zbus::connection::Builder::system));
+        runtime.spawn(lowering.run());
         // Worked out on the runtime, beside the tray, and sent from the main
         // context, where the application is.
         let (notices_tx, notices_rx) = async_channel::unbounded();
@@ -128,6 +137,7 @@ impl Primary {
             coordinator,
             window_rx,
             window: RefCell::default(),
+            volume,
         }
     }
 
@@ -249,13 +259,42 @@ fn main() -> glib::ExitCode {
 
     // Runs for every launch without --minimized, the first and any later one -
     // from the launcher entry, say, while the app sits in the tray.
+    let activated = primary.clone();
     app.connect_activate(move |app| {
-        if let Some(primary) = primary.get() {
+        if let Some(primary) = activated.get() {
             primary.window(app).present();
         }
     });
 
+    // A logout's SIGTERM, a kill or Ctrl-C quits as the menu does, so what
+    // follows `run` - the volume put back - runs for them too. SIGKILL
+    // cannot be caught.
+    let (quit_tx, quit_rx) = async_channel::bounded(1);
+    runtime.spawn(quit_on_signals(quit_tx));
+    let quitting = app.clone();
+    glib::spawn_future_local(async move {
+        while quit_rx.recv().await.is_ok() {
+            quitting.quit();
+        }
+    });
+
     let code = app.run();
+    // A volume lowered while the user spoke is put back before the runtime
+    // goes, which would take the task along with it - but not for longer
+    // than a moment: a BlueZ that does not answer must not hold the quit up.
+    if let Some(primary) = primary.get() {
+        let volume = primary.volume.clone();
+        // The timeout made inside the runtime, whose timer it needs.
+        let restored = runtime.block_on(async move {
+            tokio::time::timeout(volume::RESTORE_LIMIT, volume.restore_all()).await
+        });
+        if restored.is_err() {
+            tracing::warn!(
+                "gave up putting back the volume after {}s",
+                volume::RESTORE_LIMIT.as_secs()
+            );
+        }
+    }
     // Keep the runtime alive until GTK returns.
     drop(runtime);
     code
@@ -292,6 +331,37 @@ async fn ble_task(coordinator: Arc<Coordinator>) {
 /// Scanning on the system bus, where BlueZ is.
 async fn scan() -> anyhow::Result<ble::scanner::Scanning> {
     ble::scanner::Scanner::new().await?.scan().await
+}
+
+/// Asks the main context to quit at the first SIGTERM or SIGINT, which from
+/// here on no longer end the process on their own; at the next, as a quit
+/// already asked for has not ended it, exits at once - 143 or 130, as the
+/// signal would have.
+async fn quit_on_signals(quit: async_channel::Sender<()>) {
+    use tokio::signal::unix::{SignalKind, signal};
+    // Each on its own: one registered and left unread would be swallowed.
+    let listen = |kind: SignalKind, name: &str| {
+        signal(kind)
+            .inspect_err(|e| tracing::warn!("{name} will not put back a lowered volume: {e}"))
+            .ok()
+    };
+    let mut term = listen(SignalKind::terminate(), "SIGTERM");
+    let mut int = listen(SignalKind::interrupt(), "SIGINT");
+    let mut asked = false;
+    loop {
+        let (name, code) = tokio::select! {
+            Some(()) = async { term.as_mut()?.recv().await } => ("SIGTERM", 143),
+            Some(()) = async { int.as_mut()?.recv().await } => ("SIGINT", 130),
+            else => return,
+        };
+        if std::mem::replace(&mut asked, true) {
+            tracing::warn!("{name} again: exiting without waiting for the quit");
+            std::process::exit(code);
+        }
+        tracing::info!("quitting on {name}");
+        // Never waits: the one quit asked for is all there is to ask.
+        let _ = quit.try_send(());
+    }
 }
 
 /// Expires cached BLE readings on a clock. Advertisements prune as they arrive,

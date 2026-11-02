@@ -48,6 +48,7 @@ pub mod notify;
 pub mod podstate;
 pub mod settings;
 pub mod ui;
+pub mod volume;
 
 #[cfg(test)]
 mod tests {
