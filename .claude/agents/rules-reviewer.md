@@ -100,8 +100,25 @@ carries a GTK object toward tokio.
 - uses a sentinel (0, 255, -1) for an unknown battery instead of `None`, or lets a level
   above 100, or the level beside an AAP status Disconnected (`0x04`), through as a reading.
 
+**Volume.** The volume lowered while the user speaks (`volume`, #150). Flag a diff that:
+- keeps a `MediaTransport1` path across calls, or finds the transport other than under
+  the pair's device path by `Device` and `UUID`: the path is new with every A2DP setup;
+- calls BlueZ without `NoAutoStart`, or makes a call or the bus connection without
+  `volume::CALL_LIMIT`, or subscribes the task to a signal;
+- puts back a volume, or steps a fade, unless the transport reads one that is ours -
+  within `volume::READ_BACK_SLACK` of a volume set this stretch, or the volume before
+  while the lowering is unanswered - or compares with the last value set alone, or waits
+  or polls for the pods' answer after a set: bluetoothd's `Volume` changes only when
+  they answer, late and maybe rounded. The lowering itself sets from any volume;
+- lowers anything but an `active` A2DP transport;
+- stops putting back the volume on `LinkGone`, at quit, or once a transport that went
+  reads ours again, or moves that work into a pair's supervisor, which is aborted;
+- waits in a test on a sleep for a volume set that must not come, rather than on
+  `VolumeControl::settled`.
+
 **Parsing and tests.** `aap::battery`, `aap::conversation`, `aap::ear`, `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`,
-`ble::decrypt` and `ble::rpa` take bytes and return values - flag I/O, global state or coordinator access
+`ble::decrypt` and `ble::rpa` take bytes and return values, and `volume::Ducking` and
+`volume::a2dp_in` take the time or BlueZ's objects as values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
 literals; flag what it cannot: a test reading the real keystore or settings
 (`~/.local/share/linuxpods`, `~/.config/linuxpods`, `$HOME`, `XDG_DATA_HOME` or

@@ -64,11 +64,15 @@ own. This is the only channel that can *send* commands.
 | Loud sound reduction | 📋 |
 | Firmware version | 📋 |
 
-Conversation Awareness is partly there: the window's switch shows the setting and sends
-LibrePods' command to change it, not yet confirmed on a pair here; with it on, the
-pods switch to Transparency while you speak, which the window shows, but the media's
-volume is not lowered yet - on an iPhone or a Mac the host does that, on the levels the
-pods send (#150).
+Conversation Awareness is there but for hardware checks: the window's switch shows the
+setting and sends LibrePods' command to change it, not yet confirmed on a pair here.
+With it on, the pods switch to Transparency while you speak, which the window shows,
+and the app lowers the pair's own volume - its A2DP volume in BlueZ, which PipeWire's
+sink follows - to a fifth at once, and fades it back over 1.5 s once you stop, as an
+iPhone or a Mac does on the levels the pods send. Only while audio plays to the pair
+and no call is on, and a volume you change meanwhile is left as you set it. Tested
+against the fake pods; on a pair, the lowering and the fade are still to be checked
+(#150).
 
 ### Linux integration
 
@@ -238,7 +242,8 @@ when its address resolves with a stored IRK, and with that pair's key alone. Bot
 - [`docs/aap-noise-control.md`](docs/aap-noise-control.md) - switching noise control mode,
   and why the device's answer is no acknowledgment
 - [`docs/aap-conversation-awareness.md`](docs/aap-conversation-awareness.md) - the
-  Conversation Awareness setting, and the speech levels the pods send with it on
+  Conversation Awareness setting, the speech levels the pods send with it on, and the
+  volume lowered on them
 
 ## Development
 
@@ -283,7 +288,8 @@ pair for its proximity pairing keys and lays out what comes back, key bytes reda
 nothing stored, to debug a request that fails; `noise_probe <MAC>` cycles
 the noise control modes and classifies every packet that comes back;
 `conversation_awareness <MAC>` logs the Conversation Awareness setting and every speech
-level and mode report with its time, optionally turning the setting on for the run; `apple_sniff` logs
+level and mode report with its time, optionally turning the setting on for the run, and
+with `--duck` lowers the volume on the levels as the app does; `apple_sniff` logs
 Apple manufacturer data as it arrives; `decrypt_probe` decrypts captured payloads
 offline and shows the plaintext of each the app's suffix rule accepts; `irk_probe <MAC>...` asks
 pairs for their keys, keeps them in memory, and reports per advertising address whether
@@ -303,6 +309,7 @@ src/
 ├── settings.rs    # Preferences' settings under XDG config dir
 ├── indicator.rs   # System tray (StatusNotifierItem)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
+├── volume.rs      # The volume lowered while the user speaks, through BlueZ's MediaTransport1
 ├── ui/            # GTK4/libadwaita: window, Control page, Preferences, notifications; automation.rs, harness only
 ├── harness/       # harness only: fake AirPods (pods.rs), fake BlueZ (bluez.rs), the world (world.rs)
 └── bin/           # harness only: fakepods.rs, the fake world make fake-world runs
