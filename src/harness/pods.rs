@@ -29,6 +29,7 @@ use std::time::Duration;
 use bluer::Address;
 
 use crate::aap::battery::{Battery, Component, Status, battery_packet};
+use crate::aap::conversation;
 use crate::aap::ear::{EarReport, Place, ear_packet, primary_packet};
 use crate::aap::keys::{KeyType, ProximityKey, key_packet};
 use crate::aap::message::HEADER;
@@ -1366,7 +1367,7 @@ impl Pods {
             *reported = mode;
         }
         if self.quirks.settings_changed {
-            session.send(now, noise::settings_changed_packet().to_vec());
+            session.send(now, conversation::level_packet(0x09).to_vec());
         }
         // Stale, so not what the app was told: `session.mode` keeps the mode
         // set, and only the echo corrects the report.
@@ -2106,7 +2107,7 @@ mod tests {
             assert_eq!(pods.noise_mode(), mode);
             assert_eq!(
                 sent(&pods.poll(now)),
-                [noise::settings_changed_packet().to_vec()],
+                [conversation::level_packet(0x09).to_vec()],
                 "change {}",
                 i + 1
             );
@@ -2165,7 +2166,7 @@ mod tests {
         assert_eq!(
             sent(&pods.poll(ms(10))),
             [
-                noise::settings_changed_packet().to_vec(),
+                conversation::level_packet(0x09).to_vec(),
                 noise::set_packet(NoiseMode::Adaptive).to_vec()
             ]
         );

@@ -6,6 +6,7 @@
 
 pub mod battery;
 pub mod client;
+pub mod conversation;
 pub mod ear;
 pub mod keys;
 pub mod message;
