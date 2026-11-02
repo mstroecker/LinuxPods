@@ -16,11 +16,10 @@
 //!   object every ten seconds. Both pods advertise while one is in the case,
 //!   only the primary while both are out, and none from the closed case -
 //!   see [`Pods::advertisements`]. A pod repeats its payload until something
-//!   changes, or for [`super::pods::PAYLOAD_REFRESH`], so most of what the
-//!   fake BlueZ signals is the strength alone, as with real AirPods. Every
-//!   adapter that discovers hears it, whichever the pair is paired with, as
-//!   radios in one room do, so with two adapters each advertisement is
-//!   signaled twice, from a device under each.
+//!   changes, so most of what the fake BlueZ signals is the strength alone,
+//!   as with real AirPods. Every adapter that discovers hears it, whichever
+//!   the pair is paired with, as radios in one room do, so with two adapters
+//!   each advertisement is signaled twice, from a device under each.
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
