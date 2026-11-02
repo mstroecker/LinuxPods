@@ -98,7 +98,11 @@ carries a GTK object toward tokio.
   of reach of the caller's abort or timeout, and `AAP_CONNECT_TIMEOUT` must outlast
   `CONNECT_LIMIT` plus the handshake's;
 - uses a sentinel (0, 255, -1) for an unknown battery instead of `None`, or lets a level
-  above 100, or the level beside an AAP status Disconnected (`0x04`), through as a reading.
+  above 100, or the level beside an AAP status Disconnected (`0x04`), through as a reading;
+- sets or clears `Device1.Alias`; sends a rename over 127 bytes, empty or with a NUL, or
+  cuts one by bytes instead of refusing it; waits for an answer after a rename instead of
+  recording it;
+- reads a name from a `0x1D` without `02` at byte 6 and `04 00` at bytes 9-10.
 
 **Volume.** The volume lowered while the user speaks (`volume`, #150). Flag a diff that:
 - keeps a `MediaTransport1` path across calls, or finds the transport other than under
@@ -116,7 +120,7 @@ carries a GTK object toward tokio.
 - waits in a test on a sleep for a volume set that must not come, rather than on
   `VolumeControl::settled`.
 
-**Parsing and tests.** `aap::battery`, `aap::conversation`, `aap::ear`, `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`,
+**Parsing and tests.** `aap::battery`, `aap::conversation`, `aap::ear`, `aap::keys`, `aap::name`, `aap::noise`, `aap::message`, `ble::parser`,
 `ble::decrypt` and `ble::rpa` take bytes and return values, and `volume::Ducking` and
 `volume::a2dp_in` take the time or BlueZ's objects as values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
@@ -137,6 +141,7 @@ accepted exception), or a captured advertisement committed together with the key
   not on AAP, or the switch sensitive before the startup dump has reported the setting;
   a snapshot turning the switch outside `syncing_features`, which sends the setting
   back out.
+- The Name row sensitive when the device is not on AAP or the pods' name is not known.
 - A resource path the UI loads that is missing from `assets/resources.gresource.xml`, or
   from the list in the `bundled_resources_resolve` test.
 - Placeholder UI the user has not built yet must stay visible but insensitive, with a
@@ -144,8 +149,9 @@ accepted exception), or a captured advertisement committed together with the key
 
 **Logs.** Keep the `BLE parsable:` and `BLE decryptable:` stage prefixes. Noisy
 non-proximity Apple data goes to `trace`. Bytes go through `linuxpods::hex`, and a
-packet that may carry keys through `aap::keys::redacted_hex`; no log, probe or example
-prints key bytes.
+packet that may carry keys or serial numbers - a device information packet, `0x1D` -
+through `aap::keys::redacted_hex`; no log, probe or example prints key bytes or serial
+numbers.
 
 **Commits and PR body.** Flag a `Claude-Session:` trailer or a
 `https://claude.ai/code/session_` link in any commit message in the range or in the PR
