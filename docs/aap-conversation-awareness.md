@@ -4,7 +4,7 @@ Conversation Awareness lowers the media volume while the user speaks and raises 
 
 **Status:** the setting's report in the startup dump and the levels checked on AirPods Pro 3 on 2026-11-01 (#150), with `examples/conversation_awareness.rs`'s predecessor and `examples/noise_probe.rs`. That AirPods Pro 2 (USB-C) behave the same is assumed, not checked. The `0x4B` packets AirPods 4 sent after every mode change (`aap-noise-control.md`) are the same levels. The command that changes the setting is LibrePods'; it has not been sent to a pair from here yet.
 
-**Source:** the packets from [LibrePods](https://github.com/kavishdevar/librepods/blob/main/docs/AAP%20Definitions.md) ("Conversational Awareness", "Toggle Conversational Awareness") and its [control command table](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.md) (`0x28`), for protocol facts only: GitHub detects no license for LibrePods, so no code is taken from it. What the levels mean comes from the run below.
+**Source:** the packets from [LibrePods](https://github.com/librepods-org/librepods/blob/main/docs/AAP%20Definitions.md) ("Conversational Awareness", "Toggle Conversational Awareness") and its [control command table](https://github.com/librepods-org/librepods/blob/main/docs/control_commands.md) (`0x28`), for protocol facts only: GitHub detects no license for LibrePods, so no code is taken from it. What the levels mean comes from the run below.
 
 ## The setting: `0x09` sub-command `0x28`
 
@@ -122,6 +122,6 @@ The setting's byte 6 is not optional: the `0x09` family's other settings, the no
 
 ## References
 
-- [LibrePods AAP Definitions](https://github.com/kavishdevar/librepods/blob/main/docs/AAP%20Definitions.md) - Conversational Awareness, Toggle Conversational Awareness
-- [LibrePods control commands](https://github.com/kavishdevar/librepods/blob/main/docs/control_commands.md) - `0x28`
+- [LibrePods AAP Definitions](https://github.com/librepods-org/librepods/blob/main/docs/AAP%20Definitions.md) - Conversational Awareness, Toggle Conversational Awareness
+- [LibrePods control commands](https://github.com/librepods-org/librepods/blob/main/docs/control_commands.md) - `0x28`
 - [Apple: noise control settings on AirPods Pro](https://support.apple.com/en-lamr/guide/airpods/dev6d977ff21/web)
