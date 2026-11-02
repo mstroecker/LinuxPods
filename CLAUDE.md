@@ -245,12 +245,14 @@ not something to enable on every connection. A link that goes between the two le
 Off allowed but not set, which is harmless: Off was asked for.
 
 **Noise control is fire-and-forget.** `04 00 04 00 09 00 0D [mode] 00 00 00` sets the
-mode, and nothing the device answers confirms it reliably: AirPods 4 sent a `0x4B`
-settings-changed notification naming neither sub-command nor mode, and a `0x0D` echo for
-perhaps one mode in four; a Pro 3 sent no `0x4B` and echoed every change about 1 s later
-(#71). Record the mode optimistically and let a later report confirm it. Validate reports
-on the `04 00 04 00` header, byte 4 **and** byte 6: the `0x09` family carries a dozen
-other sub-commands, all of them in the startup dump.
+mode, and nothing the device answers confirms it reliably: AirPods 4 sent a `0x0D` echo
+for perhaps one mode in four, and a Pro 3 echoed every change about 1 s later (#71). The
+`0x4B` that AirPods 4 sent after every change, naming neither sub-command nor mode, is
+Conversation Awareness's level `09`, and comes only with that setting on: a Pro 3 with it
+on answered every change `08`, the echo, `09` (#150). Record the mode optimistically and
+let a later report confirm it. Validate reports on the `04 00 04 00` header, byte 4
+**and** byte 6: the `0x09` family carries a dozen other sub-commands, all of them in the
+startup dump.
 
 A report of the mode the last command replaced is held off until the mode set is
 reported, or `STALE_REPORT_WINDOW` (2 s) has passed since the command was recorded
@@ -263,6 +265,19 @@ may have been changed on another device. Only the last command's replaced mode i
 off, and that is accepted: a report of a mode an earlier command set or replaced is
 taken, so quick successive changes can briefly replay older modes, and the last
 command's echo settles it, so the mode on show always ends as the one last set.
+
+**Conversation Awareness is a setting; its levels are speech.** `0x09` sub-command `0x28`
+(`01` on, `02` off) is reported in the startup dump; that the same packet sets it, and
+that it is not reported again when it changes, is LibrePods' word, neither yet checked
+here (#150), so `Command::ConversationAwareness` is recorded optimistically like the mode, on
+the link (`Link::conversation_awareness`), and goes with it; a change made on a phone may
+never show until the next connection. With it on the pods send `04 00 04 00 4B 00 02 00 01
+[level]`: `01`/`02` speaking, `03`-`07` easing back, `08` normal, `09` idle - a target,
+not a step to count. `08` and `09` also frame every mode change, so they name no mode and
+acknowledge nothing. While the user speaks the pods switch to Transparency and back
+themselves, as ordinary mode reports, taken like any other. The link's last level is in
+the snapshot (`PodState::speech_level`); lowering the volume on it is still to come
+(#150).
 
 **Nothing goes out before the handshake is answered.** The AirPods drop what they are
 sent until they have answered it (`01 00 04 00 …`), and a pair that had only just
@@ -299,8 +314,8 @@ deadlocked every command sent meanwhile.
 
 ## Patterns
 
-- Keep protocol parsing pure and tested. `aap::battery`, `aap::ear`, `aap::keys`,
-  `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
+- Keep protocol parsing pure and tested. `aap::battery`, `aap::conversation`, `aap::ear`,
+  `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
   return values, and carry the bulk of the test suite; `noise::ModeState`,
   `ear::EarState`, `rpa::ResolvedAddresses` and `notify::Alerts` take the time as an
   argument for the same reason. `aap::decode` routes every packet by its header and opcode;
@@ -338,9 +353,12 @@ event, never a control's state, so the noise radios keep showing the recorded mo
 setting is not device state: its switch is bound to an app action and shows that action's
 state, as Battery notifications does with `app.battery-notifications`. Read
 a selection *before* mutating the widget - splicing a `StringList` makes `GtkDropDown`
-emit `selected-notify`, clobbering the user's choice. Noise Control is a command,
-so it stays insensitive unless the device is on AAP, and Features stays insensitive until
-the commands behind it are known; BLE is receive-only.
+emit `selected-notify`, clobbering the user's choice. Noise Control and Conversation
+Awareness are commands, so they stay insensitive unless the device is on AAP - and the
+switch until the setting is reported, as a switch cannot show unknown; BLE is
+receive-only. A snapshot turns that switch under `ControlView::syncing_features`, so its
+`notify::active` does not send the setting back out, and a failed command draws the last
+snapshot again, which puts it back.
 Low battery notifications are worked out on the tokio side (`notify::Alerts`) and sent
 from the main context as `GNotification`s, one per pair. They warn once per crossing, never
 per snapshot - the worst band stands until the part charges or clears
@@ -372,7 +390,10 @@ A `Co-Authored-By:` trailer is fine.
 - `docs/ble-proximity-pairing.md` - proximity pairing, identification by IRK then ENC_KEY,
   decrypted layout, suffix validation
 - `docs/aap-key-retrieval.md` - retrieving IRK and ENC_KEY over AAP
-- `docs/aap-noise-control.md` - mode packet, the 0x4B notification, the 0x09 family
+- `docs/aap-noise-control.md` - mode packet, the 0x4B levels around a mode change, the
+  0x09 family
+- `docs/aap-conversation-awareness.md` - the 0x28 setting, the speech levels (0x4B), the
+  hardware run, the pods' own switch to Transparency, the 0x4D requirement
 - `docs/aap-ear-detection.md` - the ear report (0x06) and primary pod (0x08), the role
   switch
 - `docs/releasing.md` - release steps, what a release contains, verifying one

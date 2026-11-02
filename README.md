@@ -64,7 +64,11 @@ own. This is the only channel that can *send* commands.
 | Loud sound reduction | 📋 |
 | Firmware version | 📋 |
 
-🚧 means the switch is in the window, grayed out: the command behind it is still unknown.
+Conversation Awareness is partly there: the window's switch shows the setting and sends
+LibrePods' command to change it, not yet confirmed on a pair here; with it on, the
+pods switch to Transparency while you speak, which the window shows, but the media's
+volume is not lowered yet - on an iPhone or a Mac the host does that, on the levels the
+pods send (#150).
 
 ### Linux integration
 
@@ -233,6 +237,8 @@ when its address resolves with a stored IRK, and with that pair's key alone. Bot
 - [`docs/aap-key-retrieval.md`](docs/aap-key-retrieval.md) - retrieving the IRK and ENC_KEY
 - [`docs/aap-noise-control.md`](docs/aap-noise-control.md) - switching noise control mode,
   and why the device's answer is no acknowledgment
+- [`docs/aap-conversation-awareness.md`](docs/aap-conversation-awareness.md) - the
+  Conversation Awareness setting, and the speech levels the pods send with it on
 
 ## Development
 
@@ -275,7 +281,9 @@ Add `linuxpods=trace` to also see Apple manufacturer data that is not proximity 
 Examples exercise the protocol layers without the interface. `key_request <MAC>` asks a
 pair for its proximity pairing keys and lays out what comes back, key bytes redacted and
 nothing stored, to debug a request that fails; `noise_probe <MAC>` cycles
-the noise control modes and classifies every packet that comes back; `apple_sniff` logs
+the noise control modes and classifies every packet that comes back;
+`conversation_awareness <MAC>` logs the Conversation Awareness setting and every speech
+level and mode report with its time, optionally turning the setting on for the run; `apple_sniff` logs
 Apple manufacturer data as it arrives; `decrypt_probe` decrypts captured payloads
 offline and shows the plaintext of each the app's suffix rule accepts; `irk_probe <MAC>...` asks
 pairs for their keys, keeps them in memory, and reports per advertising address whether
@@ -287,7 +295,7 @@ src/
 ├── main.rs        # GTK main loop on the main thread, tokio runtime alongside it
 ├── lib.rs         # Library target, so the layers can be driven from tests
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
-├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control
+├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control, Conversation Awareness
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
 ├── bluez.rs       # Adapters, the device watch, a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider

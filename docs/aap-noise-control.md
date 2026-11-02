@@ -54,7 +54,7 @@ The `EnableSpecialFeatures` packet must be sent before noise control commands. T
 Feature Enable: 04 00 04 00 4D 00 FF 00 00 00 00 00 00 00
 ```
 
-Without this packet, Adaptive mode may not be available.
+Without this packet, Adaptive mode may not be available, and, LibrePods says, Conversation Awareness works only while nothing plays (`aap-conversation-awareness.md`).
 
 ### Off has a prerequisite of its own
 
@@ -89,12 +89,12 @@ table](https://github.com/librepods-org/librepods/blob/main/docs/control_command
 
 ### Command Acknowledgment
 
-What answers a mode change depends on the model, and nothing answers it reliably on all of them:
+What answers a mode change depends on the model and on the Conversation Awareness setting, and nothing answers it reliably on all of them:
 
-- **AirPods 4** (the test results below): every mode change produced a `0x4B` settings-changed notification, which names neither the sub-command nor the mode. A `0x0D` echo of the new mode came for perhaps one change in four.
-- **AirPods Pro 3** (#71): a `0x0D` echo of every change, about 1 s after it, and no `0x4B` at all.
+- **AirPods 4** (the test results below): a `0x0D` echo of the new mode for perhaps one change in four. Every change also brought a `0x4B` naming neither the sub-command nor the mode: Conversation Awareness's level `09`, as their setting was on - see [below](#0x4b-conversation-awareness-levels-08-and-09).
+- **AirPods Pro 3** (#71): a `0x0D` echo of every change, about 1 s after it. With Conversation Awareness off, as it was there, no `0x4B` at all; with it on (#150), level `08` before the echo and `09` after it.
 
-| Mode | Sent | `0x0D` echo | `0x4B` |
+| Mode | Sent | `0x0D` echo | `0x4B`, Conversation Awareness off |
 |---|---|---|---|
 | Adaptive | `0D 04` | +1.1 s | none |
 | Noise Cancellation | `0D 02` | +1.0 s | none |
@@ -109,35 +109,32 @@ Only the last command's replaced mode is held off, and that is accepted. A repor
 
 A report held off is dropped, not deferred to the end of the 2 s. In run 1 below, Transparency and Adaptive each took effect and were followed by a report of the old mode, `0x02`, with no echo of the new one after it: applied at expiry, that report would show the wrong mode just the same. If a dropped report was right after all, the next report corrects the mode.
 
-### 0x4B Settings-Changed Notification
+### 0x4B: Conversation Awareness levels 08 and 09
 
-After every noise control command, AirPods 4 respond with an identical `0x4B` packet. AirPods Pro 3 sent none:
+After every noise control command, AirPods 4 sent an identical `0x4B` packet, and AirPods Pro 3 in #71 sent none. It was long read here as a generic settings-changed notification - a count of one, and the `0x09` family that changed. It is not: it is Conversation Awareness's speech level `09`, byte for byte (`aap-conversation-awareness.md`, #150):
 
 ```
 Offset:  0  1  2  3  4  5  6  7  8  9
 Hex:     04 00 04 00 4B 00 02 00 01 09
-         ~~~~~~~~~~  ~~    ~~    ~~ ~~
-         Header      Cmd   Len   Cnt Family
+         ~~~~~~~~~~  ~~ ~~~~~~~~~~~ ~~
+         Header      Cmd            Level
 ```
 
-| Field | Byte | Value | Description |
-|-------|------|-------|-------------|
-| Header | 0-3 | `04 00 04 00` | Standard AAP header |
-| Command | 4 | `0x4B` | Settings-changed notification |
-| Separator | 5 | `0x00` | — |
-| Data length | 6 | `0x02` | 2 bytes of payload follow (bytes 8-9) |
-| Padding | 7 | `0x00` | — |
-| Count | 8 | `0x01` | 1 setting changed |
-| Family | 9 | `0x09` | Settings command family (0x09) that was modified |
+The AirPods 4's startup dump had `0x28 01`, Conversation Awareness on, and the Pro 3's in #71 `0x28 02`: the difference between the two models was this setting. With the setting on, the levels frame every mode change. Checked on the Pro 3 (2026-11-01, `examples/noise_probe.rs`, nothing playing): every change was answered level `08`, the mode report, then `09` - all five, the bare Off the pods refused included:
 
-**Total size:** 10 bytes
+```
+sent  04 00 04 00 09 00 0d 03 00 00 00   Transparency
+recv  04 00 04 00 4b 00 02 00 01 08      level 08
+recv  04 00 04 00 09 00 0d 03 00 00 00   mode report
+recv  04 00 04 00 4b 00 02 00 01 09      level 09
+```
+
+Ten `0x4B`s, all `08` or `09`, one pair per change, and nothing else. The AirPods 4 records below have one `09` per change, and the variant `…01 08` once (run 1, ANC test); those stay as observed.
 
 **Key properties:**
-- The packet is **identical** regardless of which mode was set (Off, ANC, Transparency, Adaptive)
-- It does **not** contain the sub-command (0x0D) or the mode value — only that *something* in the 0x09 family changed
-- On AirPods 4 it is the **only consistent response** to a noise control command
-- Variant `...01 08` was also observed once (run 1, ANC test) — byte 9 = `0x08` instead of `0x09`, suggesting other setting families also use this notification format
-- Useful as a lightweight ACK ("command was processed") but not for determining which mode was set
+- The packet is **identical** whichever mode was set: it names neither the sub-command nor the mode
+- It comes only with Conversation Awareness on, and then also while the user speaks
+- So it is no acknowledgment of a mode change, nor a sign that a command was processed: `aap::decode` reads it as a speech level, `Message::SpeechLevel`
 
 ### Initial State Report
 
@@ -160,6 +157,8 @@ AirPods Pro 3 report every change of a pod's place, unasked, in an ear report (`
 
 When the noise control mode is changed from another device (e.g., iPhone, Apple Watch), the AirPods send an unsolicited `0x0D` packet with the new mode. Parse these to keep local state synchronized - except a report of the mode a command here replaced, within 2 s of it: see Stale reports.
 
+With Conversation Awareness on, the pods also switch to Transparency themselves while the user speaks, and back after, reported the same way (`aap-conversation-awareness.md`). Those are taken like any report: Transparency is the mode the pods are in.
+
 ## Settings Command Family (0x09)
 
 The `0x09` command byte is a family of settings sub-commands, not exclusive to noise control. Observed sub-commands during connection startup, with the data where it was recorded: AirPods 4's from the test runs below, and AirPods Pro 3's from #71, whose dump held 21 settings and neither `0x1A` nor `0x34`:
@@ -177,7 +176,7 @@ The `0x09` command byte is a family of settings sub-commands, not exclusive to n
 | `0x24` | Unknown (data: `03`) | `00 03` |
 | `0x25` | Unknown (data: `01`) | `01` |
 | `0x26` | Unknown (data: `01`) | `02` |
-| `0x28` | Unknown (data: `01`) | `02` |
+| `0x28` | **Conversation Awareness** - `01` on, `02` off; see `aap-conversation-awareness.md` (data: `01`) | `02` (`01` in the #150 run) |
 | `0x29` | Unknown | seen |
 | `0x2C` | Unknown | seen |
 | `0x2E` | Unknown (data: `32`) | `32` |
@@ -238,17 +237,17 @@ Tested against AirPods 4 with ANC (firmware A3055), with the Go predecessor of
 | Transparency (0x03) | `0400040009000d03000000` | Yes | `040004004b0002000109` | No |
 | Adaptive (0x04) | `0400040009000d04000000` | Yes | `040004004b0002000109` | No |
 
-All four 0x4B packets were **byte-identical**: `04 00 04 00 4B 00 02 00 01 09`. The packet contains no mode-specific data — it is a generic "settings family 0x09 was modified" ACK.
+All four 0x4B packets were **byte-identical**: `04 00 04 00 4B 00 02 00 01 09`. The packet contains no mode-specific data: it is Conversation Awareness's level `09`, which the pair sent after every change because its setting was on - see [above](#0x4b-conversation-awareness-levels-08-and-09).
 
 ### Key Observations
 
-On AirPods 4; AirPods Pro 3 differ, see [Command Acknowledgment](#command-acknowledgment).
+On AirPods 4, with Conversation Awareness on; AirPods Pro 3 differ, see [Command Acknowledgment](#command-acknowledgment).
 
 1. All four mode commands produce audible mode changes on the AirPods
-2. The `0x4B` settings-changed notification is the **only consistent** response (identical for all modes)
+2. Level `09` of Conversation Awareness (`0x4B`) is the **only consistent** response (identical for all modes), and only because the setting was on
 3. The `0x0D` confirmation is unreliable — appeared in some runs but not others for the same modes
 4. Initial state report (startup dump) reliably contains the current mode
-5. The `0x4B` packet is useful as a command ACK but carries no mode information
+5. The `0x4B` level carries no mode information, and acknowledges nothing
 
 ## References
 
