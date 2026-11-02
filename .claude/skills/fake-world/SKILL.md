@@ -199,11 +199,14 @@ the fake world's own config directory, never the user's -
   30-35 after the lid opens or the pods go back in the case, and in the rotation,
   every 4 to 8 minutes. The fake's rotation stays this fast on purpose, to exercise
   it.
-- **An app started late hears a pod only once it changes.** Started while the fake
-  BlueZ still has a pod's address - within 30 s of the last app's discovery, say - the
-  app gets no `InterfacesAdded` for it, and nothing of it until its payload or address
-  changes: up to 5 s while both pods advertise, 10 s while one does. bluetoothd does
-  the same for a device it keeps, and the app has the same gap on hardware (#153).
+- **An app started late reads what the fake BlueZ kept.** Once no client discovers, the
+  fake BlueZ invalidates each heard device's `RSSI`, as bluetoothd does, and keeps the
+  device with its `ManufacturerData` until 30 s after it was last heard. An app started
+  meanwhile gets no `InterfacesAdded` for it; it reads the device with
+  `GetManagedObjects` as it starts discovery, and takes it in by the pod's next
+  advertisement, which brings the `RSSI` back: a reading within about a second, as on
+  a fresh start. One that has its `RSSI` still - another client discovering, a second
+  app, say - is taken in at once (#153).
 - **AAP timing.** The fake pods answer as AirPods Pro 3 do in the #71 captures, for
   every model: the battery and where the pods are come first, and the noise mode
   only with the startup dump, 200 ms later (1.4-1.5 s on the hardware; set

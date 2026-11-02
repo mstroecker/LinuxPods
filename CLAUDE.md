@@ -158,7 +158,15 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
 - Adapters are found, never assumed: `bluez::watch_adapters` reads them from
   `GetManagedObjects` and follows them as they power off and on, come and go, and
   bluetoothd restarts (#50). Discovery runs on every powered one, subscribed first, since
-  an address's first advertisement comes in the `InterfacesAdded` that announces it. Each
+  an address's first advertisement comes in the `InterfacesAdded` that announces it. A
+  device BlueZ has already is announced to no one, and its unchanged payload comes as
+  `RSSI` alone, so every start is followed by a `GetManagedObjects` read of the devices
+  there (#153), in `Scanning::update`, never the drain task. One with an `RSSI` is taken
+  in at once; one without - bluetoothd invalidates it as discovery ends, and its data may
+  be old - is held until its `RSSI` is signaled again. The read keeps its place among the
+  signals by `Message::recv_position`: a device that signaled data since the start is
+  left to its signals, and a signal sent before the read, coming after it, is dropped
+  (`scanner::Waiting`). Each
   adapter has a provider root of its own per connection, named after the connection's
   unique name and registered with that adapter's `BatteryProviderManager1`: bluetoothd
   keys providers on the root alone, so two LinuxPods on one bus would otherwise share
