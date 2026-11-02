@@ -17,6 +17,8 @@
 //!   from, under that adapter, with its `ManufacturerData`
 //! - `Battery1` on a device once a registered provider gives it a level - the
 //!   battery GNOME Settings shows
+//! - `MediaTransport1` under a connected device while audio is set up with
+//!   it - see [Audio](#audio)
 //!
 //! Nothing else of bluetoothd is here - no pairing, no `Device1.Connect`, no
 //! agent - since the app uses none of it.
@@ -136,6 +138,43 @@
 //! provider's adapter - one on another adapter, an advertiser, or nothing at
 //! all - or if another provider got there first. A client that leaves the bus
 //! takes its providers' batteries along, and its discovery stops.
+//!
+//! # Audio
+//!
+//! The transports bluetoothd makes as the audio server - PipeWire - sets
+//! audio up with a connected device, which the app lowers the volume on while
+//! the user speaks (#150). No audio server is here: [`FakeBluez::set_playing`],
+//! [`FakeBluez::set_call`] and [`FakeBluez::set_volume`] do what it, or the
+//! user, would.
+//!
+//! - Playing, a device has an A2DP transport, `org.bluez.MediaTransport1`
+//!   with `Device`, `UUID` (the host's audio source), `Codec`, `State` and
+//!   `Volume`, at `<device>/sep1/fd<n>`, `n` new to the device with every
+//!   transport, so a transport set up again is at a new path, as a real one
+//!   is. bluetoothd numbers them otherwise - the first number free from the
+//!   count of all its transports (`media_transport_create` in BlueZ 5.87's
+//!   `profiles/audio/transport.c`) - which nothing here depends on. It
+//!   starts `active`, at the device's own volume, which outlasts it as
+//!   bluetoothd keeps it on the device (`btd_device_set_volume`); stopped, it
+//!   goes `idle` and stays.
+//! - `Volume` is AVRCP's absolute volume, 0 to 127, writable by any client,
+//!   as bluetoothd checks no owner for it (`transport.c`). Each client's set
+//!   is recorded ([`FakeBluez::volume_sets`]); the user's are not. A set of
+//!   the volume the transport holds does nothing, as in bluetoothd. Any
+//!   other is taken at once and signaled - unless the pair is made to answer
+//!   as bluetoothd has a real pair answer ([`FakeBluez::set_volume_answer`]):
+//!   bluetoothd sends the volume to the pods over AVRCP and changes the
+//!   property only once they answer, to the volume they report (BlueZ 5.87's
+//!   `transport.c` and `profiles/audio/avrcp.c`). The fake then changes it
+//!   after a delay, and may round it to an even volume, as a pair might. How
+//!   long real pods take, and whether they round, is untried (#150).
+//! - A call takes A2DP to `idle`, and after it A2DP plays again if it did.
+//!   That is how PipeWire's own HFP backend is assumed to show it - not read
+//!   in its source, nor watched (#150): no transport of its own in BlueZ, and
+//!   A2DP released while the pair is on the headset profile. Whether A2DP
+//!   stays, idle, or goes is a hardware check.
+//! - A disconnect takes the device's transports along, and so does a restart:
+//!   a new bluetoothd has none until the audio server sets A2DP up again.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -155,6 +194,7 @@ use zbus::{Connection, MatchRule, MessageStream, interface};
 use crate::ble::scanner::APPLE_COMPANY_ID;
 use crate::bluez::{AIRPODS_UUID, BLUEZ_SERVICE};
 use crate::harness::connect_serving;
+use crate::volume::MAX_VOLUME;
 
 /// How long bluetoothd keeps a device it has only heard advertise once it
 /// stops hearing it: `TemporaryTimeout` in its main.conf, 30 seconds unless
@@ -341,6 +381,22 @@ struct State {
     /// How long after a connect services are resolved; `None` for
     /// [`SERVICES_RESOLVED`].
     services_delay: Option<Duration>,
+    /// The audio transports of each connected device that has any - see
+    /// [Audio](#audio).
+    audio: HashMap<Address, Audio>,
+    /// Every volume a client set on a transport, by device, with when.
+    volume_sets: HashMap<Address, Vec<(Instant, u16)>>,
+}
+
+/// A device's audio transports - see [Audio](#audio).
+#[derive(Default)]
+struct Audio {
+    /// The A2DP transport, while the audio server has A2DP set up.
+    a2dp: Option<OwnedObjectPath>,
+    /// Whether a call has the pair on the headset profile.
+    in_call: bool,
+    /// Whether A2DP played when the call came, to play again after it.
+    resume: bool,
 }
 
 /// A paired device's pairing: the adapter it is with, and its name.
@@ -352,7 +408,41 @@ struct Pairing {
     /// pairing is, through its object going and coming with its adapter
     /// and through a restart.
     connections: u64,
+    /// The device's own volume, AVRCP's absolute volume: what its A2DP
+    /// transport starts at, kept from one to the next as bluetoothd keeps it
+    /// on the device.
+    volume: u16,
+    /// How many transports it has had, which numbers the next one's path:
+    /// `fd0`, `fd1` and on - see [Audio](#audio).
+    transports: u32,
+    /// How it answers a client's volume - see
+    /// [`FakeBluez::set_volume_answer`].
+    answer: VolumeAnswer,
 }
+
+/// How a pair answers a volume a client sets, as bluetoothd has it
+/// answer - see [Audio](#audio). By default at once, as set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VolumeAnswer {
+    /// How long after the set the transport reads the new volume.
+    pub delay: Duration,
+    /// Whether the pair rounds the volume down to an even one.
+    pub to_even: bool,
+}
+
+impl VolumeAnswer {
+    /// The volume the pair answers `volume` with.
+    fn answered(self, volume: u16) -> u16 {
+        if self.to_even { volume & !1 } else { volume }
+    }
+}
+
+/// The volume a pair's first transport starts at: half way.
+pub const DEFAULT_VOLUME: u16 = 64;
+
+/// The A2DP transport's `UUID`: the host's audio source, the end of
+/// headphones bluetoothd makes the transport for.
+pub const A2DP_SOURCE_UUID: &str = "0000110a-0000-1000-8000-00805f9b34fb";
 
 /// A battery provider: the adapter whose manager took it, who registered it,
 /// and its root path.
@@ -702,11 +792,16 @@ impl FakeBluez {
     /// waits for the new one.
     pub async fn stop(&self) -> Result<()> {
         let hearing = self.hearing.lock().await;
-        let (heard, batteries) = {
+        let (heard, batteries, transports) = {
             let mut state = self.state();
             state.end_discovery(|_| true);
             let heard = state.forget_advertisers(|_| true);
-            (heard, state.forget_providers(|_| true))
+            let transports: Vec<OwnedObjectPath> = state
+                .audio
+                .drain()
+                .filter_map(|(_, audio)| audio.a2dp)
+                .collect();
+            (heard, state.forget_providers(|_| true), transports)
         };
         // The objects it made for its clients go with it, before the name.
         for device in batteries {
@@ -716,6 +811,11 @@ impl FakeBluez {
         let server = conn.object_server();
         for path in heard {
             let _ = server.remove::<Advertiser, _>(&path).await;
+        }
+        // The audio server's transports too: a new bluetoothd has none until
+        // the audio server sets A2DP up again.
+        for path in transports {
+            let _ = server.remove::<MediaTransport1, _>(&path).await;
         }
         drop(hearing);
         conn.release_name(BLUEZ_SERVICE)
@@ -842,6 +942,9 @@ impl FakeBluez {
                 adapter: adapter.to_string(),
                 alias: alias.to_string(),
                 connections: 0,
+                volume: DEFAULT_VOLUME,
+                transports: 0,
+                answer: VolumeAnswer::default(),
             };
             state.paired.insert(address, pairing);
         }
@@ -918,6 +1021,11 @@ impl FakeBluez {
         }
         device.connected = connected;
         device.connected_changed(emitter).await?;
+        // Its audio goes with the connection.
+        if !connected {
+            drop(device);
+            self.drop_audio(address).await;
+        }
         if connected {
             let (connection, delay) = {
                 let mut state = self.state();
@@ -996,6 +1104,255 @@ impl FakeBluez {
             device.u_u_i_ds_changed(iface.signal_emitter()).await?;
         }
         Ok(())
+    }
+
+    /// Starts or stops audio to a connected paired device, as the audio
+    /// server does - see [Audio](#audio). Playing, its A2DP transport is
+    /// `active`: set up first if it has none, at a path new to it, at the
+    /// device's own volume. Stopped, it is `idle`, as when the audio server
+    /// releases it. During a call this says only whether A2DP plays again
+    /// once the call is over. Fails for a device that is not connected.
+    pub async fn set_playing(&self, address: Address, playing: bool) -> Result<()> {
+        let device = self.connected_path(address).await?;
+        let a2dp = {
+            let mut state = self.state();
+            let audio = state.audio.entry(address).or_default();
+            if audio.in_call {
+                audio.resume = playing;
+                return Ok(());
+            }
+            audio.a2dp.clone()
+        };
+        match a2dp {
+            Some(path) => self.set_transport_state(&path, playing).await,
+            None if playing => {
+                let path = self.add_transport(address, &device).await?;
+                self.state().audio.entry(address).or_default().a2dp = Some(path);
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Starts or ends a call on a connected paired device, as the audio
+    /// server switching it to the headset profile and back is assumed to -
+    /// see [Audio](#audio): its A2DP transport, if any, goes `idle`; after the
+    /// call it plays again if it did before, at the volume it had.
+    pub async fn set_call(&self, address: Address, on: bool) -> Result<()> {
+        self.connected_path(address).await?;
+        let a2dp = {
+            let mut state = self.state();
+            let audio = state.audio.entry(address).or_default();
+            if on == audio.in_call {
+                return Ok(());
+            }
+            audio.in_call = on;
+            audio.a2dp.clone()
+        };
+        let Some(path) = a2dp else {
+            return Ok(());
+        };
+        if on {
+            let playing = self.transport_state(&path).await? == "active";
+            self.state().audio.entry(address).or_default().resume = playing;
+            return self.set_transport_state(&path, false).await;
+        }
+        let resume = std::mem::take(&mut self.state().audio.entry(address).or_default().resume);
+        if resume {
+            self.set_transport_state(&path, true).await?;
+        }
+        Ok(())
+    }
+
+    /// Sets a device's A2DP volume as the user does - GNOME's slider, keys,
+    /// the pods' own controls - signaling the change. Not among
+    /// [`FakeBluez::volume_sets`], which are the clients'. With no A2DP
+    /// transport, it is the volume the next one starts at, as though the
+    /// pair had come back at another volume. Fails for a device that is not
+    /// paired, or above 127.
+    pub async fn set_volume(&self, address: Address, volume: u16) -> Result<()> {
+        anyhow::ensure!(volume <= MAX_VOLUME, "{volume} is above {MAX_VOLUME}");
+        match self.a2dp_transport(address) {
+            Some(path) => self.answer_volume(&path, address, volume).await,
+            None => {
+                let mut state = self.state();
+                let pairing = state
+                    .paired
+                    .get_mut(&address)
+                    .with_context(|| format!("no paired device {address}"))?;
+                pairing.volume = volume;
+                Ok(())
+            }
+        }
+    }
+
+    /// Has a paired device answer a volume a client sets as `answer` says -
+    /// see [Audio](#audio).
+    pub fn set_volume_answer(&self, address: Address, answer: VolumeAnswer) -> Result<()> {
+        let mut state = self.state();
+        let pairing = state
+            .paired
+            .get_mut(&address)
+            .with_context(|| format!("no paired device {address}"))?;
+        pairing.answer = answer;
+        Ok(())
+    }
+
+    /// How a paired device answers a volume a client sets.
+    pub fn volume_answer(&self, address: Address) -> Option<VolumeAnswer> {
+        Some(self.state().paired.get(&address)?.answer)
+    }
+
+    /// Changes the volume of the transport at `path`, a device's, signaling
+    /// it, and keeps it as the device's own. Nothing if the transport is gone.
+    async fn answer_volume(
+        &self,
+        path: &OwnedObjectPath,
+        address: Address,
+        volume: u16,
+    ) -> Result<()> {
+        let Ok(iface) = self
+            .conn()
+            .object_server()
+            .interface::<_, MediaTransport1>(path)
+            .await
+        else {
+            return Ok(());
+        };
+        let mut transport = iface.get_mut().await;
+        transport.volume = volume;
+        transport.volume_changed(iface.signal_emitter()).await?;
+        drop(transport);
+        if let Some(pairing) = self.state().paired.get_mut(&address) {
+            pairing.volume = volume;
+        }
+        Ok(())
+    }
+
+    /// The volume of a device's A2DP transport, `None` without one.
+    pub async fn volume(&self, address: Address) -> Option<u16> {
+        let path = self.a2dp_transport(address)?;
+        let iface = self
+            .conn()
+            .object_server()
+            .interface::<_, MediaTransport1>(path)
+            .await
+            .ok()?;
+        Some(iface.get().await.volume)
+    }
+
+    /// The path of a device's A2DP transport, `None` without one.
+    pub fn a2dp_transport(&self, address: Address) -> Option<OwnedObjectPath> {
+        self.state().audio.get(&address)?.a2dp.clone()
+    }
+
+    /// Every volume a client set on a device's transports, in order, with
+    /// when: the app's, never the user's.
+    pub fn volume_sets(&self, address: Address) -> Vec<(Instant, u16)> {
+        self.state()
+            .volume_sets
+            .get(&address)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The path of a paired device that is connected.
+    async fn connected_path(&self, address: Address) -> Result<OwnedObjectPath> {
+        let path = self.state().paired_path(address)?;
+        let iface = self
+            .conn()
+            .object_server()
+            .interface::<_, PairedDevice>(&path)
+            .await
+            .with_context(|| format!("no paired device {address}"))?;
+        anyhow::ensure!(iface.get().await.connected, "{address} is not connected");
+        Ok(path)
+    }
+
+    /// Puts an A2DP transport under `device`, as the audio server sets it
+    /// up: at `sep1/fd<n>`, under the endpoint it was set up through, `n` new
+    /// to the device. Announced with `InterfacesAdded`, `active`, at the
+    /// device's own volume.
+    async fn add_transport(
+        &self,
+        address: Address,
+        device: &OwnedObjectPath,
+    ) -> Result<OwnedObjectPath> {
+        let (fd, volume) = {
+            let mut state = self.state();
+            let pairing = state
+                .paired
+                .get_mut(&address)
+                .with_context(|| format!("no paired device {address}"))?;
+            pairing.transports += 1;
+            (pairing.transports - 1, pairing.volume)
+        };
+        let path = OwnedObjectPath::try_from(format!("{device}/sep1/fd{fd}"))?;
+        let transport = MediaTransport1 {
+            bluez: self.clone(),
+            path: path.clone(),
+            address,
+            device: device.clone(),
+            active: true,
+            volume,
+        };
+        self.conn().object_server().at(&path, transport).await?;
+        Ok(path)
+    }
+
+    /// Whether the transport at `path` is `active` or `idle`.
+    async fn transport_state(&self, path: &OwnedObjectPath) -> Result<&'static str> {
+        let iface = self
+            .conn()
+            .object_server()
+            .interface::<_, MediaTransport1>(path)
+            .await?;
+        Ok(iface.get().await.state_name())
+    }
+
+    /// Makes the transport at `path` `active` or `idle`, signaling a change.
+    async fn set_transport_state(&self, path: &OwnedObjectPath, active: bool) -> Result<()> {
+        let iface = self
+            .conn()
+            .object_server()
+            .interface::<_, MediaTransport1>(path)
+            .await?;
+        let mut transport = iface.get_mut().await;
+        if transport.active != active {
+            transport.active = active;
+            transport.state_changed(iface.signal_emitter()).await?;
+        }
+        Ok(())
+    }
+
+    /// Takes a device's transports away, as its disconnect does.
+    async fn drop_audio(&self, address: Address) {
+        let Some(audio) = self.state().audio.remove(&address) else {
+            return;
+        };
+        let conn = self.conn();
+        if let Some(path) = audio.a2dp {
+            let _ = conn
+                .object_server()
+                .remove::<MediaTransport1, _>(&path)
+                .await;
+        }
+    }
+
+    /// Records a volume a client set on a device's transport, and says how
+    /// the device answers it.
+    fn volume_set(&self, address: Address, volume: u16) -> VolumeAnswer {
+        let mut state = self.state();
+        state
+            .volume_sets
+            .entry(address)
+            .or_default()
+            .push((Instant::now(), volume));
+        state
+            .paired
+            .get(&address)
+            .map(|pairing| pairing.answer)
+            .unwrap_or_default()
     }
 
     /// Whether any client has discovery on at the adapter called `adapter`.
@@ -1839,6 +2196,89 @@ impl Advertiser {
     }
 }
 
+/// The A2DP transport the audio server set up with a device - see
+/// [Audio](#audio).
+struct MediaTransport1 {
+    bluez: FakeBluez,
+    /// Its own path, for an answer that comes late.
+    path: OwnedObjectPath,
+    address: Address,
+    device: OwnedObjectPath,
+    /// `active` while it streams, `idle` once released.
+    active: bool,
+    volume: u16,
+}
+
+impl MediaTransport1 {
+    fn state_name(&self) -> &'static str {
+        if self.active { "active" } else { "idle" }
+    }
+}
+
+#[interface(name = "org.bluez.MediaTransport1")]
+impl MediaTransport1 {
+    #[zbus(property)]
+    fn device(&self) -> OwnedObjectPath {
+        self.device.clone()
+    }
+
+    #[zbus(property, name = "UUID")]
+    fn uuid(&self) -> String {
+        A2DP_SOURCE_UUID.to_string()
+    }
+
+    /// AAC, as the pods have it with PipeWire; nothing reads it.
+    #[zbus(property)]
+    fn codec(&self) -> u8 {
+        0x02
+    }
+
+    #[zbus(property)]
+    fn state(&self) -> String {
+        self.state_name().to_string()
+    }
+
+    #[zbus(property)]
+    fn volume(&self) -> u16 {
+        self.volume
+    }
+
+    /// Writable by any client, as bluetoothd has it whatever its
+    /// documentation says. Recorded as a client's - see
+    /// [`FakeBluez::volume_sets`] - and answered as the device answers - see
+    /// [`FakeBluez::set_volume_answer`]: at once, and then signaled, as zbus
+    /// signals every property set; or later, signaled then. The volume held
+    /// already changes nothing, as in bluetoothd.
+    #[zbus(property)]
+    fn set_volume(&mut self, volume: u16) -> zbus::fdo::Result<()> {
+        if volume > MAX_VOLUME {
+            return Err(zbus::fdo::Error::InvalidArgs(format!(
+                "Invalid volume value {volume}"
+            )));
+        }
+        let answer = self.bluez.volume_set(self.address, volume);
+        if volume == self.volume {
+            return Ok(());
+        }
+        let answered = answer.answered(volume);
+        if answer.delay.is_zero() {
+            self.volume = answered;
+            if let Some(pairing) = self.bluez.state().paired.get_mut(&self.address) {
+                pairing.volume = answered;
+            }
+            return Ok(());
+        }
+        let (bluez, path, address) = (self.bluez.clone(), self.path.clone(), self.address);
+        tokio::spawn(async move {
+            tokio::time::sleep(answer.delay).await;
+            if let Err(e) = bluez.answer_volume(&path, address, answered).await {
+                tracing::warn!("fake BlueZ: failed to answer the volume of {address}: {e:#}");
+            }
+        });
+        Ok(())
+    }
+}
+
 /// The battery bluetoothd puts on a device for a provider.
 struct Battery1 {
     percentage: u8,
@@ -1899,6 +2339,22 @@ mod tests {
     async fn eventually(done: impl Fn() -> bool) {
         timeout(TIMEOUT, async {
             while !done() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out");
+    }
+
+    /// Waits until `done`, which the fake gets to by itself, asking it over
+    /// an await.
+    async fn eventually_async<F, Fut>(done: F)
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        timeout(TIMEOUT, async {
+            while !done().await {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -3309,5 +3765,124 @@ mod tests {
             .call_method("UnregisterBatteryProvider", &(&root,))
             .await
             .unwrap();
+    }
+
+    /// What `volume` reads and sets, the fake serves as bluetoothd does: the
+    /// pair's A2DP transport under its device while it plays, at a path new
+    /// with each setup, its volume writable by any client and signaled, idle
+    /// in a call, and none once it disconnects.
+    #[tokio::test]
+    async fn audio_transports_come_and_go_with_the_audio() {
+        use crate::volume::{find_a2dp, set_volume};
+
+        let (bus, bluez) = served().await;
+        let conn = bus.connect().await.unwrap();
+        assert!(
+            bluez.set_playing(PAIR, true).await.is_err(),
+            "not connected"
+        );
+        bluez.set_connected(PAIR, true).await.unwrap();
+        assert_eq!(find_a2dp(&conn, PAIR).await.unwrap(), None);
+
+        bluez.set_playing(PAIR, true).await.unwrap();
+        let a2dp = find_a2dp(&conn, PAIR).await.unwrap().unwrap();
+        let device = device_path(ADAPTER, PAIR);
+        assert_eq!(a2dp.path.as_str(), format!("{device}/sep1/fd0"));
+        assert_eq!(
+            (a2dp.transport.volume, a2dp.transport.playing),
+            (DEFAULT_VOLUME, true)
+        );
+
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .member("PropertiesChanged")
+            .unwrap()
+            .path(a2dp.path.as_str())
+            .unwrap()
+            .build();
+        let mut changes = MessageStream::for_match_rule(rule, &conn, None)
+            .await
+            .unwrap();
+        set_volume(&conn, &a2dp.path, 13).await.unwrap();
+        let changed = timeout(TIMEOUT, changes.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let (iface, props, _) = changed
+            .body()
+            .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+            .unwrap();
+        assert_eq!(iface, "org.bluez.MediaTransport1");
+        assert_eq!(u16::try_from(props["Volume"].clone()).unwrap(), 13);
+        assert!(set_volume(&conn, &a2dp.path, 128).await.is_err());
+        bluez.set_volume(PAIR, 40).await.unwrap();
+        let sets: Vec<u16> = bluez
+            .volume_sets(PAIR)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(sets, [13], "the user's is not a client's");
+        assert_eq!(bluez.volume(PAIR).await, Some(40));
+
+        // A call: A2DP idle, and back after it.
+        bluez.set_call(PAIR, true).await.unwrap();
+        assert!(
+            !find_a2dp(&conn, PAIR)
+                .await
+                .unwrap()
+                .unwrap()
+                .transport
+                .playing
+        );
+        bluez.set_call(PAIR, false).await.unwrap();
+        assert!(
+            find_a2dp(&conn, PAIR)
+                .await
+                .unwrap()
+                .unwrap()
+                .transport
+                .playing
+        );
+        bluez.set_playing(PAIR, false).await.unwrap();
+        assert!(
+            !find_a2dp(&conn, PAIR)
+                .await
+                .unwrap()
+                .unwrap()
+                .transport
+                .playing
+        );
+
+        // Gone with the connection; the next setup is at a new path, at the
+        // volume the pair kept.
+        bluez.set_connected(PAIR, false).await.unwrap();
+        assert_eq!(find_a2dp(&conn, PAIR).await.unwrap(), None);
+        bluez.set_connected(PAIR, true).await.unwrap();
+        bluez.set_playing(PAIR, true).await.unwrap();
+        let next = find_a2dp(&conn, PAIR).await.unwrap().unwrap();
+        assert_ne!(next.path, a2dp.path);
+        assert_eq!(next.transport.volume, 40);
+
+        // Answered late and rounded, as bluetoothd has real pods answer: the
+        // transport reads the old volume until the answer, then the even one.
+        // The volume it holds already changes nothing.
+        let answer = VolumeAnswer {
+            delay: Duration::from_millis(100),
+            to_even: true,
+        };
+        bluez.set_volume_answer(PAIR, answer).unwrap();
+        set_volume(&conn, &next.path, 25).await.unwrap();
+        assert_eq!(bluez.volume(PAIR).await, Some(40), "not answered yet");
+        eventually_async(|| async { bluez.volume(PAIR).await == Some(24) }).await;
+        set_volume(&conn, &next.path, 24).await.unwrap();
+        let sets: Vec<u16> = bluez
+            .volume_sets(PAIR)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(sets, [13, 25, 24]);
+        tokio::time::sleep(answer.delay * 2).await;
+        assert_eq!(bluez.volume(PAIR).await, Some(24), "nothing to answer");
     }
 }

@@ -55,6 +55,12 @@
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
 //! | `SetConversationAwareness(s mac, b on)` | Turns Conversation Awareness on or off, as from a phone: nothing reports it over AAP, the next connection's startup dump does |
 //! | `Speak(s mac, u length_ms)` | The user speaks for that long. With Conversation Awareness on, the pods send speech levels and switch to Transparency and back, at the #150 run's times - see [`Pods::speak`]; with it off, nothing. Fails with no AAP connection |
+//! | `SetPlaying(s mac, b playing)` | Audio to a connected pair starts or stops, as the audio server's: its A2DP transport `active`, set up at a new path if it has none, at the pair's own volume; or `idle` - see [`FakeBluez::set_playing`] |
+//! | `SetCall(s mac, b on)` | A call begins or ends on a connected pair: A2DP `idle`, and back after - see [`FakeBluez::set_call`] |
+//! | `SetVolume(s mac, q volume)` | The user sets the pair's A2DP volume, 0 to 127: GNOME's slider, say; with no transport, the volume the next starts at |
+//! | `SetVolumeAnswer(s mac, u delay_ms, b to_even)` | The pair answers a volume the app sets that long later, rounded down to even if asked, as bluetoothd has real pods answer - see [`FakeBluez::set_volume_answer`] |
+//! | `Volume(s mac) → q` | The volume of the pair's A2DP transport; fails without one |
+//! | `VolumeSets(s mac) → aq` | Every volume the app set on the pair's transports, in order |
 //! | `SetQuirk(s mac, s quirk, v value)` | Sets one of [`Quirks`] by its field name, the durations by theirs with `_ms` - `echo_delay_ms`, `handshake_delay_ms`, `report_delay_ms`, `dump_delay_ms`, `stale_report_ms` - in milliseconds, a `stale_report_ms` of 0 for none |
 //! | `Flood(u count)` | That many advertisers no key decrypts and no IRK resolves, each from an address of its own |
 //! | `Received(s mac) → aay` | Every AAP packet the app sent the pair, in order |
@@ -84,7 +90,7 @@ use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener};
 use zbus::zvariant::{OwnedValue, Value};
 use zbus::{Connection, fdo, interface};
 
-use super::bluez::FakeBluez;
+use super::bluez::{FakeBluez, VolumeAnswer};
 use super::connect_serving;
 use super::pods::{Action, Keys, PRO_3, Part, Pods, Quirks};
 use crate::aap::client::unix_socket_path;
@@ -418,6 +424,52 @@ impl World {
             .map_err(|e| anyhow::anyhow!("{mac}: {e}"))?;
         tracing::info!("fake world: {mac} hears speech for {length:?}");
         Ok(())
+    }
+
+    /// Starts or stops audio to a connected pair, as the audio server does -
+    /// see [`FakeBluez::set_playing`].
+    pub async fn set_playing(&self, mac: Address, playing: bool) -> Result<()> {
+        self.0.bluez.set_playing(mac, playing).await?;
+        tracing::info!(
+            "fake world: audio to {mac} {}",
+            if playing { "plays" } else { "stopped" }
+        );
+        Ok(())
+    }
+
+    /// Starts or ends a call on a connected pair - see
+    /// [`FakeBluez::set_call`].
+    pub async fn set_call(&self, mac: Address, on: bool) -> Result<()> {
+        self.0.bluez.set_call(mac, on).await?;
+        tracing::info!(
+            "fake world: a call on {mac} {}",
+            if on { "begins" } else { "ends" }
+        );
+        Ok(())
+    }
+
+    /// Sets a pair's A2DP volume as the user does - see
+    /// [`FakeBluez::set_volume`].
+    pub async fn set_volume(&self, mac: Address, volume: u16) -> Result<()> {
+        self.0.bluez.set_volume(mac, volume).await?;
+        tracing::info!("fake world: the user set the volume of {mac} to {volume}");
+        Ok(())
+    }
+
+    /// Has a pair answer a volume the app sets as `answer` says - see
+    /// [`FakeBluez::set_volume_answer`].
+    pub fn set_volume_answer(&self, mac: Address, answer: VolumeAnswer) -> Result<()> {
+        self.0.bluez.set_volume_answer(mac, answer)
+    }
+
+    /// The volume of a pair's A2DP transport, `None` without one.
+    pub async fn volume(&self, mac: Address) -> Option<u16> {
+        self.0.bluez.volume(mac).await
+    }
+
+    /// Every volume the app set on a pair's transports, in order, with when.
+    pub fn volume_sets(&self, mac: Address) -> Vec<(Instant, u16)> {
+        self.0.bluez.volume_sets(mac)
     }
 
     /// Closes a pair's AAP connection from its end. The Bluetooth link stays.
@@ -841,6 +893,59 @@ impl FakeWorld1 {
             .speak(parse_mac(mac)?, length)
             .await
             .map_err(failed)
+    }
+
+    async fn set_playing(&self, mac: &str, playing: bool) -> fdo::Result<()> {
+        self.world
+            .set_playing(parse_mac(mac)?, playing)
+            .await
+            .map_err(failed)
+    }
+
+    async fn set_call(&self, mac: &str, on: bool) -> fdo::Result<()> {
+        self.world
+            .set_call(parse_mac(mac)?, on)
+            .await
+            .map_err(failed)
+    }
+
+    async fn set_volume(&self, mac: &str, volume: u16) -> fdo::Result<()> {
+        let mac = parse_mac(mac)?;
+        if volume > crate::volume::MAX_VOLUME {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "{volume} is above {}",
+                crate::volume::MAX_VOLUME
+            )));
+        }
+        self.world.set_volume(mac, volume).await.map_err(failed)
+    }
+
+    async fn set_volume_answer(&self, mac: &str, delay_ms: u32, to_even: bool) -> fdo::Result<()> {
+        let answer = VolumeAnswer {
+            delay: Duration::from_millis(delay_ms.into()),
+            to_even,
+        };
+        self.world
+            .set_volume_answer(parse_mac(mac)?, answer)
+            .map_err(failed)
+    }
+
+    async fn volume(&self, mac: &str) -> fdo::Result<u16> {
+        let mac = parse_mac(mac)?;
+        self.world
+            .volume(mac)
+            .await
+            .ok_or_else(|| fdo::Error::Failed(format!("{mac} has no A2DP transport")))
+    }
+
+    async fn volume_sets(&self, mac: &str) -> fdo::Result<Vec<u16>> {
+        let mac = parse_mac(mac)?;
+        Ok(self
+            .world
+            .volume_sets(mac)
+            .into_iter()
+            .map(|(_, volume)| volume)
+            .collect())
     }
 
     async fn set_quirk(&self, mac: &str, quirk: &str, value: OwnedValue) -> fdo::Result<()> {
@@ -1314,6 +1419,36 @@ mod tests {
 
         control.call_method("Connect", &(&other,)).await.unwrap();
         assert!(bluez_connected(&bus, OTHER).await);
+        // Audio, as the audio server and the user change it.
+        control
+            .call_method("SetPlaying", &(&other, true))
+            .await
+            .unwrap();
+        control
+            .call_method("SetVolume", &(&other, 90u16))
+            .await
+            .unwrap();
+        let volume: u16 = control.call("Volume", &(&other,)).await.unwrap();
+        assert_eq!(volume, 90);
+        control
+            .call_method("SetVolumeAnswer", &(&other, 150u32, true))
+            .await
+            .unwrap();
+        let answer = world.bluez().volume_answer(OTHER).expect("a paired device");
+        assert_eq!(
+            (answer.delay, answer.to_even),
+            (Duration::from_millis(150), true)
+        );
+        control
+            .call_method("SetCall", &(&other, true))
+            .await
+            .unwrap();
+        control
+            .call_method("SetCall", &(&other, false))
+            .await
+            .unwrap();
+        let sets: Vec<u16> = control.call("VolumeSets", &(&other,)).await.unwrap();
+        assert!(sets.is_empty(), "the user's are not the app's");
         control.call_method("Disconnect", &(&other,)).await.unwrap();
         assert!(!bluez_connected(&bus, OTHER).await);
 
@@ -1369,6 +1504,18 @@ mod tests {
             ),
             (
                 control.call_method("HangUp", &(&other,)).await,
+                "org.freedesktop.DBus.Error.Failed",
+            ),
+            (
+                control.call_method("SetVolume", &(&other, 128u16)).await,
+                "org.freedesktop.DBus.Error.InvalidArgs",
+            ),
+            (
+                control.call_method("Volume", &(&other,)).await,
+                "org.freedesktop.DBus.Error.Failed",
+            ),
+            (
+                control.call_method("SetPlaying", &(&other, true)).await,
                 "org.freedesktop.DBus.Error.Failed",
             ),
             (
