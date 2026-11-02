@@ -1357,8 +1357,8 @@ impl Coordinator {
                 Err(e) => return e,
             };
 
-            // Redacted, as a key packet may be among them: logs get pasted
-            // into issues.
+            // Redacted, as a key packet or the device information (`0x1D`,
+            // serial numbers) may be among them: logs get pasted into issues.
             tracing::debug!(
                 "AAP packet ({} bytes): {}",
                 packet.len(),
@@ -1408,7 +1408,7 @@ impl Coordinator {
                 Ok(Message::SpeechLevel(level)) => {
                     self.handle_speech_level(level, mac_addr, client).await;
                 }
-                Ok(Message::Unknown { .. }) => {}
+                Ok(Message::DeviceName(_) | Message::Unknown { .. }) => {}
                 Err(e) => tracing::warn!("AAP {e}"),
             }
         }

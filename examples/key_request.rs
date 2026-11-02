@@ -38,6 +38,7 @@ fn describe(packet: &[u8]) -> String {
         Ok(Message::Primary(primary)) => format!("primary pod: {primary:?}"),
         Ok(Message::ConversationAwareness(on)) => format!("Conversation Awareness: {on}"),
         Ok(Message::SpeechLevel(level)) => format!("speech level {}", describe_level(level)),
+        Ok(Message::DeviceName(name)) => format!("device information, name {name:?}"),
         Ok(Message::Unknown { opcode: Some(_) }) => "not read by the app".to_string(),
         Ok(Message::Unknown { opcode: None }) => "no AAP header".to_string(),
         Err(e) => format!("unparsable: {e}"),
