@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use tokio_seqpacket::UnixSeqpacket;
 use tracing::Instrument;
 
-use crate::aap::{battery, conversation, keys, noise};
+use crate::aap::{battery, conversation, keys, name, noise};
 
 /// L2CAP Protocol/Service Multiplexer for AAP.
 pub(crate) const AAP_PSM: u16 = 0x1001; // 4097
@@ -395,6 +395,25 @@ impl Client {
     pub async fn set_conversation_awareness(&self, enabled: bool) -> Result<()> {
         self.send_packet(&conversation::set_packet(enabled), "Conversation Awareness")
             .await
+    }
+
+    /// Renames the pods: the name they give every host, not BlueZ's alias.
+    ///
+    /// Fire and forget: the pods answer nothing, and take the name at once -
+    /// the next connection's device information packet carries it (#160).
+    /// Fails without sending for a name [`name::rename_packet`] refuses.
+    pub async fn rename(&self, new_name: &str) -> Result<()> {
+        let packet = name::rename_packet(new_name)?;
+        self.send_packet(&packet, "rename").await
+    }
+
+    /// Sends a rename packet for `new_name` as given, unchecked: for a probe
+    /// to reach past the 127 bytes the pods keep, as the name run did. The
+    /// app renames with [`Client::rename`]. Only the probe's `--sweep` uses it.
+    #[doc(hidden)]
+    pub async fn rename_unchecked(&self, new_name: &[u8]) -> Result<()> {
+        let packet = name::rename_packet_unchecked(new_name);
+        self.send_packet(&packet, "rename").await
     }
 
     /// Sends a packet, verifying the whole thing was written.

@@ -10,6 +10,7 @@ pub mod conversation;
 pub mod ear;
 pub mod keys;
 pub mod message;
+pub mod name;
 pub mod noise;
 
 pub use battery::{BatteryInfo, is_battery_packet, parse_battery_packet};

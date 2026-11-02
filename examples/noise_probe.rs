@@ -48,6 +48,8 @@ fn describe(packet: &[u8]) -> String {
         Ok(Message::Ear(report)) => format!("ear report: {report:?}"),
         Ok(Message::Primary(primary)) => format!("primary pod: {primary:?}"),
         Ok(Message::ConversationAwareness(on)) => format!("Conversation Awareness: {on}"),
+        // The rest of the packet, serial numbers among it, is left out.
+        Ok(Message::DeviceName(name)) => format!("device information, name {name:?}"),
         // With Conversation Awareness on, a Pro 3 framed every mode change
         // with level 08 and 09, and AirPods 4 sent 09 after each. Neither
         // names the mode: they are no acknowledgment.

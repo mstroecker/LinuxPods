@@ -7,6 +7,7 @@
 
 use crate::KEY_LEN;
 use crate::aap::message::{self, HEADER};
+use crate::aap::name;
 
 /// Identity-Resolving Key / Encryption Key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,16 +176,21 @@ pub fn find_irk(keys: &[ProximityKey]) -> Result<[u8; KEY_LEN], KeyParseError> {
 pub const PREAMBLE_LEN: usize = 7;
 
 /// A packet as hex, to print where it may be pasted into an issue, a key
-/// packet's keys left out: of one, only its first [`PREAMBLE_LEN`] bytes go
-/// out, and a note. The keys are the pair's IRK and ENC_KEY. Any packet with
-/// the key opcode is cut short, whether it parses or not.
+/// packet's keys and a device information packet's strings left out: of
+/// either, only its preamble goes out - a key packet's first
+/// [`PREAMBLE_LEN`] bytes, a device information packet's first
+/// [`name::INFO_PREAMBLE_LEN`] - and a note. The keys are the pair's IRK and
+/// ENC_KEY; the device information holds the pods' name, model number and
+/// serial numbers (#160). Any packet with either opcode is cut short, whether
+/// it parses or not.
 pub fn redacted_hex(packet: &[u8]) -> String {
-    if message::opcode(packet) == Some(KEY_MARKER) {
-        let preamble = &packet[..packet.len().min(PREAMBLE_LEN)];
-        format!("{} (keys redacted)", crate::hex(preamble))
-    } else {
-        crate::hex(packet)
-    }
+    let (keep, what) = match message::opcode(packet) {
+        Some(KEY_MARKER) => (PREAMBLE_LEN, "keys"),
+        Some(name::INFO_OPCODE) => (name::INFO_PREAMBLE_LEN, "device information"),
+        _ => return crate::hex(packet),
+    };
+    let preamble = &packet[..packet.len().min(keep)];
+    format!("{} ({what} redacted)", crate::hex(preamble))
 }
 
 /// Builds the packet [`parse_proximity_keys`] reads, keys in the order given.
@@ -262,6 +268,21 @@ mod tests {
         assert_eq!(redacted_hex(&keys[..5]), "04 00 04 00 31 (keys redacted)");
 
         assert_eq!(redacted_hex(&REQUEST), "04 00 04 00 30 00 05 00");
+    }
+
+    /// The device information packet prints its preamble alone: past it
+    /// come the name, the model number and the serial numbers.
+    #[test]
+    fn hex_leaves_the_device_information_out() {
+        let info = name::info_packet("Pods", &["A0000", "SERIAL0000"]);
+        assert_eq!(
+            redacted_hex(&info),
+            "04 00 04 00 1d 00 02 18 00 04 00 (device information redacted)"
+        );
+        assert_eq!(
+            redacted_hex(&info[..6]),
+            "04 00 04 00 1d 00 (device information redacted)"
+        );
     }
 
     #[test]

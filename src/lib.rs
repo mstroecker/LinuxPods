@@ -26,8 +26,9 @@ pub const APP_SYMBOLIC_ICON: &str = "io.github.mstroecker.LinuxPods-symbolic";
 pub const APP_PATH: &str = "/io/github/mstroecker/LinuxPods";
 
 /// Bytes as hex, two lowercase digits each and a space between: `04 00 04 00`.
-/// For logs and probe output, which get pasted into issues - a key's bytes go
-/// through `aap::keys::redacted_hex` instead.
+/// For logs and probe output, which get pasted into issues - a packet that
+/// may carry keys or serial numbers goes through `aap::keys::redacted_hex`
+/// instead.
 pub fn hex(bytes: &[u8]) -> String {
     bytes
         .iter()

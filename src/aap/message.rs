@@ -6,13 +6,14 @@
 //! ear report (0x06), the primary pod (0x08), the 0x09 settings family - of
 //! which the noise control mode (sub-command 0x0D) and Conversation
 //! Awareness (0x28) are read - the proximity keys (0x31) and the speech
-//! level (0x4B). Each parser checks what is its own beyond that, as it always
-//! has.
+//! level (0x4B), and the pods' name in the device information packet (0x1D).
+//! Each parser checks what is its own beyond that, as it always has.
 
 use crate::aap::battery::{self, BatteryInfo, BatteryParseError};
 use crate::aap::conversation::{self, ConversationParseError};
 use crate::aap::ear::{self, EarReport};
 use crate::aap::keys::{self, KeyParseError, ProximityKey};
+use crate::aap::name::{self, InfoParseError};
 use crate::aap::noise::{self, NoiseMode, NoiseParseError};
 use crate::ble::parser::PodSide;
 
@@ -54,6 +55,10 @@ pub enum Message {
     SpeechLevel(u8),
     /// The proximity keys, in answer to the key request.
     Keys(Vec<ProximityKey>),
+    /// The pods' own name, from the device information packet at the start
+    /// of every connection - the rest of that packet is not read. After a
+    /// rename, the next connection's carries the new name.
+    DeviceName(String),
     /// Anything else: another opcode, another setting of the 0x09 family, or
     /// one of the opcodes above too short to be what it names, as the parsers
     /// have always passed those over. `None` for a packet without the
@@ -72,6 +77,8 @@ pub enum DecodeError {
     ConversationAwareness(#[from] ConversationParseError),
     #[error("key packet rejected: {0}")]
     Keys(#[from] KeyParseError),
+    #[error("device information parse error: {0}")]
+    DeviceName(#[from] InfoParseError),
 }
 
 /// Reads one packet from the device.
@@ -97,6 +104,9 @@ pub fn decode(packet: &[u8]) -> Result<Message, DecodeError> {
             Message::SpeechLevel(conversation::read_level(packet))
         }
         keys::OPCODE if keys::is_key_packet(packet) => Message::Keys(keys::read(packet)?),
+        name::INFO_OPCODE if name::is_info_packet(packet) => {
+            Message::DeviceName(name::read_info_name(packet)?)
+        }
         _ => Message::Unknown {
             opcode: Some(opcode),
         },
@@ -193,6 +203,17 @@ mod tests {
         assert_eq!(decode(&key_packet(&keys)), Ok(Message::Keys(keys)));
     }
 
+    #[test]
+    fn decodes_the_device_name() {
+        assert_eq!(
+            decode(&name::info_packet(
+                "Someone’s Pods",
+                &["A0000", "SERIAL0000"]
+            )),
+            Ok(Message::DeviceName("Someone’s Pods".into()))
+        );
+    }
+
     /// The parsers' errors come through, each under its own kind.
     #[test]
     fn a_packet_that_does_not_parse_is_an_error() {
@@ -224,19 +245,33 @@ mod tests {
             decode(&no_keys),
             Err(DecodeError::Keys(KeyParseError::NoKeys))
         );
+
+        let mut not_utf8 = name::info_packet("Pods", &[]);
+        not_utf8[name::INFO_PREAMBLE_LEN] = 0xFF;
+        assert_eq!(
+            decode(&not_utf8),
+            Err(DecodeError::DeviceName(InfoParseError::NotUtf8))
+        );
     }
 
     /// What the app has no use for is passed over, by its opcode: the startup
-    /// dump's other settings, a 0x4B shaped otherwise than a speech level,
-    /// the list of known hosts that comes with the handshake's answer.
+    /// dump's other settings, a 0x4B shaped otherwise than a speech level, a
+    /// 0x1D shaped otherwise than the device information, the list of known
+    /// hosts that comes with the handshake's answer.
     #[test]
     fn other_packets_are_unknown() {
         let mut other_4b = conversation::level_packet(0x09);
         other_4b[8] = 0x02;
-        let others: [(&[u8], u8); 4] = [
+        let mut other_1d = name::info_packet("Pods", &["A0000"]);
+        other_1d[6] = 0x01;
+        let mut other_1d_start = name::info_packet("Pods", &["A0000"]);
+        other_1d_start[9] = 0x05;
+        let others: [(&[u8], u8); 6] = [
             (&noise::settings_report(0x1F, &[0x50, 0x50]), 0x09),
             (&noise::allow_off_packet(true), 0x09),
             (&other_4b, 0x4B),
+            (&other_1d, 0x1D),
+            (&other_1d_start, 0x1D),
             (&[0x04, 0x00, 0x04, 0x00, 0x2B, 0x00], 0x2B),
         ];
         for (packet, opcode) in others {
@@ -252,11 +287,11 @@ mod tests {
 
     /// Too short to be what their opcode names, as the parsers have always
     /// passed them over: no battery count, no key count, no mode byte, no
-    /// setting's value, no second place, no primary, no level. A battery
-    /// packet needs byte 5 to be zero as well.
+    /// setting's value, no second place, no primary, no level, no name. A
+    /// battery packet needs byte 5 to be zero as well.
     #[test]
     fn a_packet_too_short_for_its_opcode_is_unknown() {
-        let short: [&[u8]; 8] = [
+        let short: [&[u8]; 9] = [
             &[0x04, 0x00, 0x04, 0x00, 0x04, 0x00],
             &[0x04, 0x00, 0x04, 0x00, 0x04, 0x01, 0x01],
             &[0x04, 0x00, 0x04, 0x00, 0x31, 0x00],
@@ -265,6 +300,7 @@ mod tests {
             &[0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00],
             &[0x04, 0x00, 0x04, 0x00, 0x08, 0x00],
             &conversation::level_packet(0x01)[..9],
+            &name::info_packet("Pods", &[])[..name::INFO_PREAMBLE_LEN],
         ];
         for packet in short {
             assert_eq!(
