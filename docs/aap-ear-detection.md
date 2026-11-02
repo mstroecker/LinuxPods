@@ -2,7 +2,7 @@
 
 How AirPods tell a connected host which pod is in an ear, over AAP: the ear report (opcode `0x06`) and the primary pod (opcode `0x08`). Read by `aap::ear`, and kept per link by `aap::ear::EarState`.
 
-Captured on AirPods Pro 3 on 2026-11-01, in #142. That AirPods Pro 2 (USB-C) send the same is assumed, not checked: an accepted risk.
+Captured on AirPods Pro 3 on 2026-11-01, in #142. On AirPods Pro 2 (USB-C) the role switch was captured on 2026-11-02 at d289626 (#71): the same packets in the same order, with longer gaps. That the Pro 2 send the rest the same is assumed, not checked.
 
 ## Why AAP and not the advertisement
 
@@ -28,7 +28,7 @@ Both come unasked, on every change, and once each right after the link comes up,
 | 6 (`PP`) | `01`, `02` | The primary pod: `01` left, `02` right. |
 | 7 | `00` | Always `00`. |
 | 8 (`SS`) | `01`, `00` | `01` while the secondary pod can be reached, `00` with it in the closed case (once), matching `0x06`'s `03`. |
-| 9 (`TT`) | `01`, `00` | `01` in the first packet of a role switch, `00` in a second one 30-90 ms later. Possibly "switch in progress". `PP` is the new primary in both. |
+| 9 (`TT`) | `01`, `00` | `01` in the first packet of a role switch, `00` in a second one 28-291 ms later on the Pro 2, and 31-88 ms later on the Pro 3 in session 2, the only Pro 3 session that shows `TT`. Possibly "switch in progress". `PP` is the new primary in both. |
 
 `PP` agreed every time with the advertisement's primary flag (status bit 5), 13 times across the logs, and with the battery packet, which lists the primary pod first (`03 04 …` with `08 01`, `03 02 …` with `08 02`).
 
@@ -64,7 +64,9 @@ A `0x0D` report of the unchanged noise control mode usually follows an ear repor
 
 Taking the secondary pod out changes nothing but `0x06`.
 
-When the primary pod comes out, the pod still in an ear becomes primary 0.85-1.2 s later. A new `0x08` and a `0x06` in the new order then arrive within a few milliseconds of each other, and at all six switches captured the `0x06` came first, 1-31 ms before the `0x08`.
+When the primary pod comes out, the pod still in an ear becomes primary 0.7-1.2 s later, on both models. A new `0x08` and a `0x06` in the new order then arrive close together, and at every switch captured the `0x06` came first: at all six on the Pro 3, 0.2-31 ms before the `0x08`, and at all eight on the Pro 2, 0.5-87 ms before it.
+
+Both models send the same sequence: the `0x06` in the new order, the `0x08` with `TT` = `01`, the battery in the new order, the `0x08` with `TT` = `00`, then 0.1-0.8 s after the first `0x06` the same `0x06` and battery again. Once, at 16:59:01 on the Pro 3, the `0x06` came a second time between the first `0x08` and the battery.
 
 Read with the old primary in between, that `0x06` swaps the pods: the one just taken out shows in an ear, the one still worn out. The window's render loop wakes at the first change and draws it, so in a pipeline test a watcher shaped like it saw the swap at 4 of 5 switches even with a 1 ms gap. `EarState` therefore holds back a report that puts the primary in an ear and the secondary out, where the last one had the primary out and the secondary in: until the next `0x08`, which it is then read with; until another `0x06`, which replaces it; or for `ROLE_SWITCH_HOLD` (250 ms), after which it is taken as it is.
 
@@ -103,6 +105,21 @@ Switch timing, `0x06` before the first `0x08`: 17:22:25.062 vs .065, 17:23:41.80
 
 The lid rows are timed to 0.1 s only, which does not settle the order of their two packets; they are listed in the order capture 4 of #71 has them, to the millisecond: the `0x08` first at a lid change (see the ear report above).
 
+Session 3, AirPods Pro 2 (USB-C) on 2026-11-02, a plain build of d289626 at `RUST_LOG=linuxpods=trace`: both pods worn, the primary taken out and put back eight times, alternately right and left, 19:27-19:28 UTC. Each removal switched the primary. All eight first `0x06`s were held, and each was read with the `0x08` that followed; none waited out `ROLE_SWITCH_HOLD`.
+
+| Primary out (`06 00 01 00`) | `0x06` in the new order | First `0x08` (`TT` `01`) | Second `0x08` (`TT` `00`) | New primary |
+|---|---|---|---|---|
+| 19:27:33.004 | +1200 ms | +0.8 ms | +28 ms | left |
+| 19:27:43.808 | +697 ms | +3.3 ms | +116 ms | right |
+| 19:27:53.200 | +905 ms | +80.0 ms | +83 ms | left |
+| 19:28:02.150 | +944 ms | +5.6 ms | +183 ms | right |
+| 19:28:11.812 | +960 ms | +87.1 ms | +291 ms | left |
+| 19:28:20.677 | +870 ms | +0.5 ms | +80 ms | right |
+| 19:28:27.977 | +795 ms | +55.0 ms | +39 ms | left |
+| 19:28:36.936 | +851 ms | +2.0 ms | +96 ms | right |
+
+Each column is measured from the one before it.
+
 The `AAP packet (N bytes):` debug line shows the first 8 bytes of a packet; at `trace`, the whole packet follows (key packets redacted).
 
 ## What the fake does
@@ -110,6 +127,6 @@ The `AAP packet (N bytes):` debug line shows the first 8 bytes of a packet; at `
 The fake AirPods (`harness/pods.rs`) answer the notification request with the battery, then `0x08`, `0x0C`, `0x0E`, `0x2E`, `0x06` and `0x2E`, as capture 4 of #71 has them, and send a `0x06` on every change of a pod's place after that.
 
 - On a lid change: the `0x08` with `SS` changed, then the `0x06`, then the battery.
-- On a role switch: the `0x06` in the new order and the battery, then two `0x08`s - the first 10 ms later with `TT` set, the second 60 ms after it without.
+- On a role switch: the `0x06` in the new order and the battery, then two `0x08`s - the first 10 ms later with `TT` set, the second 60 ms after it without. The hardware sends the battery between the two `0x08`s instead.
 - A pod in the case is in the closed case the moment the lid closes, where the hardware took about 4.5 s.
 - With both pods in the closed case, the pods drop the link.
