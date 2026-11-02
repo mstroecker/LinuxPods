@@ -117,6 +117,30 @@ fn on_off(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
 }
 
+/// A speech level a link brought, or the link going, as
+/// [`Coordinator::speech_events`] tells them, for what lowers the media's
+/// volume while the user speaks - see `crate::volume`.
+///
+/// Events rather than the snapshot's [`PodState::speech_level`]: the watch
+/// keeps the latest snapshot alone, so a short stretch's `01` could be gone
+/// by the time a slow consumer looked, and the first `01` and the first
+/// level after it are what lowering and fading back start on. Nor does a
+/// snapshot tell one link to a pair from the next. Here every level comes,
+/// in the order the pods sent it, a link's levels begin after its
+/// [`SpeechEvent::LinkUp`] and end with its [`SpeechEvent::LinkGone`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechEvent {
+    /// The pair has a link again: a volume left lowered when its transport
+    /// went may be put back once one is there.
+    LinkUp { mac: Address },
+    /// A speech level from the pair's link - see
+    /// [`aap::conversation::Speech`].
+    Level { mac: Address, level: u8 },
+    /// The pair's link went: closed here, or lost. Its last level stands for
+    /// nothing any more.
+    LinkGone { mac: Address },
+}
+
 /// A command in a link's queue, and where its result goes.
 struct Queued {
     command: Command,
@@ -242,7 +266,9 @@ pub struct PodState {
     /// [`aap::conversation::Speech`] - while Conversation Awareness is on:
     /// what the media's volume should be as the user speaks or has just
     /// stopped. `None` until one comes, and without a link. A level is a
-    /// target, so a consumer that skips one in between misses nothing.
+    /// target, so the snapshot may skip one in between; what acts on the
+    /// first `01` of a stretch takes [`Coordinator::speech_events`], which
+    /// skips none.
     pub speech_level: Option<u8>,
 
     /// `None` until an advertisement has identified the device. For one on
@@ -694,6 +720,10 @@ pub struct Coordinator {
     /// The advertising addresses a stored IRK resolved - see
     /// [`Coordinator::resolve`]. Taken alone and never held across an await.
     resolved: std::sync::Mutex<ResolvedAddresses>,
+    /// Where [`SpeechEvent`]s go - see [`Coordinator::speech_events`]. Taken
+    /// under `inner`'s write lock, so events go out in the order the links
+    /// changed, or alone; never held across an await.
+    speech: std::sync::Mutex<Vec<mpsc::UnboundedSender<SpeechEvent>>>,
     /// Held across a save, so saves never overlap - they share a temporary
     /// file. Owned by the save while it runs - see
     /// `Coordinator::store_keys`.
@@ -829,6 +859,7 @@ impl Coordinator {
             inner: RwLock::new(inner),
             queues: std::sync::Mutex::default(),
             resolved: std::sync::Mutex::default(),
+            speech: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(persistence)),
             updates,
             #[cfg(feature = "harness")]
@@ -863,6 +894,35 @@ impl Coordinator {
         let mut rx = self.updates.subscribe();
         rx.mark_changed();
         rx
+    }
+
+    /// Registers a consumer of every link's speech levels, and of each link
+    /// coming up and going - see [`SpeechEvent`] - from now on.
+    ///
+    /// Each event is queued, none skipped: a level is a target, but the
+    /// first `01` of a stretch and the first level after it are what a
+    /// consumer acts on. They come from the user's own pods over AAP, a
+    /// handful per stretch of speech, nothing an advertiser can send. A
+    /// consumer that is dropped is forgotten at the next event.
+    pub fn speech_events(&self) -> mpsc::UnboundedReceiver<SpeechEvent> {
+        let (events, receiver) = mpsc::unbounded_channel();
+        self.speech_consumers().push(events);
+        receiver
+    }
+
+    /// Hands `event` to every consumer of [`Coordinator::speech_events`].
+    /// Called under `inner`'s write lock, so the events go out in the order
+    /// the links changed: a link's levels before its going.
+    fn tell_speech(&self, event: SpeechEvent) {
+        self.speech_consumers()
+            .retain(|consumer| consumer.send(event).is_ok());
+    }
+
+    /// The consumers of speech events - see `Coordinator::speech`.
+    fn speech_consumers(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Vec<mpsc::UnboundedSender<SpeechEvent>>> {
+        self.speech.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Replaces the snapshot every subscriber sees with one of `inner`.
@@ -1188,6 +1248,8 @@ impl Coordinator {
                     commands,
                 },
             );
+            // Ahead of the link's levels, which are told under this lock too.
+            self.tell_speech(SpeechEvent::LinkUp { mac: mac_addr });
             self.broadcast(&inner);
             AapLink {
                 coordinator: self.clone(),
@@ -1254,6 +1316,10 @@ impl Coordinator {
                 {
                     queues.remove(&mac_addr);
                 }
+                drop(queues);
+                // After every level the link brought, as those were told
+                // under this lock too.
+                self.tell_speech(SpeechEvent::LinkGone { mac: mac_addr });
             }
             // Without this the UI, tray, attachment and notifier never hear
             // that the connection ended and keep showing the last AAP reading.
@@ -1536,9 +1602,10 @@ impl Coordinator {
         );
     }
 
-    /// Records a speech level from `client`'s link, and broadcasts if it is
-    /// another than the last. Nothing acts on it yet: lowering the media's
-    /// volume while the user speaks is to come (#150).
+    /// Records a speech level from `client`'s link, broadcasts if it is
+    /// another than the last, and tells it to the consumers of
+    /// [`Coordinator::speech_events`] - what lowers the volume while the
+    /// user speaks - another or not.
     async fn handle_speech_level(&self, level: u8, mac_addr: Address, client: &Arc<aap::Client>) {
         tracing::debug!(
             "AAP speech level {}",
@@ -1551,6 +1618,11 @@ impl Coordinator {
         if link.speech_level.replace(level) != Some(level) {
             self.broadcast(&inner);
         }
+        // Under the lock, as the link's going is told: never after it.
+        self.tell_speech(SpeechEvent::Level {
+            mac: mac_addr,
+            level,
+        });
     }
 
     /// Sends a command to one device, over its AAP link, and resolves to how
@@ -1842,6 +1914,7 @@ mod tests {
             inner: RwLock::new(inner),
             queues: std::sync::Mutex::default(),
             resolved: std::sync::Mutex::default(),
+            speech: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(Persistence {
                 keystore: Some(keystore_in(&dir)),
                 saved: HashMap::new(),
@@ -2366,6 +2439,51 @@ mod tests {
         let snapshot = coordinator.inner.read().await.snapshot();
         assert_eq!(snapshot.states[&AA].conversation_awareness, None);
         assert_eq!(snapshot.states[&AA].speech_level, None);
+    }
+
+    /// Every level a link brings is told as it comes, a repeated one too,
+    /// and the link's going after its last; a stale read loop's level is
+    /// told to nobody, and a drop that finds no link tells nothing.
+    #[tokio::test]
+    async fn speech_events_are_every_level_then_the_link_going() {
+        let mut inner = inner_with(vec![]);
+        inner.links.insert(AA, link(Some(aap_state(80))));
+        let (coordinator, _dir) = coordinator_with(inner);
+        let client = client_of(&coordinator, AA).await;
+        let mut events = coordinator.speech_events();
+        let gone_consumer = coordinator.speech_events();
+        drop(gone_consumer);
+
+        for level in [0x01, 0x02, 0x02, 0x03, 0x08] {
+            coordinator.handle_speech_level(level, AA, &client).await;
+        }
+        coordinator
+            .handle_speech_level(0x01, AA, &link(None).client)
+            .await;
+        assert!(coordinator.drop_link(AA, Some(&client)).await);
+        assert!(!coordinator.drop_link(AA, None).await);
+
+        let mut told = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            told.push(event);
+        }
+        let level = |level| SpeechEvent::Level { mac: AA, level };
+        assert_eq!(
+            told,
+            [
+                level(0x01),
+                level(0x02),
+                level(0x02),
+                level(0x03),
+                level(0x08),
+                SpeechEvent::LinkGone { mac: AA },
+            ]
+        );
+        assert_eq!(
+            coordinator.speech_consumers().len(),
+            1,
+            "the dropped one goes"
+        );
     }
 
     /// A level, or a setting, the same as the last is not worth waking the
