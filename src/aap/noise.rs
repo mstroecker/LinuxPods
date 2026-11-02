@@ -645,6 +645,37 @@ mod tests {
         );
     }
 
+    /// Transparency set aside just before speech starts: the pods' switch to
+    /// it for the speech is a report of the mode the command replaced, inside
+    /// the window. The report of the mode in use that the #150 run had 20 ms
+    /// into every stretch is of the mode set, and ends the hold first, so the
+    /// switch is taken. Without that report it would be dropped, and the
+    /// mode set stay on show through the stretch - the mode the pods go back
+    /// to - which is accepted.
+    #[test]
+    fn the_switch_for_speech_is_taken_after_transparency_was_replaced() {
+        use NoiseMode::{NoiseCancellation, Transparency};
+        let start = Instant::now();
+        let mut state = reported(Transparency, start);
+        assert!(state.set(NoiseCancellation, start));
+        let speech = start + ms(500);
+        assert_eq!(
+            state.report(NoiseCancellation, speech + ms(20)),
+            Report::Unchanged
+        );
+        assert_eq!(
+            state.report(Transparency, speech + ms(310)),
+            Report::Changed
+        );
+
+        let mut unreported = reported(Transparency, start);
+        unreported.set(NoiseCancellation, start);
+        assert_eq!(
+            unreported.report(Transparency, speech + ms(310)),
+            Report::Stale
+        );
+    }
+
     #[test]
     fn lists_every_mode_once() {
         for mode in NoiseMode::ALL {
