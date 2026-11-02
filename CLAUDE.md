@@ -28,6 +28,7 @@ src/
 ├── settings.rs    # Preferences' settings at ~/.config/linuxpods/settings.json
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
+├── volume.rs      # The pair's volume lowered while the user speaks (MediaTransport1)
 ├── ui/            # GTK4/libadwaita: window, Control page, Preferences, notifications, automation
 ├── harness/       # Harness only: fake AirPods, fake BlueZ, the fake world
 └── bin/fakepods.rs # Harness only: the fake world's process, which `make fake-world` runs
@@ -35,8 +36,9 @@ src/
 
 **Threading.** GTK owns the main thread, tokio carries BLE/AAP/D-Bus. GTK types are
 `!Send`, so the two meet over channels: snapshots reach the UI on a `tokio::sync::watch`,
-and the tray's window commands and the low battery notifications on an `async-channel`,
-all consumed with `glib::spawn_future_local`. Commands to the AirPods go the other way,
+and the tray's window commands, the low battery notifications and the signal task's quit
+request (SIGTERM, SIGINT) on an `async-channel`, all consumed with
+`glib::spawn_future_local`. Commands to the AirPods go the other way,
 onto their link's queue (`Coordinator::command`), and each result comes back on a oneshot.
 Never touch a widget from a tokio task.
 
@@ -91,6 +93,9 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
   write lock or alone, never held across an await, changed only together with
   `Inner::links`, and removed only past `drop_link`'s client check. `AapLink::run`
   carries the commands out one at a time beside the read loop, so they go with the link.
+  The speech-event consumers are a std mutex beside `inner`, taken under `inner`'s write
+  lock to tell an event, so a link's levels come between its coming up and its going, or
+  alone to register; never held across an await.
   Each caller gets a `Result`: an error without a link, from the send, or when the link
   goes first - `ConnectionLost` when it went mid-command, as the packet may have gone out.
   Dropping the future does not withdraw the command. The window toasts a failure; the
@@ -283,8 +288,54 @@ never show until the next connection. With it on the pods send `04 00 04 00 4B 0
 not a step to count. `08` and `09` also frame every mode change, so they name no mode and
 acknowledge nothing. While the user speaks the pods switch to Transparency and back
 themselves, as ordinary mode reports, taken like any other. The link's last level is in
-the snapshot (`PodState::speech_level`); lowering the volume on it is still to come
-(#150).
+the snapshot (`PodState::speech_level`), and every level goes to the volume as an event.
+
+**The volume lowered while the user speaks is the pair's own, through BlueZ.** The
+pair's A2DP transport's `org.bluez.MediaTransport1.Volume` (0-127, AVRCP absolute
+volume), never the default output, never PipeWire, never a volume in software: set by
+hand on a Pro 3, PipeWire's sink followed (#150); GNOME's slider, which follows the sink,
+was not watched. bluetoothd checks no owner for `Volume`, whatever its documentation
+says. `volume::Ducking` decides, pure and taking the time; `volume::Volume` carries it
+out in a task of its own.
+- The transport's path is new with every A2DP setup (`<device>/sep1/fd<n>`, `n` the
+  first free from the count of all bluetoothd's transports, BlueZ 5.87 `transport.c`),
+  so it is looked up under the pair's device path every time - each level that may set
+  something, each fade step - by `Device` and `UUID`, and never kept. No transport,
+  nothing to lower.
+- Lowered only while that A2DP transport is `active`. A pair nothing plays to is left
+  alone, and so, assumed, is one in a call: whatever runs the headset profile is assumed
+  to leave A2DP not `active`, released or gone - not read in any source, not watched
+  during a call here; the run so far is the fake world's.
+- Down at once to `volume::LOWERED_PERCENT` of the volume before, at the first `01`/`02`;
+  back over `volume::FADE` in steps from the first level of `03` or above, whatever comes
+  meanwhile; a `01`/`02` during the fade drops it again, to the lowered volume of the one
+  remembered. `08`/`09` with nothing lowered set nothing and ask BlueZ nothing.
+- A `Set` of `Volume` changes the property only when the pods answer, to the volume they
+  report (BlueZ 5.87, `transport_a2dp_src_set_volume`, `avrcp_handle_set_volume`; how
+  long the pods take, and whether they round, is untried). So nothing waits for an
+  answer or reads one back: a reading counts as ours if it is within
+  `volume::READ_BACK_SLACK` (a guess) of any volume set this stretch, or is the volume
+  before while the lowering is unanswered. Never compare with the last value set alone,
+  and never take the volume before as the user's while the lowering is unanswered. The
+  fake BlueZ answers late and rounded with `SetVolumeAnswer`;
+  `docs/aap-conversation-awareness.md` says why, and what it costs.
+- The user's change wins: put back, or a fade stepped, only while the transport reads a
+  volume that is ours; the lowering itself sets from any volume. Moved meanwhile, the
+  remembered volume is forgotten.
+- Put back when the link goes - `SpeechEvent::LinkGone`, from `drop_link` under `inner`'s
+  write lock after the link's last level - and at shutdown, `main.rs` waiting at most
+  `volume::RESTORE_LIMIT`, on Quit or the first SIGTERM or SIGINT; a second exits at
+  once. A transport gone meanwhile is waited for, as bluetoothd starts the next one at
+  the device's volume: looked for each `volume::PUT_BACK_CHECK` for
+  `volume::PUT_BACK_WINDOW` (guesses) from when it went, or from the pair's next link
+  (`SpeechEvent::LinkUp`), and past that kept until the next link or level, and put
+  back if it reads ours. Not in a pair's supervisor: that is aborted wherever it is.
+- Levels reach it as events (`Coordinator::speech_events`), not snapshots: the watch
+  keeps the latest alone, and a short stretch's `01` could be gone before a consumer
+  looked. Every BlueZ call goes without auto-start, each call and the bus connection
+  are bounded by `volume::CALL_LIMIT`, and the task takes no signal. Events go first in its `select!`,
+  so `VolumeControl::settled` answers for every event told before it: tests wait on it,
+  never on a sleep.
 
 **Nothing goes out before the handshake is answered.** The AirPods drop what they are
 sent until they have answered it (`01 00 04 00 …`), and a pair that had only just
@@ -324,8 +375,9 @@ deadlocked every command sent meanwhile.
 - Keep protocol parsing pure and tested. `aap::battery`, `aap::conversation`, `aap::ear`,
   `aap::keys`, `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
   return values, and carry the bulk of the test suite; `noise::ModeState`,
-  `ear::EarState`, `rpa::ResolvedAddresses` and `notify::Alerts` take the time as an
-  argument for the same reason. `aap::decode` routes every packet by its header and opcode;
+  `ear::EarState`, `rpa::ResolvedAddresses`, `notify::Alerts` and `volume::Ducking` take
+  the time as an argument for the same reason; `volume::a2dp_in` reads BlueZ's objects
+  as values. `aap::decode` routes every packet by its header and opcode;
   each module's `is_*` and `parse_*` still check the header themselves, so they stay safe
   to call on their own.
 - Use synthetic test vectors - never commit a real device key. New test keys come from
@@ -347,7 +399,10 @@ deadlocked every command sent meanwhile.
 - Tasks on the system bus (`ble_task`, `attachment::run`) never return for good: they set
   themselves up again with `bluez::Backoff`, which counts a run under a minute as a
   failure, so a connection that dies at once is not retried in a loop. Each used to give
-  up at its first error, and the app stayed deaf until restarted (#50).
+  up at its first error, and the app stayed deaf until restarted (#50). `volume::Volume`
+  calls BlueZ only for a speech level, a fade step, a look for a transport that went, a
+  link going or the quit, connecting when one needs it and again after a connection
+  failed, so it has no retry loop to back off.
 - A harness build must behave like a plain one unless the fake world's environment asks
   otherwise (`LINUXPODS_AAP_SOCKET_DIR`, `LINUXPODS_HARNESS_AUTOMATION=1`, set only by
   `scripts/fake-world.sh`): `make test` and `make fake-world` leave it at
@@ -400,7 +455,8 @@ A `Co-Authored-By:` trailer is fine.
 - `docs/aap-noise-control.md` - mode packet, the 0x4B levels around a mode change, the
   0x09 family
 - `docs/aap-conversation-awareness.md` - the 0x28 setting, the speech levels (0x4B), the
-  hardware run, the pods' own switch to Transparency, the 0x4D requirement
+  hardware run, the pods' own switch to Transparency, the 0x4D requirement, the volume
+  lowered on the levels through `MediaTransport1`
 - `docs/aap-ear-detection.md` - the ear report (0x06) and primary pod (0x08), the role
   switch
 - `docs/releasing.md` - release steps, what a release contains, verifying one

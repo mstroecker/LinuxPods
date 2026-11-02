@@ -83,6 +83,12 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 | `HangUp(s mac)` | closes AAP from the pods' end; the link stays, and the app links the pair again after a second, longer after repeated hang-ups (#49) |
 | `SetConversationAwareness(s mac, b on)` | the setting, as from a phone: nothing reports it over AAP; the next connection's startup dump carries it |
 | `Speak(s mac, u length_ms)` | the user speaks that long. With Conversation Awareness on, the pods send speech levels and switch to Transparency and back at the #150 run's times: level `01`, the mode in use reported 20 ms later, Transparency at 0.31 s, `02` at 0.82 s; at the end `03`, `07`, `08` within 0.1 s, the mode back at 0.46 s and `09` at 0.48 s. With it off, nothing. Fails without AAP, or while a stretch is under way |
+| `SetPlaying(s mac, b playing)` | audio to a connected pair starts or stops, as PipeWire's: its A2DP transport (`org.bluez.MediaTransport1` at `<device>/sep1/fd<n>`, a new `n` to the pair with each setup - bluetoothd numbers them from the count of all its transports instead) `active` at the pair's own volume, 64 at first; or `idle`. Fails unless connected |
+| `SetCall(s mac, b on)` | a call begins or ends: A2DP `idle`, as a call is assumed to leave it, and playing again after if it did |
+| `SetVolume(s mac, q volume)` | the user sets the pair's A2DP volume, 0 to 127 - GNOME's slider, say; not among `VolumeSets`. With no transport, the volume the next one starts at, as a pair back at another volume |
+| `SetVolumeAnswer(s mac, u delay_ms, b to_even)` | the pair answers a volume the app sets that long later, rounded down to even if asked, as bluetoothd has real pods answer: the transport reads the old volume until then. A set of the volume held does nothing, as in bluetoothd |
+| `Volume(s mac) → q` | the volume of the pair's A2DP transport; fails without one |
+| `VolumeSets(s mac) → aq` | every volume the app set on the pair's transports, in order: a fifth while the user speaks, then the fade back |
 | `SetQuirk(s mac, s quirk, v value)` | `off_needs_allow`, `idle_level_only` (with Conversation Awareness on, level 09 alone on every mode change, as AirPods 4), `echo_every`, `echo_delay_ms`, `stale_report_ms` (report the mode an Off replaced, this long after it, ahead of the echo; 0 for none), `silent_handshake`, `refuse_aap` (turn away the next n AAP connections), `handshake_delay_ms` (hold back the handshake's answer), `report_delay_ms` (hold back the battery and what comes with it), `dump_delay_ms` (from the battery to the startup dump and its mode) |
 | `Flood(u count)` | that many advertisers no key decrypts and no IRK resolves |
 | `Received(s mac) → aay` | every AAP packet the app sent the pair: check `0x34 01` precedes Off |
@@ -140,6 +146,27 @@ Conversation Awareness: `app SetActive conversation-awareness true` turns it on 
 Received` shows `0x28 01` sent); then `world Speak 00:00:5E:00:53:01 4000`, and the
 Noise Control group shows Transparency from 0.31 s until 0.46 s after the speech, the
 app's log the levels at debug (`AAP speech level`).
+
+The volume lowered while the user speaks (#150), with the pair connected and the setting
+on:
+
+```sh
+scripts/fake-world.sh world SetPlaying 00:00:5E:00:53:01 true
+scripts/fake-world.sh world SetVolume 00:00:5E:00:53:01 100
+scripts/fake-world.sh world Speak 00:00:5E:00:53:01 4000
+scripts/fake-world.sh world VolumeSets 00:00:5E:00:53:01   # 20, then up to 100 in steps
+```
+
+The app logs `Lowering the volume of <MAC> to 20` at the first level `01`, and `back at
+100` 1.5 s after the speech ends; `RUST_LOG=linuxpods::volume=debug` shows each step. A
+`SetVolume` while lowered is the user's: no fade follows, and `VolumeSets` stays at the
+one lowering. Without `SetPlaying`, or with `SetCall ... true`, speech sets nothing. A
+`HangUp` mid-speech, or quitting the app - Quit, SIGTERM or SIGINT - puts the volume back
+at once. A `Disconnect` mid-speech takes the transport along: after `Connect` and
+`SetPlaying`, the transport starts at the lowered volume, and the app puts it back
+within a second or so. `SetVolumeAnswer 00:00:5E:00:53:01 150 true` first has the pair
+answer as real pods may, late and rounded; the app's debug log shows each volume set
+and what the transport read then: `set to 30 ..., reading 24`.
 
 Change, settle, then read: `SetBattery`, `Settle`, `tree`.
 

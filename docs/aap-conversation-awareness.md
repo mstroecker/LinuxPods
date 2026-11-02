@@ -1,8 +1,8 @@
 # AAP Conversation Awareness
 
-Conversation Awareness lowers the media volume while the user speaks and raises it again when they stop. The pods detect the speech and change their own sound - they switch to Transparency - but lowering the media is the host's job: on an iPhone or a Mac the OS does it on the levels the pods send. This document describes the setting that turns it on, those levels, and what the pods do while the user speaks. Read by `aap::conversation`.
+Conversation Awareness lowers the media volume while the user speaks and raises it again when they stop. The pods detect the speech and change their own sound - they switch to Transparency - but lowering the media is the host's job: on an iPhone or a Mac the OS does it on the levels the pods send. This document describes the setting that turns it on, those levels, what the pods do while the user speaks, and how the app lowers the volume on the levels. Read by `aap::conversation` and `volume`.
 
-**Status:** the setting's report in the startup dump and the levels checked on AirPods Pro 3 on 2026-11-01 (#150), with `examples/conversation_awareness.rs`'s predecessor and `examples/noise_probe.rs`. That AirPods Pro 2 (USB-C) behave the same is assumed, not checked. The `0x4B` packets AirPods 4 sent after every mode change (`aap-noise-control.md`) are the same levels. The command that changes the setting is LibrePods'; it has not been sent to a pair from here yet.
+**Status:** the setting's report in the startup dump and the levels checked on AirPods Pro 3 on 2026-11-01 (#150), with `examples/conversation_awareness.rs`'s predecessor and `examples/noise_probe.rs`. That AirPods Pro 2 (USB-C) behave the same is assumed, not checked. The `0x4B` packets AirPods 4 sent after every mode change (`aap-noise-control.md`) are the same levels. The command that changes the setting is LibrePods'; it has not been sent to a pair from here yet. The volume the app lowers while the user speaks goes through BlueZ's `MediaTransport1.Volume`, which was set by hand on the Pro 3 on 2026-11-01; the app's lowering and fade have run against the fake world only - see [Lowering the volume](#lowering-the-volume).
 
 **Source:** the packets from [LibrePods](https://github.com/librepods-org/librepods/blob/main/docs/AAP%20Definitions.md) ("Conversational Awareness", "Toggle Conversational Awareness") and its [control command table](https://github.com/librepods-org/librepods/blob/main/docs/control_commands.md) (`0x28`), for protocol facts only: GitHub detects no license for LibrePods, so no code is taken from it. What the levels mean comes from the run below.
 
@@ -98,11 +98,47 @@ AirPods 4 sent one `09` per change (`aap-noise-control.md`), and their dump had 
 - `aap::decode` reads the setting as `Message::ConversationAwareness` and a level as `Message::SpeechLevel`.
 - The setting is kept on the link and shown in the snapshot (`PodState::conversation_awareness`); it goes with the link, as the noise mode does.
 - `Command::ConversationAwareness` sends LibrePods' packet to turn it on or off, not yet confirmed on a pair, through `Coordinator::command` like the noise mode. The Features group's switch sends it, and is sensitive while the device shown is on AAP and has reported the setting.
-- The last level is kept on the link and in the snapshot (`PodState::speech_level`), and logged at debug. Nothing acts on it yet.
+- The last level is kept on the link and in the snapshot (`PodState::speech_level`), and logged at debug. Every level also goes, as an event, to what lowers the volume: `Coordinator::speech_events` - see below.
 
 ## Lowering the volume
 
-Planned, #150: from the levels of a pair with a link, lower that pair's own A2DP volume - `org.bluez.MediaTransport1.Volume`, its AVRCP absolute volume - at once on the first `01`/`02`, and fade it back to what it was from the first level of `03` or above; never during a call.
+The host's half: while the user speaks, the app lowers the media's volume, as an iPhone or a Mac does on the same levels. `volume::Ducking` decides, from the levels, the transport's volume and the time; `volume::Volume` carries it out over D-Bus, in a task of its own.
+
+**The pair's own A2DP volume, through BlueZ.** `org.bluez.MediaTransport1.Volume` (`q`, 0-127, writable, signaled), the AVRCP absolute volume of the pair's A2DP transport. It goes to the pods themselves; never the default output, never a volume in software, no subprocess. Checked on a Pro 3 on 2026-11-01 (#150): the transport's `Volume` set from 32 to 20 and back with `busctl`, and PipeWire's sink followed within 0.5 s (25% to 16% to 25%). GNOME's slider, which follows the sink, was not watched. BlueZ's documentation (`org.bluez.MediaTransport(5)`) says `Volume` is writable only by the client that acquired the transport; bluetoothd checks no owner for it (`profiles/audio/transport.c`), and `busctl` was not the owner.
+
+**Looked up every time.** BlueZ makes a transport for each A2DP setup, at a path of its own under the device - `<device>/sep1/fd<n>`, `n` the first number free from the count of all bluetoothd's transports (`media_transport_create` in BlueZ 5.87's `transport.c`) - so it is never kept: each level that may set something, and each step of a fade, reads BlueZ's objects (`GetManagedObjects`, without auto-start) and takes the transport under the pair's device whose `Device` is that device and whose `UUID` is A2DP's, with its `State` and `Volume`. No transport means nothing plays to the pair: there is nothing to lower. No call waits longer than `volume::CALL_LIMIT` (1 s).
+
+| | |
+|---|---|
+| First `01`/`02` | The volume then is remembered, and the transport set to 20% of it, in one step - 1 at least, unless it was 0. What lag there is is the pods': speech is heard before `01` is sent. |
+| Later `01`/`02` | Nothing: it is lowered. |
+| First level of `03` or above | A fade back to the remembered volume starts: 1.5 s, a step every 100 ms, whatever levels come meanwhile. The pods ramp `03` to `08` in under 100 ms (the run above), and the #150 prototype jumped straight back. |
+| `01`/`02` during the fade | Down again at once, to 20% of the volume remembered, not of the faded one. |
+| `08`, `09` with nothing lowered | Nothing, and no call to BlueZ: they frame every mode change. |
+| The link goes | The volume is put back at once, closed here or lost; with the transport gone too, once it is back - see below. |
+| The app quits | The same, before the runtime goes, for 2 s at most (`volume::RESTORE_LIMIT`, a choice): on Quit, and on the first SIGTERM - a logout - or SIGINT; a second exits at once. Not on SIGKILL, nor for a transport that is gone. |
+
+20% is fixed, as in the prototype the run above used; LibrePods lowers to 20% on Linux and 43% by default on Android. A Preferences setting may come later.
+
+**What is ours.** A `Set` of `Volume` changes nothing at once, nor necessarily to the volume set. In BlueZ 5.87's source, a host-as-source transport's setter (`transport_a2dp_src_set_volume` in `transport.c`) does nothing for the volume the transport holds, and otherwise sends the volume to the pods over AVRCP (`avrcp_set_volume`) and changes nothing; the property changes once the pods answer (`avrcp_handle_set_volume` in `profiles/audio/avrcp.c`), to the volume they report, which may be rounded. That is a reading of the source: how long the pods take, and whether they round, is untried here; the Pro 3 read 20 back as set with `busctl`, some time after the set.
+
+So the app never waits for an answer, nor reads one back. Whenever it reads the transport - at a level, a fade's step, a look for a transport that went, the link going, the quit - a reading counts as ours if it is within `volume::READ_BACK_SLACK` (4 of 127, a guess) of any volume set this stretch, or is the volume before while the lowering is unanswered: until a reading of another volume has come since the lowering. A slow answer then never looks like the user's - the transport still reading the volume before at `02` or `03` leaves the stretch lowered and the fade starting from the volume set - and a late answer, rounded or not, lands on a volume that is ours wherever the fade is.
+
+What that costs:
+
+- A user change of no more than 4 steps from a volume the app set this stretch counts as the app's, and the fade goes on over it. #150's run had PipeWire's sink follow the transport in proportion - 32 as 25%, 20 as 16% - so GNOME's volume keys, 5% a press, would move it about 6 of 127, above the slack. That is an inference from that run; the keys were not tried.
+- The volume before, while the lowering is unanswered, counts as ours too: a user who puts the volume straight back before the app has read the answer gets the fade from the lowered volume anyway.
+- A lowering still unanswered when the link goes is waited for, as a transport that went is; one unanswered when the app quits is not put back, as setting the volume the transport still reads would send nothing. Pods that answered nothing through a whole stretch and its fade would end a step short of the volume before. How long they take is untried.
+
+**A volume the user changed is theirs.** The volume is put back, and a fade goes on, only while the transport reads a volume that is ours; the lowering itself sets from any volume. Moved meanwhile - GNOME's slider, the keys, the pods' own controls - the remembered volume is forgotten and the rest of the stretch sets nothing; a stretch after that is lowered from the user's volume.
+
+**Put back later.** bluetoothd keeps the volume on the device and starts its next transport at it (`btd_device_set_volume` in `transport.c`), so a volume lowered when the transport goes - the pair disconnected or out of range, the pods in the case, A2DP set up again - would come back lowered in every later session. So the volume remembered is kept. With the link up, the transport is looked for each second for 30 s from when it went (`volume::PUT_BACK_CHECK`, `volume::PUT_BACK_WINDOW`: guesses at how long A2DP takes to come back, not watched); after that, and from the link going, it waits for the pair's next link (`SpeechEvent::LinkUp`), from which it is looked for for the same 30 s, or for the next level, which reads the transport anyway. Found reading a volume that is ours, it is put back; another is the user's, or another host's, and kept.
+
+**Only while A2DP plays, never in a call.** A stretch is lowered only while the pair's A2DP transport is `active` - streaming, and acquired by the audio server. Not `idle` or `pending`: lowering a transport that streams nothing changes nothing the user hears, and a song started meanwhile would start lowered. That is also what keeps a call alone: whatever runs the headset profile - PipeWire's own HFP backend, its default, or BlueZ itself - is assumed to leave A2DP not `active`, released or gone, while it has the pair; that is not read in any source, nor watched during a call here (#150). A headset-profile transport is not looked for: while that assumption holds it would tell nothing more, and a call that left A2DP `active` has not been seen. A call that comes while the volume is lowered does not stop it coming back: the fade goes on with A2DP idle, and with A2DP gone the volume is put back once it returns, as above.
+
+**Events, not snapshots.** The levels reach the volume as `podstate::SpeechEvent`s, every one in the order the pods sent it, between the link coming up and its going. The snapshot keeps only the latest level, and a short stretch's `01` could be gone before a slow consumer looked.
+
+The fake world plays this through: a fake BlueZ with A2DP transports, a call as A2DP going idle, a pair that answers a volume late and rounded if asked (`SetVolumeAnswer`), the user's volume, and fake pods that speak - see `.claude/skills/fake-world/SKILL.md` and the pipeline tests.
 
 ## Hardware checks still to do
 
@@ -110,6 +146,14 @@ Planned, #150: from the levels of a pair with a link, lower that pair's own A2DP
 - The setting changed on a phone while the pair is linked here: does a `0x28` report come?
 - Speech with nothing playing: are levels sent at all?
 - A mode set from the app during speech: what do the pods report, and which mode do they go back to?
+- Speech while audio plays lowers the volume to a fifth and fades it back: `cargo run --example conversation_awareness -- <MAC> --duck` with the app quit, or the app itself, on a Pro 3.
+- Do the pods answer a set with another volume than the one set, and by how much? No run of its own: the app's debug log (`RUST_LOG=linuxpods::volume=debug`) of the check above shows each volume set beside what the transport read then, and the example what it read back after each set.
+- A volume changed while lowered - GNOME's slider - is kept, and the fade does not run. Does GNOME's slider follow the transport at all?
+- A call with PipeWire's own HFP backend: does the A2DP transport stay, `idle`, or go, and for how long? Either way speech in the call should leave the volume alone, and A2DP come back at the volume it had.
+- A logout while the volume is lowered: is it put back?
+- Disconnected in the middle of speech, then connected again: is the volume put back once A2DP is set up again?
+- A2DP set up again in the middle of a stretch - a codec switch, say: is the volume put back on the new transport?
+- A volume of 1 or 2 before speech: lowered to 1, and back.
 
 ## Packet detection
 
