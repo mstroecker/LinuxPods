@@ -319,13 +319,14 @@ impl Attachment {
                 self.providers.insert(path.to_string(), registration);
             }
         }
-        // Names for the device switcher. Read up front so paired devices are
-        // labeled before any of them connects, then again on every connection
-        // event BlueZ confirms, and on a services change of a connected device
-        // that is not attached yet - a rename made while the app was running
-        // takes effect at the next one, and a newly paired pair shows up with
-        // its services, which BlueZ fills in once pairing is done. An adapter
-        // plugged in brings its paired devices.
+        // Names for the device switcher and the rename dialog. Read up front
+        // so paired devices are labeled before any of them connects, then
+        // again on every connection event BlueZ confirms, and on a services
+        // change of a connected device that is not attached yet - a rename
+        // made while the app was running takes effect at the next one, and a
+        // newly paired pair shows up with its services, which BlueZ fills in
+        // once pairing is done. An adapter plugged in brings its paired
+        // devices.
         self.update_names().await;
         self.sweep().await;
     }
