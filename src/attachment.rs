@@ -382,10 +382,10 @@ impl Attachment {
         }
     }
 
-    /// Hands the coordinator every paired device's BlueZ alias.
+    /// Hands the coordinator every paired device's BlueZ alias and name.
     async fn update_names(&self) {
         self.coordinator
-            .set_device_names(self.devices.device_aliases().await)
+            .set_device_names(self.devices.device_names().await)
             .await;
     }
 

@@ -909,24 +909,26 @@ impl Devices {
         })
     }
 
-    /// Every paired device's BlueZ alias, by MAC.
+    /// Every paired device's BlueZ alias and name, by MAC - see
+    /// [`DeviceNames`].
     ///
     /// The alias is the name the user sees everywhere else on the desktop - their
     /// own rename if they made one, the device's advertised name otherwise - so it
-    /// is what the device switcher should show.
-    pub async fn device_aliases(&self) -> HashMap<Address, String> {
-        match self.read_device_aliases().await {
+    /// is what the device switcher should show. The name says whether the alias
+    /// is a rename: read from the same reply, it costs no call of its own.
+    pub async fn device_names(&self) -> HashMap<Address, DeviceNames> {
+        match self.read_device_names().await {
             Ok(names) => names,
             Err(e) => {
                 // Names are cosmetic: without them the switcher falls back to the
                 // model or the MAC, so this must never be fatal.
-                tracing::debug!("failed to read device aliases: {e:#}");
+                tracing::debug!("failed to read device names: {e:#}");
                 HashMap::new()
             }
         }
     }
 
-    async fn read_device_aliases(&self) -> Result<HashMap<Address, String>> {
+    async fn read_device_names(&self) -> Result<HashMap<Address, DeviceNames>> {
         let objects = managed_objects(&self.conn).await?;
         Ok(objects
             .into_values()
@@ -1231,15 +1233,37 @@ fn bool_prop(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Pulls the (MAC, alias) pair out of a paired device's Device1 property map.
+/// A paired device's names in BlueZ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceNames {
+    /// `Device1.Alias`: this computer's name for the device, which the rest
+    /// of the desktop shows. BlueZ gives the device's own name here until an
+    /// alias is set - by GNOME Settings' rename - and the alias after.
+    pub alias: String,
+    /// `Device1.Name`: the name the device gives, read when it connects - for
+    /// AirPods, the one a rename on the pods sets (#160). `None` while BlueZ
+    /// has not read one.
+    pub name: Option<String>,
+}
+
+impl DeviceNames {
+    /// Whether an alias is set: one that differs from the device's own name.
+    /// Typed back to the name in GNOME Settings it reads as unset, though
+    /// BlueZ keeps it: it shows the same, and only clearing it would tell.
+    pub fn has_alias(&self) -> bool {
+        self.name.as_ref().is_some_and(|name| *name != self.alias)
+    }
+}
+
+/// Pulls the MAC and the names out of a paired device's Device1 property map.
 ///
-/// Both properties are required: an address with no alias has no name to show, and
-/// an alias with no address cannot be matched to a device we track. Unpaired devices
-/// are skipped: while we scan, BlueZ keeps an object for every advertiser nearby,
-/// mostly random addresses named after themselves, and the map goes into every
+/// The address and the alias are required: an address with no alias has no name to
+/// show, and an alias with no address cannot be matched to a device we track. Unpaired
+/// devices are skipped: while we scan, BlueZ keeps an object for every advertiser
+/// nearby, mostly random addresses named after themselves, and the map goes into every
 /// snapshot - unfiltered, a BLE spam flood would grow it. The switcher lists only
 /// devices whose key we hold or that are on AAP, and both take a pairing.
-fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(Address, String)> {
+fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(Address, DeviceNames)> {
     if !bool_prop(props, "Paired") {
         return None;
     }
@@ -1251,8 +1275,9 @@ fn device_name_entry(props: &HashMap<String, OwnedValue>) -> Option<(Address, St
     };
     let address = string_prop("Address")?;
     let alias = string_prop("Alias")?;
+    let name = string_prop("Name");
     match address.parse() {
-        Ok(mac) => Some((mac, alias)),
+        Ok(mac) => Some((mac, DeviceNames { alias, name })),
         Err(e) => {
             tracing::debug!("skipping the alias of {address:?}: {e}");
             None
@@ -1302,8 +1327,35 @@ mod tests {
         );
         assert_eq!(
             device_name_entry(&device([paired, alias, address])),
-            Some((MAC_A, "Marcel's AirPods Pro".to_string()))
+            Some((MAC_A, names("Marcel's AirPods Pro", None)))
         );
+    }
+
+    fn names(alias: &str, name: Option<&str>) -> DeviceNames {
+        DeviceNames {
+            alias: alias.to_string(),
+            name: name.map(str::to_string),
+        }
+    }
+
+    /// The name comes along where BlueZ has one. An alias set in GNOME
+    /// differs from it; with none set, BlueZ gives the name as the alias.
+    #[test]
+    fn name_entry_tells_a_set_alias_by_the_name() {
+        let entry = |alias: &str| {
+            device_name_entry(&device([
+                ("Paired", Value::from(true)),
+                ("Address", Value::from("aa:bb:cc:dd:ee:ff")),
+                ("Name", Value::from("Test Pods")),
+                ("Alias", Value::from(alias.to_string())),
+            ]))
+            .unwrap()
+            .1
+        };
+        assert_eq!(entry("Test Pods"), names("Test Pods", Some("Test Pods")));
+        assert!(!entry("Test Pods").has_alias());
+        assert!(entry("Kitchen").has_alias());
+        assert!(!names("Kitchen", None).has_alias(), "no name to tell by");
     }
 
     /// An address that does not parse could never match a device we track.
@@ -1335,7 +1387,7 @@ mod tests {
             device_name_entry(&props),
             Some((
                 Address::new([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]),
-                "DE-AD-BE-EF-00-01".to_string()
+                names("DE-AD-BE-EF-00-01", None)
             ))
         );
     }

@@ -2563,10 +2563,11 @@ mod tests {
             .await
             .unwrap();
         assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
-        assert_eq!(
-            devices.device_aliases().await,
-            HashMap::from([(PAIR, ALIAS.to_string())])
-        );
+        let names = crate::bluez::DeviceNames {
+            alias: ALIAS.to_string(),
+            name: Some(ALIAS.to_string()),
+        };
+        assert_eq!(devices.device_names().await, HashMap::from([(PAIR, names)]));
         assert!(
             !devices
                 .device_is_airpods(device_path(ADAPTER, RANDOM).as_str())

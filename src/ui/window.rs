@@ -91,11 +91,11 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
             // Queued here, in the order of the clicks; the result comes back
             // to the main context, where the toast can go up.
             let command = Command::NoiseControl(mode);
-            let done = coord.command(mac, command);
+            let done = coord.command(mac, command.clone());
             glib::spawn_future_local(async move {
                 if let Err(e) = done.await {
                     tracing::warn!("failed to switch {mac} to {mode}: {e:#}");
-                    toasts.add_toast(adw::Toast::new(&command_failed(command, &e)));
+                    toasts.add_toast(adw::Toast::new(&command_failed(&command, &e)));
                 }
             });
         }
@@ -129,7 +129,7 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
                 };
                 let enabled = switch.is_active();
                 let command = Command::ConversationAwareness(enabled);
-                let done = coord.command(mac, command);
+                let done = coord.command(mac, command.clone());
                 let ui = ui.clone();
                 glib::spawn_future_local(async move {
                     if let Err(e) = done.await {
@@ -137,7 +137,7 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
                         tracing::warn!(
                             "failed to turn Conversation Awareness {on} for {mac}: {e:#}"
                         );
-                        toasts.add_toast(adw::Toast::new(&command_failed(command, &e)));
+                        toasts.add_toast(adw::Toast::new(&command_failed(&command, &e)));
                         ui.redraw();
                     }
                 });
@@ -363,7 +363,7 @@ fn show_about(win: &adw::ApplicationWindow) {
 /// The toast for `command`, failed with `error`. A command the connection
 /// was lost in the middle of may have reached the AirPods, so it is not said
 /// to have failed; one that was never sent, or whose send failed, is.
-fn command_failed(command: Command, error: &anyhow::Error) -> String {
+fn command_failed(command: &Command, error: &anyhow::Error) -> String {
     let lost = error.downcast_ref::<ConnectionLost>().is_some();
     match command {
         Command::NoiseControl(mode) if lost => {
@@ -371,13 +371,16 @@ fn command_failed(command: Command, error: &anyhow::Error) -> String {
         }
         Command::NoiseControl(mode) => format!("Couldn’t switch to {mode}"),
         Command::ConversationAwareness(enabled) => {
-            let on = if enabled { "on" } else { "off" };
+            let on = if *enabled { "on" } else { "off" };
             if lost {
                 format!("Lost the connection while turning Conversation Awareness {on}")
             } else {
                 format!("Couldn’t turn Conversation Awareness {on}")
             }
         }
+        // The name is in the dialog the user just typed it in.
+        Command::Rename(_) if lost => "Lost the connection while renaming the AirPods".into(),
+        Command::Rename(_) => "Couldn’t rename the AirPods".into(),
     }
 }
 
@@ -396,21 +399,31 @@ mod tests {
         };
         let off = Command::NoiseControl(NoiseMode::Off);
         assert_eq!(
-            command_failed(off, &lost(off)),
+            command_failed(&off, &lost(off.clone())),
             "Lost the connection while switching to Off"
         );
         let unsent = anyhow::anyhow!("no AAP connection").context("switch to Off not sent");
-        assert_eq!(command_failed(off, &unsent), "Couldn’t switch to Off");
+        assert_eq!(command_failed(&off, &unsent), "Couldn’t switch to Off");
 
         let on = Command::ConversationAwareness(true);
         assert_eq!(
-            command_failed(on, &lost(on)),
+            command_failed(&on, &lost(on.clone())),
             "Lost the connection while turning Conversation Awareness on"
         );
         let off = Command::ConversationAwareness(false);
         assert_eq!(
-            command_failed(off, &unsent),
+            command_failed(&off, &unsent),
             "Couldn’t turn Conversation Awareness off"
+        );
+
+        let rename = Command::Rename("Test Pods".into());
+        assert_eq!(
+            command_failed(&rename, &lost(rename.clone())),
+            "Lost the connection while renaming the AirPods"
+        );
+        assert_eq!(
+            command_failed(&rename, &unsent),
+            "Couldn’t rename the AirPods"
         );
     }
 }

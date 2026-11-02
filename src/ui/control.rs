@@ -549,6 +549,7 @@ fn status_text(state: &PodState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bluez::DeviceNames;
     use crate::podstate::Identity;
 
     /// A reading identified by `product_id`, in white.
@@ -668,7 +669,13 @@ mod tests {
                 .collect(),
             device_names: names
                 .iter()
-                .map(|&(mac, name)| (mac, name.to_string()))
+                .map(|&(mac, alias)| {
+                    let names = DeviceNames {
+                        alias: alias.to_string(),
+                        name: None,
+                    };
+                    (mac, names)
+                })
                 .collect(),
             ..Default::default()
         }

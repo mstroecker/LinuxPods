@@ -59,6 +59,7 @@ use crate::ble::decode_model_name;
 use crate::ble::decrypt::decrypt_for_device;
 use crate::ble::parser::{PodSide, ProximityData};
 use crate::ble::rpa::{self, ResolvedAddresses};
+use crate::bluez::DeviceNames;
 use crate::keystore::{Keystore, PairKeys};
 
 /// How long the last advertisement of an identified device stays on show. Keyed
@@ -91,12 +92,16 @@ impl std::fmt::Display for DataSource {
 /// What a pair of AirPods can be told to do over its AAP link - see
 /// [`Coordinator::command`]. The key request is not among them: the link
 /// sends it as it comes up, on every connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Switches the noise control mode, and records it.
     NoiseControl(aap::NoiseMode),
     /// Turns Conversation Awareness on or off, and records it.
     ConversationAwareness(bool),
+    /// Renames the pods - the name they give every host, not BlueZ's alias,
+    /// which nothing here touches - and records the name. Refused before it
+    /// is queued when [`aap::name::check`] refuses the name.
+    Rename(String),
 }
 
 impl std::fmt::Display for Command {
@@ -108,6 +113,7 @@ impl std::fmt::Display for Command {
                 "switch of Conversation Awareness {}",
                 if *enabled { "on" } else { "off" }
             ),
+            Self::Rename(name) => write!(f, "rename to {name:?}"),
         }
     }
 }
@@ -177,7 +183,7 @@ impl Drop for Underway {
     fn drop(&mut self) {
         let lost = ConnectionLost {
             mac: self.mac,
-            command: self.command,
+            command: self.command.clone(),
         };
         self.finish(Err(lost.into()));
     }
@@ -271,6 +277,13 @@ pub struct PodState {
     /// skips none.
     pub speech_level: Option<u8>,
 
+    /// The pods' own name, the one they report to a host: from the device
+    /// information packet at the start of the link, and recorded when a
+    /// rename is sent, as nothing answers one (#160). `None` until the link
+    /// reports it, and without a link: BLE does not carry it. Not BlueZ's
+    /// alias - see [`Snapshot::device_names`].
+    pub name: Option<String>,
+
     /// `None` until an advertisement has identified the device. For one on
     /// AAP it is the link's, which outlives the cached advertisement.
     pub identity: Option<Identity>,
@@ -303,6 +316,7 @@ impl PodState {
             noise_mode: None,
             conversation_awareness: None,
             speech_level: None,
+            name: None,
             identity: None,
             current_ble_mac: None,
             last_seen: None,
@@ -338,16 +352,28 @@ pub struct Snapshot {
     /// Every MAC we hold an encryption key for, sorted. Independent of whether the
     /// device is currently advertising or connected.
     pub known_keys: Vec<Address>,
-    /// BlueZ aliases by MAC - the names the rest of the desktop shows for these
-    /// devices. Empty until attachment reports them, and it stays empty when
-    /// BlueZ is unreachable, so consumers need a fallback.
-    pub device_names: HashMap<Address, String>,
+    /// BlueZ's names by MAC: each paired device's alias - the name the rest
+    /// of the desktop shows for it - and its `Name`. Empty until attachment
+    /// reports them, and it stays empty when BlueZ is unreachable, so
+    /// consumers need a fallback.
+    pub device_names: HashMap<Address, DeviceNames>,
 }
 
 impl Snapshot {
     /// The BlueZ alias for `mac`, when one is known.
     pub fn device_name(&self, mac: Address) -> Option<&str> {
-        self.device_names.get(&mac).map(String::as_str)
+        self.device_names
+            .get(&mac)
+            .map(|names| names.alias.as_str())
+    }
+
+    /// Whether an alias is set in BlueZ for `mac` - by GNOME Settings'
+    /// rename, say - so that this computer shows it whatever the pods are
+    /// called. False while BlueZ's names are not known.
+    pub fn has_alias(&self, mac: Address) -> bool {
+        self.device_names
+            .get(&mac)
+            .is_some_and(DeviceNames::has_alias)
     }
 
     pub fn is_connected(&self, mac: Address) -> bool {
@@ -422,6 +448,11 @@ struct Link {
     /// The last speech level: `None` until one comes. Kept apart from the
     /// reading like the mode, and goes with the link like it.
     speech_level: Option<u8>,
+    /// The pods' own name: `None` until the startup dump's device
+    /// information reports it or a rename sets it. Kept apart from the
+    /// reading like the mode, and goes with the link like it: renamed from
+    /// another device meanwhile, the next link reports the new name.
+    name: Option<String>,
     /// Which pod is in an ear, as the device's ear reports and primary pod
     /// packets tell it. Kept apart from the reading like the mode, and goes
     /// with the link like it: after a disconnect the cached advertisement
@@ -483,7 +514,7 @@ struct Inner {
     links: HashMap<Address, Link>,
     /// Each pair's ENC_KEY, and its IRK once one has arrived.
     keys: HashMap<Address, PairKeys>,
-    device_names: HashMap<Address, String>,
+    device_names: HashMap<Address, DeviceNames>,
 }
 
 impl Inner {
@@ -544,6 +575,7 @@ impl Inner {
         state.noise_mode = link.noise_mode.mode();
         state.conversation_awareness = link.conversation_awareness;
         state.speech_level = link.speech_level;
+        state.name.clone_from(&link.name);
         // Merged here rather than copied into each battery packet: a
         // reading that arrived before the first advertisement kept a blank
         // model until the next packet, which over AAP comes only when a
@@ -954,7 +986,7 @@ impl Coordinator {
     /// BlueZ confirms and every adapter change while BlueZ is on the bus, and
     /// rebroadcasting an identical map would wake the UI,
     /// tray, attachment and notifier for nothing.
-    pub(crate) async fn set_device_names(&self, names: HashMap<Address, String>) {
+    pub(crate) async fn set_device_names(&self, names: HashMap<Address, DeviceNames>) {
         let mut inner = self.inner.write().await;
         if inner.device_names == names {
             return;
@@ -1115,6 +1147,7 @@ impl Coordinator {
             noise_mode: None,
             conversation_awareness: None,
             speech_level: None,
+            name: None,
             identity: Some(identity),
             current_ble_mac: Some(ble_mac),
             // Stamped from the entry in `snapshot`.
@@ -1234,6 +1267,8 @@ impl Coordinator {
                     noise_mode: ModeState::default(),
                     conversation_awareness: None,
                     speech_level: None,
+                    // Reported by the startup dump too.
+                    name: None,
                     // Reported as the link comes up, waiting in the socket.
                     ear: EarState::with_hold(self.role_switch_hold),
                     identity,
@@ -1408,7 +1443,10 @@ impl Coordinator {
                 Ok(Message::SpeechLevel(level)) => {
                     self.handle_speech_level(level, mac_addr, client).await;
                 }
-                Ok(Message::DeviceName(_) | Message::Unknown { .. }) => {}
+                Ok(Message::DeviceName(name)) => {
+                    self.handle_device_name(name, mac_addr, client).await;
+                }
+                Ok(Message::Unknown { .. }) => {}
                 Err(e) => tracing::warn!("AAP {e}"),
             }
         }
@@ -1442,6 +1480,7 @@ impl Coordinator {
             noise_mode: None,
             conversation_awareness: None,
             speech_level: None,
+            name: None,
             identity: None,
             // AAP knows only the real address, and is always live.
             current_ble_mac: None,
@@ -1602,6 +1641,26 @@ impl Coordinator {
         );
     }
 
+    /// Records the pods' name as the device reported it on `client`'s link -
+    /// in the startup dump - and broadcasts if that changed it. Only the name
+    /// is logged: the packet it came in holds serial numbers.
+    async fn handle_device_name(&self, name: String, mac_addr: Address, client: &Arc<aap::Client>) {
+        {
+            let mut inner = self.inner.write().await;
+            // A packet read just before a disconnect must not land on a
+            // newer link.
+            let Some(link) = inner.live_link(mac_addr, client) else {
+                return;
+            };
+            if link.name.as_ref() == Some(&name) {
+                return;
+            }
+            link.name = Some(name.clone());
+            self.broadcast(&inner);
+        }
+        tracing::info!("Name reported by {mac_addr}: {name:?}");
+    }
+
     /// Records a speech level from `client`'s link, broadcasts if it is
     /// another than the last, and tells it to the consumers of
     /// [`Coordinator::speech_events`] - what lowers the volume while the
@@ -1638,31 +1697,38 @@ impl Coordinator {
     /// wait for anything: it can be called from the GTK main context, whose
     /// thread no tokio runtime runs on, and the future awaited there.
     ///
-    /// Fails at once without a link, or with a link going; and once queued,
-    /// when the send fails, or the link goes before the command is sent. All
-    /// of those are a command not carried out. One the link went in the
-    /// middle of, which may or may not have reached the device, fails with
-    /// [`ConnectionLost`] instead.
+    /// Fails at once for a name `aap::name::check` refuses, without a link, or
+    /// with a link going; and once queued, when the send fails, or the link
+    /// goes before the command is sent. All of those are a command not
+    /// carried out. One the link went in the middle of, which may or may not
+    /// have reached the device, fails with [`ConnectionLost`] instead.
     pub fn command(
         &self,
         mac_addr: Address,
         command: Command,
     ) -> impl Future<Output = Result<()>> + Send + 'static {
         let (done, result) = oneshot::channel();
-        let queued = match self.queues().get(&mac_addr) {
-            Some(queue) => queue
+        let what = command.to_string();
+        // A name the pods would not take is refused here, never queued.
+        let refused = match &command {
+            Command::Rename(name) => aap::name::check(name).err(),
+            _ => None,
+        };
+        let queued = match (refused, self.queues().get(&mac_addr)) {
+            (Some(refused), _) => Err(refused.into()),
+            (None, Some(queue)) => queue
                 .commands
                 .send(Queued { command, done })
                 .map_err(|_| anyhow::anyhow!("AAP to {mac_addr} is closing")),
-            None => Err(anyhow::anyhow!("no AAP connection to {mac_addr}")),
+            (None, None) => Err(anyhow::anyhow!("no AAP connection to {mac_addr}")),
         };
         async move {
-            queued.with_context(|| format!("{command} not sent"))?;
+            queued.with_context(|| format!("{what} not sent"))?;
             // Dropped unanswered when the link went with the command still
             // in its queue; one under way answers for itself.
             result.await.unwrap_or_else(|_| {
                 Err(anyhow::anyhow!(
-                    "AAP to {mac_addr} went before the {command} was sent"
+                    "AAP to {mac_addr} went before the {what} was sent"
                 ))
             })
         }
@@ -1683,7 +1749,7 @@ impl Coordinator {
             // under way.
             let mut underway = Underway {
                 mac: mac_addr,
-                command,
+                command: command.clone(),
                 done: Some(done),
             };
             let result = self.carry_out(mac_addr, client, command).await;
@@ -1705,6 +1771,7 @@ impl Coordinator {
                 self.set_conversation_awareness(mac_addr, client, enabled)
                     .await
             }
+            Command::Rename(name) => self.rename(mac_addr, client, name).await,
         }
     }
 
@@ -1781,6 +1848,35 @@ impl Coordinator {
             return Ok(());
         };
         if link.conversation_awareness.replace(enabled) != Some(enabled) {
+            self.broadcast(&inner);
+        }
+        Ok(())
+    }
+
+    /// Renames one connected pair: the name the pods give every host. BlueZ's
+    /// alias is never touched - set, it would pin the name on this computer
+    /// so that a later rename elsewhere never showed here; cleared, it would
+    /// throw away a name the user gave in GNOME Settings (#160).
+    ///
+    /// Recorded once the packet is away, as the mode is: the pods answer
+    /// nothing, and take the name at once - the next link's startup dump
+    /// carries it. BlueZ's `Name` follows when the pair next connects.
+    async fn rename(
+        &self,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+        name: String,
+    ) -> Result<()> {
+        client.rename(&name).await?;
+        tracing::info!("Renamed {mac_addr} to {name:?}");
+
+        let mut inner = self.inner.write().await;
+        // On the link the command went out on, and only while it lasts.
+        let Some(link) = inner.live_link(mac_addr, client) else {
+            return Ok(());
+        };
+        if link.name.as_ref() != Some(&name) {
+            link.name = Some(name);
             self.broadcast(&inner);
         }
         Ok(())
@@ -1896,6 +1992,7 @@ mod tests {
             noise_mode: ModeState::default(),
             conversation_awareness: None,
             speech_level: None,
+            name: None,
             ear: EarState::default(),
             identity: None,
             since: Instant::now(),
@@ -3422,6 +3519,60 @@ mod tests {
             format!("{:#}", failed.unwrap_err()),
             "switch of Conversation Awareness on not sent: no AAP connection to AA:AA:AA:AA:AA:AA"
         );
+        let rename = Command::Rename("Test Pods".into());
+        let failed = coordinator.command(AA, rename).await;
+        assert_eq!(
+            format!("{:#}", failed.unwrap_err()),
+            "rename to \"Test Pods\" not sent: no AAP connection to AA:AA:AA:AA:AA:AA"
+        );
+    }
+
+    /// A name the pods would not take is refused before anything else is
+    /// looked at, link or none.
+    #[tokio::test]
+    async fn a_name_the_pods_would_not_take_is_refused() {
+        let (coordinator, _dir) = coordinator_with(inner_with(vec![]));
+        let failed = coordinator
+            .command(AA, Command::Rename(String::new()))
+            .await;
+        assert_eq!(
+            format!("{:#}", failed.unwrap_err()),
+            "rename to \"\" not sent: the name is empty"
+        );
+    }
+
+    /// The name is the link's: reported by its startup dump, it shows in the
+    /// snapshot from the link's first reading, goes with the link, and one
+    /// reported on a replaced link is dropped.
+    #[tokio::test]
+    async fn the_name_goes_with_the_link() {
+        let mut inner = inner_with(vec![]);
+        inner
+            .links
+            .insert(AA, link(Some(PodState::empty(DataSource::Aap))));
+        let (coordinator, _dir) = coordinator_with(inner);
+        let client = client_of(&coordinator, AA).await;
+        let name =
+            |coordinator: &Coordinator| coordinator.subscribe().borrow().states[&AA].name.clone();
+        assert_eq!(name(&coordinator), None);
+
+        coordinator
+            .handle_device_name("Test Pods".into(), AA, &client)
+            .await;
+        assert_eq!(name(&coordinator).as_deref(), Some("Test Pods"));
+
+        let stale = Arc::new(aap::Client::new(Address::any()));
+        coordinator
+            .handle_device_name("Old Pods".into(), AA, &stale)
+            .await;
+        assert_eq!(name(&coordinator).as_deref(), Some("Test Pods"));
+
+        coordinator.disconnect_aap(AA).await;
+        let snapshot = coordinator.subscribe().borrow().clone();
+        assert!(
+            !snapshot.states.contains_key(&AA),
+            "no reading but the link's"
+        );
     }
 
     #[test]
@@ -3827,6 +3978,52 @@ mod tests {
                 let shown = rx.borrow_and_update().states[&MAC].conversation_awareness;
                 assert_eq!(shown, Some(enabled));
             }
+            drop(fake);
+            timeout(TIMEOUT, run).await.unwrap().unwrap();
+        }
+
+        /// The name comes from the device information packet, and a rename
+        /// goes out as 0x1A and is recorded once it is away: the pods answer
+        /// nothing. A name the pods would not take never reaches the queue:
+        /// the first packet the fake reads is the rename that was allowed.
+        #[tokio::test]
+        async fn a_rename_goes_out_and_is_recorded() {
+            let (coordinator, link, fake, _dir) = opened().await;
+            let run = tokio::spawn(link.run());
+            fake.send(&BATTERY).await.unwrap();
+            let info = aap::name::info_packet("Old Pods", &["A0000", "SERIAL0000"]);
+            fake.send(&info).await.unwrap();
+            let mut rx = coordinator.subscribe();
+            let named = |s: &Snapshot| s.states.get(&MAC).and_then(|s| s.name.clone());
+            timeout(
+                TIMEOUT,
+                rx.wait_for(|s| named(s).as_deref() == Some("Old Pods")),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            for refused in [String::new(), "a".repeat(128), "a\0b".into()] {
+                let command = Command::Rename(refused);
+                let failed = coordinator.command(MAC, command).await.unwrap_err();
+                assert!(
+                    format!("{failed:#}").contains("not sent: the name"),
+                    "{failed:#}"
+                );
+            }
+            assert_eq!(named(&rx.borrow_and_update()).as_deref(), Some("Old Pods"));
+
+            let longest = "a".repeat(127);
+            let command = Command::Rename(longest.clone());
+            timeout(TIMEOUT, coordinator.command(MAC, command))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                recv(&fake).await,
+                aap::name::rename_packet(&longest).unwrap()
+            );
+            assert_eq!(named(&rx.borrow_and_update()), Some(longest));
             drop(fake);
             timeout(TIMEOUT, run).await.unwrap().unwrap();
         }
