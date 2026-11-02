@@ -33,7 +33,7 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_4"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 
 # Async runtime + plumbing
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "signal"] }
 async-channel = "2"
 futures-util = "0.3"
 
