@@ -279,16 +279,17 @@ taken, so quick successive changes can briefly replay older modes, and the last
 command's echo settles it, so the mode on show always ends as the one last set.
 
 **Conversation Awareness is a setting; its levels are speech.** `0x09` sub-command `0x28`
-(`01` on, `02` off) is reported in the startup dump; that the same packet sets it, and
-that it is not reported again when it changes, is LibrePods' word, neither yet checked
-here (#150), so `Command::ConversationAwareness` is recorded optimistically like the mode, on
-the link (`Link::conversation_awareness`), and goes with it; a change made on a phone may
-never show until the next connection. With it on the pods send `04 00 04 00 4B 00 02 00 01
-[level]`: `01`/`02` speaking, `03`-`07` easing back, `08` normal, `09` idle - a target,
-not a step to count. `08` and `09` also frame every mode change, so they name no mode and
-acknowledge nothing. While the user speaks the pods switch to Transparency and back
-themselves, as ordinary mode reports, taken like any other. The link's last level is in
-the snapshot (`PodState::speech_level`), and every level goes to the volume as an event.
+(`01` on, `02` off) is reported in the startup dump, and the same packet sets it (a
+Pro 3, 2026-11-02). That it is not reported again when it changes is LibrePods' word, not
+yet checked here (#150), so `Command::ConversationAwareness` is recorded optimistically
+like the mode, on the link (`Link::conversation_awareness`), and goes with it; a change
+made on a phone may never show until the next connection. With it on the pods send
+`04 00 04 00 4B 00 02 00 01 [level]`: `01`/`02` speaking, `03`-`07` easing back, `08`
+normal, `09` idle - a target, not a step to count. `08` and `09` also frame every mode
+change, so they name no mode and acknowledge nothing. While the user speaks the pods
+switch to Transparency and back themselves, as ordinary mode reports, taken like any
+other. The link's last level is in the snapshot (`PodState::speech_level`), and every
+level goes to the volume as an event.
 
 **The volume lowered while the user speaks is the pair's own, through BlueZ.** The
 pair's A2DP transport's `org.bluez.MediaTransport1.Volume` (0-127, AVRCP absolute
@@ -305,7 +306,7 @@ out in a task of its own.
 - Lowered only while that A2DP transport is `active`. A pair nothing plays to is left
   alone, and so, assumed, is one in a call: whatever runs the headset profile is assumed
   to leave A2DP not `active`, released or gone - not read in any source, not watched
-  during a call here; the run so far is the fake world's.
+  during a call here; calls have run in the fake world only.
 - Down at once to `volume::LOWERED_PERCENT` of the volume before, at the first `01`/`02`;
   back over `volume::FADE` in steps from the first level of `03` or above, whatever comes
   meanwhile; a `01`/`02` during the fade drops it again, to the lowered volume of the one

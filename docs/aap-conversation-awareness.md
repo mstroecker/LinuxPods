@@ -2,7 +2,7 @@
 
 Conversation Awareness lowers the media volume while the user speaks and raises it again when they stop. The pods detect the speech and change their own sound - they switch to Transparency - but lowering the media is the host's job: on an iPhone or a Mac the OS does it on the levels the pods send. This document describes the setting that turns it on, those levels, what the pods do while the user speaks, and how the app lowers the volume on the levels. Read by `aap::conversation` and `volume`.
 
-**Status:** the setting's report in the startup dump and the levels checked on AirPods Pro 3 on 2026-11-01 (#150), with `examples/conversation_awareness.rs`'s predecessor and `examples/noise_probe.rs`. That AirPods Pro 2 (USB-C) behave the same is assumed, not checked. The `0x4B` packets AirPods 4 sent after every mode change (`aap-noise-control.md`) are the same levels. The command that changes the setting is LibrePods'; it has not been sent to a pair from here yet. The volume the app lowers while the user speaks goes through BlueZ's `MediaTransport1.Volume`, which was set by hand on the Pro 3 on 2026-11-01; the app's lowering and fade have run against the fake world only - see [Lowering the volume](#lowering-the-volume).
+**Status:** the setting's report in the startup dump and the levels checked on AirPods Pro 3 on 2026-11-01 (#150), with `examples/conversation_awareness.rs`'s predecessor and `examples/noise_probe.rs`. That AirPods Pro 2 (USB-C) behave the same is assumed, not checked. The `0x4B` packets AirPods 4 sent after every mode change (`aap-noise-control.md`) are the same levels. The command that changes the setting is LibrePods'; the window's switch changed it on the Pro 3 on 2026-11-02, with main at 37bf1e5. The volume the app lowers while the user speaks goes through BlueZ's `MediaTransport1.Volume`, which was set by hand on the Pro 3 on 2026-11-01; the app's lowering to a fifth and its fade back were checked on the Pro 3 in that run, and the rest of it has run against the fake world only - see [Lowering the volume](#lowering-the-volume) and [Hardware checks](#hardware-checks).
 
 **Source:** the packets from [LibrePods](https://github.com/librepods-org/librepods/blob/main/docs/AAP%20Definitions.md) ("Conversational Awareness", "Toggle Conversational Awareness") and its [control command table](https://github.com/librepods-org/librepods/blob/main/docs/control_commands.md) (`0x28`), for protocol facts only: GitHub detects no license for LibrePods, so no code is taken from it. What the levels mean comes from the run below.
 
@@ -20,7 +20,7 @@ Hex:     04 00 04 00 09 00 28 VV 00 00 00
 | `01` | On |
 | `02` | Off |
 
-Disabled is `02`, not `00`, as for the other boolean settings of the family (`0x34` allow-Off among them). The packet reports the setting in the startup dump, among the family's twenty-odd settings (`aap-noise-control.md`): every #71 capture had `02`, and the #150 run's dump `01`, the setting already on. That the same packet, sent, changes the setting is LibrePods' word: the report is confirmed, the command not yet tried from here.
+Disabled is `02`, not `00`, as for the other boolean settings of the family (`0x34` allow-Off among them). The packet reports the setting in the startup dump, among the family's twenty-odd settings (`aap-noise-control.md`): every #71 capture had `02`, and the #150 run's dump `01`, the setting already on. That the same packet, sent, changes the setting was LibrePods' word, and holds: the window's switch changed it on a Pro 3 (2026-11-02, main at 37bf1e5).
 
 LibrePods says the setting is not reported again when it changes. It is a persistent setting of the pods', most likely synced to the user's Apple devices as allow-Off is.
 
@@ -97,7 +97,7 @@ AirPods 4 sent one `09` per change (`aap-noise-control.md`), and their dump had 
 
 - `aap::decode` reads the setting as `Message::ConversationAwareness` and a level as `Message::SpeechLevel`.
 - The setting is kept on the link and shown in the snapshot (`PodState::conversation_awareness`); it goes with the link, as the noise mode does.
-- `Command::ConversationAwareness` sends LibrePods' packet to turn it on or off, not yet confirmed on a pair, through `Coordinator::command` like the noise mode. The Features group's switch sends it, and is sensitive while the device shown is on AAP and has reported the setting.
+- `Command::ConversationAwareness` sends the packet to turn it on or off (taken by a Pro 3, 2026-11-02), through `Coordinator::command` like the noise mode. The Features group's switch sends it, and is sensitive while the device shown is on AAP and has reported the setting.
 - The last level is kept on the link and in the snapshot (`PodState::speech_level`), and logged at debug. Every level also goes, as an event, to what lowers the volume: `Coordinator::speech_events` - see below.
 
 ## Lowering the volume
@@ -140,14 +140,17 @@ What that costs:
 
 The fake world plays this through: a fake BlueZ with A2DP transports, a call as A2DP going idle, a pair that answers a volume late and rounded if asked (`SetVolumeAnswer`), the user's volume, and fake pods that speak - see `.claude/skills/fake-world/SKILL.md` and the pipeline tests.
 
-## Hardware checks still to do
+## Hardware checks
 
-- `28 01` and `28 02` sent from here: does the pair take them? `cargo run --example conversation_awareness -- <MAC> --on` against a pair whose dump says off, speaking during the run; then connect again and read the dump. And does the phone's switch follow?
+Checked on a Pro 3 on 2026-11-02, with main at 37bf1e5: the window's switch changes the setting, and speech while audio plays lowers the volume to a fifth at once and fades it back once the user stops.
+
+Still to do:
+
+- The setting changed from here: does the phone's switch follow?
 - The setting changed on a phone while the pair is linked here: does a `0x28` report come?
 - Speech with nothing playing: are levels sent at all?
 - A mode set from the app during speech: what do the pods report, and which mode do they go back to?
-- Speech while audio plays lowers the volume to a fifth and fades it back: `cargo run --example conversation_awareness -- <MAC> --duck` with the app quit, or the app itself, on a Pro 3.
-- Do the pods answer a set with another volume than the one set, and by how much? No run of its own: the app's debug log (`RUST_LOG=linuxpods::volume=debug`) of the check above shows each volume set beside what the transport read then, and the example what it read back after each set.
+- Do the pods answer a set with another volume than the one set, and by how much? No run of its own: the app's debug log (`RUST_LOG=linuxpods::volume=debug`) of a stretch of speech shows each volume set beside what the transport read then, and the example what it read back after each set.
 - A volume changed while lowered - GNOME's slider - is kept, and the fade does not run. Does GNOME's slider follow the transport at all?
 - A call with PipeWire's own HFP backend: does the A2DP transport stay, `idle`, or go, and for how long? Either way speech in the call should leave the volume alone, and A2DP come back at the volume it had.
 - A logout while the volume is lowered: is it put back?

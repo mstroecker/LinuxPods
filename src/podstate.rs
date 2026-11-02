@@ -1754,8 +1754,8 @@ impl Coordinator {
     }
 
     /// Turns one connected device's Conversation Awareness on or off, with
-    /// LibrePods' packet, which has not yet been sent to a pair from here
-    /// (#150).
+    /// LibrePods' packet, which a Pro 3 took from the window (2026-11-02,
+    /// #150).
     ///
     /// Recorded once the packet is away, as the mode is: the pods are not
     /// known to report the setting again when it changes - LibrePods says

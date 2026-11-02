@@ -16,9 +16,9 @@
 //! [`crate::aap::noise::ENABLE_FEATURES`], is what makes the levels come
 //! while audio plays, LibrePods says. See `docs/aap-conversation-awareness.md`.
 //!
-//! The setting's report in the startup dump has been seen on a Pro 3 (#150);
-//! that the same packet changes it is LibrePods' word, not yet tried on a
-//! pair from here.
+//! The setting's report in the startup dump has been seen on a Pro 3 (#150),
+//! and the same packet, sent from the window, changed it on a Pro 3
+//! (2026-11-02).
 
 use crate::aap::message;
 #[cfg(any(test, feature = "harness"))]
@@ -102,9 +102,9 @@ pub enum ConversationParseError {
 }
 
 /// The packet that turns Conversation Awareness on or off, as LibrePods has
-/// it: whether the pods take it is still to be checked (#150). A persistent
-/// setting of the pods', most likely synced to the user's Apple devices as
-/// the allow-Off setting (`0x34`) is.
+/// it, and as a Pro 3 took it (2026-11-02, #150). A persistent setting of the
+/// pods', most likely synced to the user's Apple devices as the allow-Off
+/// setting (`0x34`) is.
 pub fn set_packet(enabled: bool) -> [u8; 11] {
     let value = if enabled {
         noise::ENABLED

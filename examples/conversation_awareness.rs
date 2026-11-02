@@ -9,12 +9,13 @@
 //! not, and read the times back against `docs/aap-conversation-awareness.md`.
 //!
 //! With `--on`, a pair whose dump says the setting is off has it turned on for
-//! the run, and off again at its end. The packet is LibrePods', not yet tried
-//! on a pair from here (#150): whether it took shows as levels while you
-//! speak, and in the next connection's dump - run again without `--on`. The
-//! setting is persistent, and most likely synced to the user's Apple devices,
-//! so it is put back as it was. Interrupted with Ctrl-C, the run cannot put it
-//! back: turn it off in the app, on a phone, or with a second run.
+//! the run, and off again at its end. The packet is LibrePods', and a Pro 3
+//! took it from the window (2026-11-02, #150). Whether it took in a run shows
+//! as levels while you speak, and in the next connection's dump - run again
+//! without `--on`. The setting is persistent, and most likely synced to the user's
+//! Apple devices, so it is put back as it was. Interrupted with Ctrl-C, the
+//! run cannot put it back: turn it off in the app, on a phone, or with a
+//! second run.
 //!
 //! With `--duck`, the levels lower the pair's own A2DP volume - BlueZ's
 //! `MediaTransport1.Volume`, on the system bus - as the app lowers it, with
