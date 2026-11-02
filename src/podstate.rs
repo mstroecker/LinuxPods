@@ -1292,7 +1292,11 @@ impl Coordinator {
                     }
                     Err(e) => tracing::warn!("AAP key packet rejected: {e}"),
                 },
-                Ok(Message::Unknown { .. }) => {}
+                Ok(
+                    Message::ConversationAwareness(_)
+                    | Message::SpeechLevel(_)
+                    | Message::Unknown { .. },
+                ) => {}
                 Err(e) => tracing::warn!("AAP {e}"),
             }
         }

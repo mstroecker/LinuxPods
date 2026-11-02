@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
+use linuxpods::aap::conversation::describe_level;
 use linuxpods::aap::keys::{self, KeyType};
 use linuxpods::aap::message::opcode;
 use linuxpods::aap::{Client, Message, decode, find_encryption_key, parse_proximity_keys};
@@ -35,6 +36,8 @@ fn describe(packet: &[u8]) -> String {
         Ok(Message::Keys(keys)) => format!("proximity keys, {} of them", keys.len()),
         Ok(Message::Ear(report)) => format!("ear report: {report:?}"),
         Ok(Message::Primary(primary)) => format!("primary pod: {primary:?}"),
+        Ok(Message::ConversationAwareness(on)) => format!("Conversation Awareness: {on}"),
+        Ok(Message::SpeechLevel(level)) => format!("speech level {}", describe_level(level)),
         Ok(Message::Unknown { opcode: Some(_) }) => "not read by the app".to_string(),
         Ok(Message::Unknown { opcode: None }) => "no AAP header".to_string(),
         Err(e) => format!("unparsable: {e}"),

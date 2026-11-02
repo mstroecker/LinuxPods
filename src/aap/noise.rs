@@ -38,13 +38,8 @@ const SUB_ALLOW_OFF: u8 = 0x34;
 
 /// The enable/disable values shared by the boolean settings in this family.
 /// Note that disabled is 0x02, not 0x00.
-const ENABLED: u8 = 0x01;
-const DISABLED: u8 = 0x02;
-
-/// The settings-changed notification, AirPods 4's one consistent answer to a
-/// mode change - see [`settings_changed_packet`].
-#[cfg(any(test, feature = "harness"))]
-const CMD_SETTINGS_CHANGED: u8 = 0x4B;
+pub(super) const ENABLED: u8 = 0x01;
+pub(super) const DISABLED: u8 = 0x02;
 
 /// The four noise control modes an AirPods pair can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +137,12 @@ pub const STALE_REPORT_WINDOW: Duration = Duration::from_secs(2);
 /// dropped was right after all, the next report the device sends corrects
 /// the mode.
 ///
+/// With Conversation Awareness on, the pods switch to Transparency while the
+/// user speaks and back after it, themselves (#150). Those are reports like
+/// any other, and taken: Transparency is the mode the pods are in. A mode
+/// set meanwhile holds a report of Transparency off as it holds any replaced
+/// mode, and the pods' switch back ends the hold.
+///
 /// Pure: the time comes in with each call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ModeState {
@@ -216,7 +217,7 @@ pub enum NoiseParseError {
 /// One single-byte setting in the 0x09 family, the shape of every command we
 /// send in it. Their trailing three bytes are unused; a report can fill them -
 /// see `settings_report`.
-fn settings_packet(sub_cmd: u8, value: u8) -> [u8; 11] {
+pub(super) fn settings_packet(sub_cmd: u8, value: u8) -> [u8; 11] {
     [
         HEADER[0],
         HEADER[1],
@@ -268,28 +269,6 @@ pub fn settings_report(sub_cmd: u8, value: &[u8]) -> [u8; 11] {
     let mut packet = settings_packet(sub_cmd, value[0]);
     packet[MODE..MODE + value.len()].copy_from_slice(value);
     packet
-}
-
-/// The notification that follows a mode change on AirPods 4: `04 00 04 00 4B
-/// 00 02 00 01 09`, a count of one and the family that changed. AirPods Pro 3
-/// sent none (#71).
-///
-/// Byte-identical whichever mode was set, so it acknowledges that a command
-/// was processed and nothing more.
-#[cfg(any(test, feature = "harness"))]
-pub fn settings_changed_packet() -> [u8; 10] {
-    [
-        HEADER[0],
-        HEADER[1],
-        HEADER[2],
-        HEADER[3],
-        CMD_SETTINGS_CHANGED,
-        0x00,
-        0x02,
-        0x00,
-        0x01,
-        CMD_SETTINGS,
-    ]
 }
 
 /// Reads an allow-Off command: `Some(true)` for `0x34 01`, `Some(false)` for
@@ -404,20 +383,13 @@ mod tests {
         );
     }
 
+    /// Level 09 of Conversation Awareness, which AirPods 4 sent after every
+    /// mode change: byte-identical whichever mode was set, its last byte the
+    /// settings family's opcode by coincidence alone.
     #[test]
-    fn rejects_the_settings_changed_notification() {
-        // 0x4B, AirPods 4's only consistent answer to a mode change - and no use
-        // as one, since it is byte-identical whichever mode was set.
-        assert!(!is_noise_mode_packet(&settings_changed_packet()));
-    }
-
-    /// The hex from `docs/aap-noise-control.md`, byte for byte.
-    #[test]
-    fn builds_the_documented_notification() {
-        assert_eq!(
-            crate::hex(&settings_changed_packet()),
-            "04 00 04 00 4b 00 02 00 01 09"
-        );
+    fn rejects_a_speech_level() {
+        let level = crate::aap::conversation::level_packet(0x09);
+        assert!(!is_noise_mode_packet(&level));
     }
 
     #[test]
@@ -598,6 +570,77 @@ mod tests {
         assert_eq!(state.report(NoiseMode::Adaptive, start), Report::Unchanged);
         assert_eq!(state.report(NoiseMode::Off, start), Report::Changed);
         assert_eq!(state.report(NoiseMode::Adaptive, start), Report::Changed);
+    }
+
+    /// With Conversation Awareness on, the pods switch to Transparency while
+    /// the user speaks and back after, as reports like any other: the #150
+    /// run reported the mode in use 20 ms into speech, Transparency at 0.3 s,
+    /// and the mode back 0.46 s after the speech ended. All of it is taken,
+    /// as it is the mode the pods are in.
+    #[test]
+    fn a_speech_stretch_is_reports_like_any_other() {
+        use NoiseMode::{NoiseCancellation, Transparency};
+        let start = Instant::now();
+        let mut state = reported(NoiseCancellation, start);
+        let speech = start + ms(10_000);
+        assert_eq!(
+            state.report(NoiseCancellation, speech + ms(20)),
+            Report::Unchanged
+        );
+        assert_eq!(
+            state.report(Transparency, speech + ms(310)),
+            Report::Changed
+        );
+        assert_eq!(
+            state.report(NoiseCancellation, speech + ms(6820)),
+            Report::Changed
+        );
+        assert_eq!(state.mode(), Some(NoiseCancellation));
+    }
+
+    /// A mode set while the pods are in Transparency for speech holds off a
+    /// report of Transparency for the window, as for any command: should the
+    /// pods, still hearing speech, report it again that soon, it is dropped
+    /// until a later report - the switch back after the speech, or the
+    /// echo - says what they are in. Their switch back, to whichever mode,
+    /// is taken: it is no report of the mode replaced.
+    #[test]
+    fn a_mode_set_during_speech_is_held_as_any_command_is() {
+        use NoiseMode::{Adaptive, NoiseCancellation, Transparency};
+        let start = Instant::now();
+        let mut state = reported(NoiseCancellation, start);
+        state.report(Transparency, start + ms(310));
+
+        let sent = start + ms(1000);
+        assert!(state.set(Adaptive, sent));
+        assert_eq!(state.report(Transparency, sent + ms(500)), Report::Stale);
+        assert_eq!(state.mode(), Some(Adaptive));
+        assert_eq!(state.report(Adaptive, sent + ms(1000)), Report::Unchanged);
+        // The speech ends: back to the mode before it, or the one set.
+        let mut back = state;
+        assert_eq!(
+            back.report(NoiseCancellation, sent + ms(3000)),
+            Report::Changed
+        );
+        assert_eq!(state.report(Adaptive, sent + ms(3000)), Report::Unchanged);
+    }
+
+    /// A mode set just before speech starts: the pods' report of the mode
+    /// in use as speech starts may be of the mode replaced, and is dropped
+    /// as stale; Transparency, a third mode, is taken and ends the hold, and
+    /// so is the switch back.
+    #[test]
+    fn speech_just_after_a_command_takes_the_switch_to_transparency() {
+        use NoiseMode::{Adaptive, NoiseCancellation, Transparency};
+        let start = Instant::now();
+        let mut state = reported(Adaptive, start);
+        assert!(state.set(NoiseCancellation, start));
+        assert_eq!(state.report(Adaptive, start + ms(320)), Report::Stale);
+        assert_eq!(state.report(Transparency, start + ms(610)), Report::Changed);
+        assert_eq!(
+            state.report(NoiseCancellation, start + ms(4000)),
+            Report::Changed
+        );
     }
 
     #[test]

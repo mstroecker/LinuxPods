@@ -3,9 +3,11 @@
 //! This is the tool the packet format in `docs/aap-noise-control.md` was verified
 //! with, ported from the Go original. It talks to the client directly rather than
 //! through the coordinator, so the device's answers can be read unfiltered - which
-//! is the whole point: what arrives after a mode change differs by model, and
-//! none of it is a usable acknowledgment - a generic settings-changed
-//! notification on AirPods 4, an echo about a second later on AirPods Pro 3.
+//! is the whole point: what arrives after a mode change differs by model and by
+//! setting, and none of it is a usable acknowledgment - an echo about a second
+//! later on AirPods Pro 3, one on perhaps one change in four on AirPods 4, and
+//! with Conversation Awareness on, its speech levels 08 and 09 around it, which
+//! name no mode (`docs/aap-conversation-awareness.md`).
 //!
 //! Every mode should be audible on the AirPods. Listen while it runs.
 //!
@@ -15,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
+use linuxpods::aap::conversation::describe_level;
 use linuxpods::aap::noise::{NoiseMode, set_packet};
 use linuxpods::aap::{Client, Message, decode, keys};
 use linuxpods::hex;
@@ -36,7 +39,7 @@ fn shown(packet: &[u8]) -> String {
 }
 
 /// Says what a packet is, as far as we can tell. Anything unrecognized is worth
-/// seeing in full - that is how the 0x4B notification was found.
+/// seeing in full - that is how the 0x4B levels were found.
 fn describe(packet: &[u8]) -> String {
     match decode(packet) {
         Ok(Message::NoiseMode(mode)) => format!("noise control mode report: {mode}"),
@@ -44,10 +47,15 @@ fn describe(packet: &[u8]) -> String {
         Ok(Message::Keys(keys)) => format!("proximity keys: {} of them", keys.len()),
         Ok(Message::Ear(report)) => format!("ear report: {report:?}"),
         Ok(Message::Primary(primary)) => format!("primary pod: {primary:?}"),
-        // AirPods 4's only consistent answer to a mode change, and no use as
-        // one: it is byte-identical whichever mode was set.
+        Ok(Message::ConversationAwareness(on)) => format!("Conversation Awareness: {on}"),
+        // With Conversation Awareness on, a Pro 3 framed every mode change
+        // with level 08 and 09, and AirPods 4 sent 09 after each. Neither
+        // names the mode: they are no acknowledgment.
+        Ok(Message::SpeechLevel(level)) => {
+            format!("Conversation Awareness level {}", describe_level(level))
+        }
         Ok(Message::Unknown { opcode: Some(0x4B) }) => {
-            "settings-changed notification (names no mode)".to_string()
+            "0x4B shaped otherwise than a speech level".to_string()
         }
         // Same family as noise control, different sub-command. The startup dump is
         // full of these.
