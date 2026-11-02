@@ -26,6 +26,7 @@ mod automation;
 mod control;
 mod notifications;
 mod preferences;
+mod rename;
 mod window;
 
 #[cfg(feature = "harness")]

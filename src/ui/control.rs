@@ -1,5 +1,5 @@
 //! The Control page: battery display, status text, device switcher, Noise
-//! Control and Features.
+//! Control, Features, and Info with the pods' name.
 
 use std::cell::{Cell, RefCell};
 
@@ -108,6 +108,14 @@ pub struct ControlView {
     /// Set while a snapshot turns the switch, whose `notify::active` would
     /// otherwise send the snapshot's setting back out as a command.
     pub syncing_features: Cell<bool>,
+    /// The Info group's Name row: activated, it opens the rename dialog -
+    /// see `window::activate`. Sensitive only while the device shown is on
+    /// AAP, as renaming is a command, and its link has reported the pods'
+    /// name, which the dialog starts from.
+    pub name_row: adw::ActionRow,
+    /// Its suffix: the pods' own name, else BlueZ's alias - see
+    /// [`shown_name`].
+    pub name_label: gtk::Label,
 }
 
 /// The Control page. An `AdwPreferencesPage` for its scrolling, width clamp and
@@ -305,6 +313,30 @@ pub(super) fn create_control_view() -> ControlView {
     features_group.add(&conversation_row);
     page.add(&features_group);
 
+    // Info, at the bottom as in iOS's settings for a pair: what the pods say
+    // of themselves. The name is the first of it, and renaming it a command,
+    // so the row is insensitive unless the device is on AAP and the pods'
+    // name is known.
+    let info_group = adw::PreferencesGroup::builder()
+        .name("info")
+        .title("Info")
+        .build();
+    let name_label = gtk::Label::builder()
+        .name("device-name")
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
+    name_label.add_css_class("dim-label");
+    let name_row = adw::ActionRow::builder()
+        .name("rename")
+        .title("Name")
+        .activatable(true)
+        .sensitive(false)
+        .build();
+    name_row.add_suffix(&name_label);
+    name_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    info_group.add(&name_row);
+    page.add(&info_group);
+
     let content = gtk::Stack::builder().name("content").build();
     content.add_named(&page, Some("device"));
     content.add_named(&create_empty_state(), Some("empty"));
@@ -320,6 +352,8 @@ pub(super) fn create_control_view() -> ControlView {
         conversation_awareness,
         conversation_row,
         syncing_features: Cell::default(),
+        name_row,
+        name_label,
     }
 }
 
@@ -415,11 +449,33 @@ pub(super) fn choose_device(current: Option<Address>, snapshot: &Snapshot) -> Op
         .or_else(|| snapshot.default_device())
 }
 
-/// Draws one device, and gates noise control and the features on how the
-/// data arrived.
+/// The name the Name row shows for `mac`: the pods' own, as the link reports
+/// it and a rename records it, else BlueZ's alias, as the switcher shows -
+/// the pods' name is known only on AAP.
+fn shown_name(snapshot: &Snapshot, mac: Address) -> Option<String> {
+    snapshot
+        .states
+        .get(&mac)
+        .and_then(|state| state.name.clone())
+        .or_else(|| snapshot.device_name(mac).map(str::to_string))
+}
+
+/// Draws one device, and gates noise control, the features and renaming on
+/// how the data arrived.
 pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<Address>) {
     let state = mac.and_then(|m| snapshot.states.get(&m));
     let connected = mac.is_some_and(|m| snapshot.is_connected(m));
+
+    let name = mac
+        .and_then(|m| shown_name(snapshot, m))
+        .unwrap_or_default();
+    view.name_label.set_text(&name);
+    // Until the link reports the pods' name, the row shows BlueZ's alias,
+    // which the dialog must not start from: Enter would rename the pods to
+    // it. So the row waits for the report, as the Conversation Awareness
+    // switch waits for its own.
+    view.name_row
+        .set_sensitive(state.is_some_and(|s| s.source == DataSource::Aap && s.name.is_some()));
 
     match state {
         Some(state) => {
@@ -690,6 +746,17 @@ mod tests {
         let macs = [MAC_1];
         let snap = snapshot(&[(MAC_1, "Marcel's AirPods Pro")], &[(MAC_1, Some(0x2024))]);
         assert_eq!(device_labels(&macs, &snap), ["Marcel's AirPods Pro"]);
+    }
+
+    /// The Name row shows the pods' own name where the link has it, and
+    /// BlueZ's alias otherwise.
+    #[test]
+    fn the_name_shown_is_the_pods_then_the_alias() {
+        let mut snap = snapshot(&[(MAC_1, "Kitchen")], &[(MAC_1, None)]);
+        assert_eq!(shown_name(&snap, MAC_1).as_deref(), Some("Kitchen"));
+        snap.states.get_mut(&MAC_1).unwrap().name = Some("Test Pods".into());
+        assert_eq!(shown_name(&snap, MAC_1).as_deref(), Some("Test Pods"));
+        assert_eq!(shown_name(&snap, MAC_2), None);
     }
 
     /// The MAC as the rest of the desktop shows it, uppercase.

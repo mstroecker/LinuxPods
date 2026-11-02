@@ -30,7 +30,7 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
     let win = adw::ApplicationWindow::new(app);
     win.set_widget_name("main-window");
     win.set_title(Some("LinuxPods"));
-    // Tall enough for the whole Control page without scrolling.
+    // The Control page scrolls within it, the Info group at its bottom.
     win.set_default_size(420, 680);
 
     // Closing hides the window instead of destroying it. It is the app's only
@@ -143,6 +143,45 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
                 });
             }
         ));
+
+    // Renaming is a command too. The row opens the dialog with the pods'
+    // name, and is sensitive only once the link has reported it - never
+    // BlueZ's alias, which Enter would otherwise rename the pods to. The
+    // name renamed to comes back with the snapshot, recorded as the command
+    // is sent, and a rename that failed leaves the row on the last name the
+    // link recorded, with a toast.
+    let coord = coordinator.clone();
+    ui.control.name_row.connect_activated(glib::clone!(
+        #[strong]
+        ui,
+        #[weak]
+        toasts,
+        move |row| {
+            let Some(mac) = *ui.selected.borrow() else {
+                return;
+            };
+            let Some((current, alias_set)) =
+                ui.last_snapshot.borrow().as_ref().and_then(|snapshot| {
+                    let name = snapshot.states.get(&mac)?.name.clone()?;
+                    Some((name, snapshot.has_alias(mac)))
+                })
+            else {
+                return;
+            };
+            let coord = coord.clone();
+            super::rename::present(row, &current, alias_set, move |name| {
+                let command = Command::Rename(name);
+                let done = coord.command(mac, command.clone());
+                let toasts = toasts.clone();
+                glib::spawn_future_local(async move {
+                    if let Err(e) = done.await {
+                        tracing::warn!("failed to rename {mac}: {e:#}");
+                        toasts.add_toast(adw::Toast::new(&command_failed(&command, &e)));
+                    }
+                });
+            });
+        }
+    ));
 
     ui.control
         .device_dropdown
