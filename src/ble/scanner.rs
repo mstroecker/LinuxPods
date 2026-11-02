@@ -11,8 +11,14 @@
 //! every address - each pod's, every new one after the lid has been closed,
 //! and every one coming back after BlueZ dropped it 30 s into a silence
 //! (#86). An address BlueZ already keeps when discovery starts is not
-//! announced again, so its unchanged payload is not heard until it changes:
-//! a known gap (#153).
+//! announced again, so its unchanged payload is not heard until it changes.
+//! That happens only while another client discovers: with nobody else
+//! discovering, bluetoothd removes the pods' devices when the last discovery
+//! ends, as their advertisements are not connectable, so a start - the app's,
+//! or a restart after a failure - hears each pod at once, in an
+//! `InterfacesAdded`. On hardware the battery showed 36 ms after discovery
+//! started; with GNOME Settings' Bluetooth panel open, the pods were heard
+//! after 2.1 s and 4.1 s (#153).
 //!
 //! Discovery runs on every powered adapter, whatever it is called (#51), and
 //! starts again on each as it powers on, is plugged in, or bluetoothd restarts

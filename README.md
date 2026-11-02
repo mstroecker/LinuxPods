@@ -42,8 +42,8 @@ be changed, only observed.
 All of this needs the pair's keys, which the app fetches over AAP the first time the
 pair connects to this machine. An advertisement comes from a random address that only
 the pair's IRK resolves, and only its encryption key decrypts it: an advertisement
-counts only when both hold, and is dropped otherwise. The advertised payload changes when something happens, and otherwise only
-every 20-30 seconds, so levels are not live.
+counts only when both hold, and is dropped otherwise. The advertised payload changes when something happens, and otherwise
+stays the same for minutes, so levels are not live.
 
 ### Over AAP
 
