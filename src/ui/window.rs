@@ -15,7 +15,6 @@ use super::control::{
     sync_device_list,
 };
 use super::preferences::{DeviceRows, create_preferences_dialog};
-use crate::aap::NoiseMode;
 use crate::podstate::{Command, ConnectionLost, Coordinator, Snapshot};
 
 /// Shortest gap between two renders. Readings change over minutes, while a
@@ -91,16 +90,52 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
             };
             // Queued here, in the order of the clicks; the result comes back
             // to the main context, where the toast can go up.
-            let done = coord.command(mac, Command::NoiseControl(mode));
+            let command = Command::NoiseControl(mode);
+            let done = coord.command(mac, command);
             glib::spawn_future_local(async move {
                 if let Err(e) = done.await {
                     tracing::warn!("failed to switch {mac} to {mode}: {e:#}");
-                    toasts.add_toast(adw::Toast::new(&switch_failed(mode, &e)));
+                    toasts.add_toast(adw::Toast::new(&command_failed(command, &e)));
                 }
             });
         }
     ));
     win.add_action(&ui.control.noise_action);
+
+    // Turning Conversation Awareness is a command too, and the switch shows
+    // the setting as the snapshot has it. A switch is not bound to an action
+    // here: it moves before an action could refuse, and would stay on after
+    // a command that failed. So a turn by the user sends the command, a
+    // snapshot turns it under `syncing_features`, which keeps that from going
+    // back out, and a command that failed draws the last snapshot again,
+    // putting the switch back.
+    let coord = coordinator.clone();
+    ui.control
+        .conversation_awareness
+        .connect_active_notify(glib::clone!(
+            #[strong]
+            ui,
+            #[weak]
+            toasts,
+            move |switch| {
+                if ui.control.syncing_features.get() {
+                    return;
+                }
+                let Some(mac) = *ui.selected.borrow() else {
+                    return;
+                };
+                let command = Command::ConversationAwareness(switch.is_active());
+                let done = coord.command(mac, command);
+                let ui = ui.clone();
+                glib::spawn_future_local(async move {
+                    if let Err(e) = done.await {
+                        tracing::warn!("failed to {command} for {mac}: {e:#}");
+                        toasts.add_toast(adw::Toast::new(&command_failed(command, &e)));
+                        ui.redraw();
+                    }
+                });
+            }
+        ));
 
     ui.control
         .device_dropdown
@@ -318,36 +353,57 @@ fn show_about(win: &adw::ApplicationWindow) {
         .present(Some(win));
 }
 
-/// The toast for a switch to `mode` that failed with `error`. A switch the
-/// connection was lost in the middle of may have reached the AirPods, so it
-/// is not said to have failed; one that was never sent, or whose send failed,
-/// is.
-fn switch_failed(mode: NoiseMode, error: &anyhow::Error) -> String {
-    if error.downcast_ref::<ConnectionLost>().is_some() {
-        format!("Lost the connection while switching to {mode}")
-    } else {
-        format!("Couldn’t switch to {mode}")
+/// The toast for `command`, failed with `error`. A command the connection
+/// was lost in the middle of may have reached the AirPods, so it is not said
+/// to have failed; one that was never sent, or whose send failed, is.
+fn command_failed(command: Command, error: &anyhow::Error) -> String {
+    let lost = error.downcast_ref::<ConnectionLost>().is_some();
+    match command {
+        Command::NoiseControl(mode) if lost => {
+            format!("Lost the connection while switching to {mode}")
+        }
+        Command::NoiseControl(mode) => format!("Couldn’t switch to {mode}"),
+        Command::ConversationAwareness(enabled) => {
+            let on = if enabled { "on" } else { "off" };
+            if lost {
+                format!("Lost the connection while turning Conversation Awareness {on}")
+            } else {
+                format!("Couldn’t turn Conversation Awareness {on}")
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aap::NoiseMode;
 
     #[test]
-    fn a_lost_connection_is_not_a_failed_switch() {
-        let lost = anyhow::Error::new(ConnectionLost {
-            mac: Address::any(),
-            command: Command::NoiseControl(NoiseMode::Off),
-        });
+    fn a_lost_connection_is_not_a_failed_command() {
+        let lost = |command| {
+            anyhow::Error::new(ConnectionLost {
+                mac: Address::any(),
+                command,
+            })
+        };
+        let off = Command::NoiseControl(NoiseMode::Off);
         assert_eq!(
-            switch_failed(NoiseMode::Off, &lost),
+            command_failed(off, &lost(off)),
             "Lost the connection while switching to Off"
         );
         let unsent = anyhow::anyhow!("no AAP connection").context("switch to Off not sent");
+        assert_eq!(command_failed(off, &unsent), "Couldn’t switch to Off");
+
+        let on = Command::ConversationAwareness(true);
         assert_eq!(
-            switch_failed(NoiseMode::Off, &unsent),
-            "Couldn’t switch to Off"
+            command_failed(on, &lost(on)),
+            "Lost the connection while turning Conversation Awareness on"
+        );
+        let off = Command::ConversationAwareness(false);
+        assert_eq!(
+            command_failed(off, &unsent),
+            "Couldn’t turn Conversation Awareness off"
         );
     }
 }

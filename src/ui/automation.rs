@@ -66,7 +66,7 @@
 //! | `last-seen` | how old a BLE reading is; hidden for AAP |
 //! | `noise-control` | the Noise Control group, insensitive unless the device is on AAP |
 //! | `noise-off`, `noise-noise-cancellation`, `noise-transparency`, `noise-adaptive` | its radios |
-//! | `conversation-awareness` | the Features switch, always insensitive |
+//! | `conversation-awareness` | the Features switch for Conversation Awareness: on as the snapshot has it, insensitive unless the device is on AAP and has reported it; turning it sends the command |
 //! | `preferences` | the Preferences dialog, while open |
 //! | `auto-connect` | its switch, always insensitive |
 //! | `battery-notifications` | its switch for low battery notifications, as saved: on unless turned off |
