@@ -29,9 +29,24 @@
 //! - [`FakeBluez::set_powered`] switches an adapter on or off, signaling
 //!   `Powered`. Off, it does what bluetoothd's `adapter_stop` does: every
 //!   client's discovery there ends, with `Discovering` signaled; the devices
-//!   it only heard advertising go; and its connected devices disconnect. Its
-//!   paired devices and the providers registered with it stay, as they do in
-//!   bluetoothd. Nothing connects to a device on an adapter that is off.
+//!   it only heard advertising go, as when discovery ends (see
+//!   [Advertisements](#advertisements)); and its connected devices
+//!   disconnect. Its paired devices and the providers registered with it
+//!   stay, as they do in bluetoothd. Nothing connects to a device on an
+//!   adapter that is off.
+//!
+//!   bluetoothd's order differs: it only queues `Powered` (`settings_changed`
+//!   in `src/adapter.c`), and the D-Bus layer sends queued changes later,
+//!   while a device's removal goes out at once. So on hardware the devices
+//!   go first, and `Powered` follows with `Discovering`, whichever way the
+//!   adapter powers off. The two ways differ only in the `RSSI`: powered off
+//!   from below bluetoothd - rfkill, as the desktop's Bluetooth switch does
+//!   it, or the kernel - `adapter_stop`'s `discovery_cleanup` invalidates it
+//!   on each device before it goes; powered off over D-Bus, bluetoothd
+//!   removes its temporary devices before it asks the kernel, with none
+//!   invalidated (`property_set_mode`). The fake signals `Powered` first, then
+//!   stops the adapter as rfkill has it stopped; it keeps that order until
+//!   something needs bluetoothd's.
 //! - [`FakeBluez::add_adapter`] and [`FakeBluez::remove_adapter`] plug one in
 //!   and out at any time, with `InterfacesAdded` and `InterfacesRemoved`.
 //!   Removed, an adapter is first stopped as when it powers off, and takes
@@ -81,6 +96,21 @@
 //! - An address not heard for [`TEMPORARY_TIMEOUT`] goes with
 //!   `InterfacesRemoved`: 29.8-30.7 s after its last advertisement in the
 //!   captures, and an address heard again after that is announced afresh.
+//! - When the last client discovering on an adapter stops, or leaves the bus,
+//!   the devices it only heard advertising go at once, as bluetoothd's
+//!   `discovery_cleanup` removes those that are temporary, not connectable
+//!   and not connected: device by device, its `RSSI` invalidated and then its
+//!   `InterfacesRemoved`, and `Discovering` after all of them. The pods'
+//!   proximity advertisements are not connectable, and on 2026-11-02 their
+//!   devices were gone right after the app quit with nobody else
+//!   discovering (#153). Every device the fake makes of an advertisement is
+//!   temporary, not connectable and not connected, so every one goes, and
+//!   none stays without its `RSSI`; a paired device is never one. So whoever
+//!   starts discovering next hears each address afresh, in an
+//!   `InterfacesAdded` with its payload, at its next advertisement. While
+//!   another client discovers, the devices stay, and a client that starts
+//!   then hears an address only once its payload changes, or a new one
+//!   comes.
 //!
 //! An adapter hears advertisements only while some client has discovery on
 //! there, as it hears them only while it scans. Every adapter that does hears
@@ -266,6 +296,10 @@ pub struct FakeBluez {
     /// resolve lands either on the object carried over before it is read, or
     /// on its copy, never on one left behind.
     carrying: Arc<tokio::sync::Mutex<()>>,
+    /// Held while devices only heard advertising are made, changed or
+    /// removed: so a device a discovery's end removes cannot be one an
+    /// advertisement is bringing up or changing meanwhile.
+    hearing: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -449,6 +483,7 @@ impl FakeBluez {
             state: Arc::default(),
             exports: Arc::default(),
             carrying: Arc::default(),
+            hearing: Arc::default(),
         };
         bluez.serve_on(&conn).await?;
         Ok(bluez)
@@ -619,7 +654,8 @@ impl FakeBluez {
             .await
             .powered_changed(iface.signal_emitter())
             .await?;
-        // After `Powered`, as bluetoothd signals it before it stops.
+        // After `Powered`, where bluetoothd's queued `Powered` comes after the
+        // removals - see the module docs.
         if !powered {
             self.stop_adapter(name).await;
         }
@@ -627,20 +663,19 @@ impl FakeBluez {
     }
 
     /// What bluetoothd's `adapter_stop` does to an adapter's clients: their
-    /// discovery there ends, the devices it only heard advertising go, and its
-    /// connected devices disconnect, each signaled.
+    /// discovery there ends, the devices it only heard advertising go as at
+    /// the end of a discovery - see [`FakeBluez::remove_advertisers`] - and
+    /// its connected devices disconnect, each signaled.
     async fn stop_adapter(&self, name: &str) {
+        let hearing = self.hearing.lock().await;
         let (ended, heard, paired) = {
             let mut state = self.state();
             let ended = state.end_discovery(|adapter| adapter == name);
             let heard = state.forget_advertisers(|adapter| adapter == name);
             (ended, heard, state.paired_with(name))
         };
-        let conn = self.conn();
-        let server = conn.object_server();
-        for path in heard {
-            let _ = server.remove::<Advertiser, _>(&path).await;
-        }
+        self.remove_advertisers(heard).await;
+        drop(hearing);
         for address in paired {
             if let Err(e) = self.signal_connected(name, address, false).await {
                 tracing::warn!("fake BlueZ: failed to disconnect {address}: {e:#}");
@@ -666,6 +701,7 @@ impl FakeBluez {
     /// call to `org.bluez` finds no one - or, on a bus that activates it,
     /// waits for the new one.
     pub async fn stop(&self) -> Result<()> {
+        let hearing = self.hearing.lock().await;
         let (heard, batteries) = {
             let mut state = self.state();
             state.end_discovery(|_| true);
@@ -681,6 +717,7 @@ impl FakeBluez {
         for path in heard {
             let _ = server.remove::<Advertiser, _>(&path).await;
         }
+        drop(hearing);
         conn.release_name(BLUEZ_SERVICE)
             .await
             .context("failed to let go of org.bluez")?;
@@ -997,6 +1034,7 @@ impl FakeBluez {
     /// Signaled as the module docs describe: returns whether any adapter
     /// heard it.
     pub async fn advertise(&self, address: Address, apple_data: &[u8]) -> Result<bool> {
+        let _hearing = self.hearing.lock().await;
         let hearing: Vec<(String, bool)> = {
             let mut state = self.state();
             let discovering: Vec<String> = state
@@ -1094,6 +1132,7 @@ impl FakeBluez {
     /// Removes the devices only heard advertising that have not been heard for
     /// [`TEMPORARY_TIMEOUT`] by `now`.
     pub async fn prune(&self, now: Instant) {
+        let _hearing = self.hearing.lock().await;
         let stale: Vec<(String, Address)> = {
             let mut state = self.state();
             let stale: Vec<(String, Address)> = state
@@ -1113,6 +1152,51 @@ impl FakeBluez {
             let _ = server
                 .remove::<Advertiser, _>(device_path(&adapter, address))
                 .await;
+        }
+    }
+
+    /// What bluetoothd's `discovery_cleanup` does once the last client
+    /// discovering on the adapter called `adapter` has stopped, or left the
+    /// bus: the devices it only heard advertising go - see
+    /// [`FakeBluez::remove_advertisers`]. Nothing goes if a client has
+    /// started discovering there since. That is checked under the lock the
+    /// devices are forgotten under, and with [`FakeBluez::advertise`] held
+    /// off until they are gone, so none goes that a discovery started
+    /// meanwhile has heard.
+    async fn discovery_ended(&self, adapter: &str) {
+        let _hearing = self.hearing.lock().await;
+        let heard = {
+            let mut state = self.state();
+            if state.is_discovering(adapter) {
+                return;
+            }
+            state.forget_advertisers(|heard_by| heard_by == adapter)
+        };
+        self.remove_advertisers(heard).await;
+    }
+
+    /// Removes devices only heard advertising, as bluetoothd's
+    /// `discovery_cleanup` does - see the module docs: device by device, a
+    /// `PropertiesChanged` naming `RSSI` among the invalidated properties,
+    /// then its `InterfacesRemoved`. bluetoothd queues every invalidation
+    /// first, and removing a device sends that device's queued changes and
+    /// then its removal at once (`remove_interface` and `process_changes` in
+    /// `gdbus/object.c`), so on the wire each device's two signals come
+    /// together. Called with `hearing` held.
+    async fn remove_advertisers(&self, heard: Vec<OwnedObjectPath>) {
+        let conn = self.conn();
+        let server = conn.object_server();
+        for path in heard {
+            if let Ok(iface) = server.interface::<_, Advertiser>(&path).await {
+                let _ = zbus::fdo::Properties::properties_changed(
+                    iface.signal_emitter(),
+                    InterfaceName::from_static_str_unchecked(DEVICE_INTERFACE),
+                    HashMap::new(),
+                    Cow::Borrowed(&["RSSI"]),
+                )
+                .await;
+            }
+            let _ = server.remove::<Advertiser, _>(&path).await;
         }
     }
 
@@ -1190,8 +1274,9 @@ impl FakeBluez {
         Ok(())
     }
 
-    /// A connection left the bus: its discovery stops on every adapter, and
-    /// its providers go.
+    /// A connection left the bus: its discovery stops on every adapter - the
+    /// last client's ending discovery there, as
+    /// [`FakeBluez::discovery_ended`] has it - and its providers go.
     async fn client_gone(&self, name: OwnedUniqueName) {
         let (stopped, devices) = {
             let mut state = self.state();
@@ -1204,6 +1289,7 @@ impl FakeBluez {
             (stopped, state.forget_providers(|p| p.owner == name))
         };
         for adapter in stopped {
+            self.discovery_ended(&adapter).await;
             let _ = self.signal_discovering(&adapter).await;
         }
         for device in devices {
@@ -1534,7 +1620,12 @@ impl Adapter1 {
             }
             clients.is_empty()
         };
+        // The devices go before `Discovering` is signaled, as in bluetoothd.
+        // With discovery active, bluetoothd sends this reply before the
+        // cleanup's signals, and the fake after them: nothing the app sees
+        // changes.
         if stopped {
+            self.bluez.discovery_ended(&self.name).await;
             self.discovering_changed(&emitter).await?;
         }
         Ok(())
@@ -2442,6 +2533,147 @@ mod tests {
             advert = next().await;
         }
         assert_eq!(advert.data.left_battery, Some(10), "the change");
+    }
+
+    /// The devices of a pair's pods go when the last client stops
+    /// discovering, as bluetoothd removes them in `discovery_cleanup` (#153):
+    /// device by device, its `RSSI` invalidated and then its
+    /// `InterfacesRemoved`, and `Discovering` after all of them. Not while
+    /// another client discovers, and never a paired device, connected or not.
+    /// A client leaving the bus ends its discovery as stopping does.
+    #[tokio::test]
+    async fn the_last_client_to_stop_discovering_takes_the_pods_devices() {
+        let (bus, bluez) = served().await;
+        let (a, b) = (bus.connect().await.unwrap(), bus.connect().await.unwrap());
+        let watcher = bus.connect().await.unwrap();
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender(BLUEZ_SERVICE)
+            .unwrap()
+            .build();
+        // Subscribed once this is back, before anything below is signaled.
+        let mut signals = MessageStream::for_match_rule(rule, &watcher, None)
+            .await
+            .unwrap();
+        let devices = Devices::new(watcher.clone());
+        let path = adapter_path(ADAPTER);
+        let adapter_a = proxy(&a, &path, "org.bluez.Adapter1").await;
+        let adapter_b = proxy(&b, &path, "org.bluez.Adapter1").await;
+        for adapter in [&adapter_a, &adapter_b] {
+            adapter.call_method("StartDiscovery", &()).await.unwrap();
+        }
+        bluez.set_connected(PAIR, true).await.unwrap();
+        let mut pods = Pods::new(PRO_3, OTHER);
+        let heard: HashSet<Address> = pods
+            .advertisements(Duration::ZERO)
+            .iter()
+            .map(|ad| ad.address)
+            .collect();
+        assert_eq!(heard.len(), 2, "both pods in the open case");
+        let advertise_all = async |pods: &mut Pods| {
+            for ad in pods.advertisements(Duration::ZERO) {
+                assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
+            }
+        };
+        advertise_all(&mut pods).await;
+        let pair = device_path(ADAPTER, PAIR);
+
+        adapter_b.call_method("StopDiscovery", &()).await.unwrap();
+        assert_eq!(bluez.advertisers_on(ADAPTER), heard, "kept for a");
+
+        adapter_a.call_method("StopDiscovery", &()).await.unwrap();
+        assert!(bluez.advertisers_on(ADAPTER).is_empty());
+        for address in &heard {
+            let path = device_path(ADAPTER, *address);
+            assert!(devices.device_info(path.as_str()).await.is_err(), "gone");
+        }
+        assert!(devices.device_connected(pair.as_str()).await.unwrap());
+
+        // What `a`'s stop signaled, after what the advertisements did.
+        let device_paths: HashSet<OwnedObjectPath> = heard
+            .iter()
+            .map(|address| device_path(ADAPTER, *address))
+            .collect();
+        let mut invalidated = HashSet::new();
+        let mut removed: HashSet<OwnedObjectPath> = HashSet::new();
+        loop {
+            let msg = timeout(TIMEOUT, signals.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let header = msg.header();
+            let (Some(member), Some(at)) = (header.member(), header.path()) else {
+                continue;
+            };
+            match member.as_str() {
+                "PropertiesChanged" if at.as_str() == path => {
+                    let (_, changed, _) = msg
+                        .body()
+                        .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                        .unwrap();
+                    let Some(discovering) = changed.get("Discovering") else {
+                        continue;
+                    };
+                    if !bool::try_from(discovering.clone()).unwrap() {
+                        break;
+                    }
+                }
+                "PropertiesChanged" if device_paths.iter().any(|p| p.as_str() == at.as_str()) => {
+                    let (_, changed, gone) = msg
+                        .body()
+                        .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                        .unwrap();
+                    if gone.is_empty() {
+                        continue;
+                    }
+                    assert!(changed.is_empty());
+                    assert_eq!(gone, ["RSSI"]);
+                    let at = OwnedObjectPath::from(at.to_owned());
+                    assert!(!removed.contains(&at), "invalidated before it goes");
+                    invalidated.insert(at);
+                }
+                "InterfacesRemoved" => {
+                    let (object, _) = msg
+                        .body()
+                        .deserialize::<(OwnedObjectPath, Vec<String>)>()
+                        .unwrap();
+                    assert_ne!(object, pair, "a paired device stays");
+                    assert!(invalidated.contains(&object), "invalidated first");
+                    removed.insert(object);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(invalidated, device_paths);
+        assert_eq!(removed, device_paths, "removed before Discovering");
+
+        // Heard afresh by the next discovery, and gone as its client leaves.
+        adapter_b.call_method("StartDiscovery", &()).await.unwrap();
+        advertise_all(&mut pods).await;
+        assert_eq!(bluez.advertisers_on(ADAPTER), heard);
+        drop((adapter_b, b));
+        eventually(|| bluez.advertisers_on(ADAPTER).is_empty()).await;
+        assert!(!bluez.is_discovering(ADAPTER));
+    }
+
+    /// The end of a discovery takes nothing once a client has started
+    /// discovering again, which the removal checks for under the lock it
+    /// forgets the devices under.
+    #[tokio::test]
+    async fn the_end_of_a_discovery_takes_nothing_while_a_client_discovers() {
+        let (bus, bluez) = served().await;
+        let client = bus.connect().await.unwrap();
+        Scanner::with_connection(client.clone())
+            .start_discovery()
+            .await
+            .unwrap();
+        assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
+        bluez.discovery_ended(ADAPTER).await;
+        assert_eq!(bluez.advertisers_on(ADAPTER), HashSet::from([RANDOM]));
+        let devices = Devices::new(client);
+        let path = device_path(ADAPTER, RANDOM);
+        assert!(devices.device_info(path.as_str()).await.is_ok());
     }
 
     /// Discovery is per client: each starts and stops its own, and one that

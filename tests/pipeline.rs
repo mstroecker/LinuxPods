@@ -32,7 +32,7 @@
 //!
 //! Every key is generated at runtime, by the fake pairs; none is in the source.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -94,6 +94,14 @@ const KEY_REQUEST: u8 = 0x30;
 /// How long the app gives a pair to answer the handshake, which a silent pair
 /// never does.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long an app started once the last one's discovery has ended may take
+/// to hear a pair. The fake BlueZ took the pods' devices with that discovery,
+/// as bluetoothd does, so each pod is announced afresh at its next
+/// advertisement: up to an advertising interval after discovery starts
+/// (#153). The rest is headroom for a loaded runner. While the fake kept the
+/// devices, it took up to half a rotation, 5 s.
+const HEARD_AFRESH: Duration = Duration::from_secs(4);
 
 /// How long a test watches for what must not happen: a reconnect, an AAP
 /// connection. Longer than the shortest waits between AAP attempts, 1 s and
@@ -288,6 +296,20 @@ impl Fixture {
         .await;
     }
 
+    /// Waits until nobody discovers on the adapter called `adapter` any more,
+    /// and the fake BlueZ has taken along the devices it only heard
+    /// advertising there, as bluetoothd does when the last discovery ends.
+    async fn until_discovery_ended(&self, adapter: &str) {
+        let bluez = self.world.bluez();
+        eventually(
+            &format!("discovery on {adapter} to end"),
+            move || async move {
+                !bluez.is_discovering(adapter) && bluez.advertisers_on(adapter).is_empty()
+            },
+        )
+        .await;
+    }
+
     /// Waits until a provider is registered with the adapter called
     /// `adapter`, and no more than one.
     async fn until_provider_on(&self, adapter: &str) {
@@ -459,8 +481,18 @@ impl App {
 
     /// Waits until the latest snapshot is `done`, and returns it.
     async fn until(&mut self, what: &str, done: impl FnMut(&Snapshot) -> bool) -> Snapshot {
+        self.until_within(TIMEOUT, what, done).await
+    }
+
+    /// [`App::until`], waiting up to `budget` rather than [`TIMEOUT`].
+    async fn until_within(
+        &mut self,
+        budget: Duration,
+        what: &str,
+        done: impl FnMut(&Snapshot) -> bool,
+    ) -> Snapshot {
         // Cloned out: the borrow is a read lock every broadcast waits for.
-        let found = match timeout(TIMEOUT, self.updates.wait_for(done)).await {
+        let found = match timeout(budget, self.updates.wait_for(done)).await {
             Ok(Ok(snapshot)) => Some(snapshot.clone()),
             Ok(Err(_)) => panic!("the coordinator went away, waiting for {what}"),
             Err(_) => None,
@@ -621,19 +653,60 @@ async fn a_key_that_arrives_on_connect_is_stored_and_makes_the_ble_reading_exact
     })
     .await;
 
-    // The next session, which loads the key from the keystore. The fake
-    // BlueZ still has the pods' devices from the first, so it hears them only
-    // once a payload or an address changes: up to half a rotation, while
-    // both pods advertise (#153).
+    // The next session, which loads the key from the keystore. The first
+    // one's discovery ended with it, and took the pods' devices along, as
+    // bluetoothd does (#153): the next app hears each pod afresh at its next
+    // advertisement.
     drop(app);
+    fixture.until_discovery_ended(HCI0).await;
     let mut app = fixture.start_app().await;
     let snapshot = app
-        .until("an exact BLE reading in the next session", |s| {
-            levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
-        })
+        .until_within(
+            HEARD_AFRESH,
+            "an exact BLE reading in the next session",
+            |s| levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS),
+        )
         .await;
     assert_eq!(snapshot.known_keys, [PAIR]);
     assert!(snapshot.connected_macs.is_empty());
+}
+
+/// An app started once another app's discovery has ended hears both pods at
+/// once, though neither payload has changed: bluetoothd removes the pods'
+/// devices as the last discovery ends, so the next one announces each pod
+/// afresh, in an `InterfacesAdded` with its payload, at its next
+/// advertisement (#153). Kept, a device whose payload stays the same is
+/// never signaled again, and a pod would be heard only from a new address:
+/// the pods change address half a rotation apart, so within
+/// [`HEARD_AFRESH`] one of them at most - whenever the test runs, and however
+/// slowly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_app_started_after_discovery_ended_hears_the_pods_afresh() {
+    assert!(HEARD_AFRESH < ADDRESS_ROTATION / 2, "one rotation at most");
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let key = fixture.enc_key(PAIR).await;
+    let mut app = fixture.start_app().await;
+    app.until("an exact BLE reading", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+
+    drop(app);
+    fixture.until_discovery_ended(HCI0).await;
+    let mut app = fixture.start_app().await;
+    let mut heard = HashSet::new();
+    app.handled_within(
+        HEARD_AFRESH,
+        "both pods, each from an address of its own",
+        2,
+        |a| sent_by(a, PAIR, &key) && heard.insert(a.ble_mac),
+    )
+    .await;
+    app.until_within(HEARD_AFRESH, "the exact BLE reading again", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
 }
 
 /// An AAP link to one pair leaves a second pair's BLE reading alone: the
