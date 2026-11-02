@@ -187,6 +187,13 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
 
 ## Protocol
 
+**Say where a reading comes from.** A protocol reading taken from LibrePods, or guessed,
+says so where it is written - doc, comment, example, README - until a run here confirms
+it, and names that run once one does. The magic-byte check and the `0x4B`
+"settings-changed notification" were each a guess written down as fact, and each stood
+until hardware showed otherwise: the check rejected every correct decryption, and the
+notification was Conversation Awareness's speech level `09` (#150).
+
 **Keys are requested on every AAP connection**, not only when none is stored. What would
 change them is not known - a Pro 2 forgotten and paired again with the same computer
 kept both (2026-11-01) - and a stale IRK or key leaves the pair unidentified without a
