@@ -1796,22 +1796,14 @@ async fn a_command_to_a_pair_off_aap_fails_to_its_caller() {
 /// every advertiser, each known by its address, and it broadcasts within the
 /// handling or not at all.
 ///
-/// Both pods are worn, so the primary alone advertises. That avoids #152:
-/// each pod calls itself primary, and an advertisement from the other would
-/// change the primary pod a snapshot takes from the last.
+/// Both pods are in the open case, so both advertise, each from an address
+/// of its own and each calling itself primary. Neither's advertisement
+/// changes what a snapshot shows: it shows no primary pod (#152).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_flood_of_undecryptable_advertisements_is_neither_stored_nor_broadcast() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
     fixture.seed_keys(&[PAIR]).await;
     let key = fixture.enc_key(PAIR).await;
-    fixture
-        .world
-        .with_pods(PAIR, |pods| {
-            pods.set_in_ear(PodSide::Left, true);
-            pods.set_in_ear(PodSide::Right, true);
-        })
-        .await
-        .unwrap();
     // Connected before the app hears it, so that every advertisement it sends
     // says so, and none changes what a snapshot takes from the last.
     fixture.world.connect(PAIR).await.unwrap();
