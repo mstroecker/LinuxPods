@@ -389,10 +389,9 @@ impl Client {
 
     /// Turns Conversation Awareness on or off.
     ///
-    /// The packet is LibrePods': whether the pods take it is still to be
-    /// checked (#150). Fire and forget, as the mode is: the pods are not
-    /// known to report the setting again once changed, so the caller records
-    /// it itself.
+    /// The packet is LibrePods', and a Pro 3 took it (2026-11-02, #150).
+    /// Fire and forget, as the mode is: the pods are not known to report the
+    /// setting again once changed, so the caller records it itself.
     pub async fn set_conversation_awareness(&self, enabled: bool) -> Result<()> {
         self.send_packet(&conversation::set_packet(enabled), "Conversation Awareness")
             .await

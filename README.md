@@ -57,22 +57,21 @@ own. This is the only channel that can *send* commands.
 | In-ear detection, live | ✅ |
 | Key retrieval - IRK and encryption key - which identifies the pair over BLE | ✅ |
 | Noise control - Transparency, Adaptive, ANC, Off | ✅ |
-| Conversation Awareness | 🚧 |
+| Conversation Awareness | ✅ |
 | Device rename | 📋 |
 | Press-and-hold gesture configuration | 📋 |
 | Personalized and adaptive volume | 📋 |
 | Loud sound reduction | 📋 |
 | Firmware version | 📋 |
 
-Conversation Awareness is there but for hardware checks: the window's switch shows the
-setting and sends LibrePods' command to change it, not yet confirmed on a pair here.
-With it on, the pods switch to Transparency while you speak, which the window shows,
-and the app lowers the pair's own volume - its A2DP volume in BlueZ, which PipeWire's
-sink follows - to a fifth at once, and fades it back over 1.5 s once you stop, as an
-iPhone or a Mac does on the levels the pods send. Only while audio plays to the pair
-and no call is on, and a volume you change meanwhile is left as you set it. Tested
-against the fake pods; on a pair, the lowering and the fade are still to be checked
-(#150).
+The window's switch turns Conversation Awareness on and off. With it on, the pods switch
+to Transparency while you speak, which the window shows, and the app lowers the pair's
+own volume - its A2DP volume in BlueZ, which PipeWire's sink follows - to a fifth at
+once, and fades it back over 1.5 s once you stop, as an iPhone or a Mac does on the
+levels the pods send. Only while audio plays to the pair and no call is on, and a volume
+you change meanwhile is left as you set it. The switch, the lowering and the fade were
+checked on a Pro 3 (2026-11-02); a call, a volume changed while lowered, and the setting
+changed on a phone are still to be checked (#150).
 
 ### Linux integration
 
