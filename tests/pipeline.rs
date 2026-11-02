@@ -54,11 +54,12 @@ use linuxpods::ble::parser::{PodSide, parse_proximity_data};
 use linuxpods::ble::rpa::{resolvable_address, resolves};
 use linuxpods::ble::scanner::{Advertisement, Scanner};
 use linuxpods::bluez::{BatteryProvider, ProviderConnection};
-use linuxpods::harness::bluez::device_path;
+use linuxpods::harness::bluez::{VolumeAnswer, device_path};
 use linuxpods::harness::pods::{ADDRESS_ROTATION, PRO_2_USB_C, PRO_3, Part, Pods};
 use linuxpods::harness::{PrivateBus, World};
 use linuxpods::keystore::{KEYS_FILE, Keystore, PairKeys};
 use linuxpods::podstate::{Command, Coordinator, DataSource, Snapshot};
+use linuxpods::volume::{self, Volume, VolumeControl};
 
 /// The longest any one wait may take, so that a regression fails the test
 /// instead of hanging CI. The slowest wait is for a pair's first BLE reading:
@@ -434,6 +435,15 @@ impl Fixture {
             .expect("attachment starts");
         let attaching = tokio::spawn(attachment.run());
 
+        // As main.rs's volume task, on a connection of its own to the test's
+        // bus, made once a speech level asks for it.
+        let address = self.bus.address().to_string();
+        let (lowering, volume) = Volume::new(
+            &coordinator,
+            Box::new(move || zbus::connection::Builder::address(address.as_str())),
+        );
+        let lowering = tokio::spawn(lowering.run());
+
         App {
             world: self.world.clone(),
             coordinator,
@@ -441,6 +451,8 @@ impl Fixture {
             handled: handled_rx,
             listening,
             attaching,
+            volume,
+            lowering,
         }
     }
 }
@@ -459,6 +471,10 @@ struct App {
     listening: JoinHandle<()>,
     /// Attachment's task.
     attaching: JoinHandle<()>,
+    /// Puts back the volumes lowered while the user spoke.
+    volume: VolumeControl,
+    /// The volume's task.
+    lowering: JoinHandle<()>,
 }
 
 impl App {
@@ -558,6 +574,7 @@ impl Drop for App {
     fn drop(&mut self) {
         self.listening.abort();
         self.attaching.abort();
+        self.lowering.abort();
     }
 }
 
@@ -1572,6 +1589,218 @@ async fn a_mode_set_during_speech_stays_on_show() {
         [Some(NoiseMode::Transparency), Some(NoiseMode::Adaptive)]
     );
     assert_eq!(levels.last(), Some(&Some(0x09)));
+}
+
+/// The volume a pair plays at in the volume tests, which speech lowers to a
+/// fifth: 20.
+const VOLUME: u16 = 100;
+
+/// How the pair answers a volume the app sets in the volume tests: late, and
+/// rounded down to even, as bluetoothd has real pods answer - the property
+/// changes only once they do, to the volume they report. How real pods
+/// answer is untried (#150); this keeps the app from counting on the set
+/// reading back at once, or as set.
+const SLOW_ANSWER: VolumeAnswer = VolumeAnswer {
+    delay: Duration::from_millis(150),
+    to_even: true,
+};
+
+/// The volumes the app set on the pair's transports, in order.
+fn volumes_set(fixture: &Fixture) -> Vec<u16> {
+    let sets = fixture.world.volume_sets(PAIR);
+    sets.into_iter().map(|(_, volume)| volume).collect()
+}
+
+/// Waits until the volumes the app set on the pair's transports are `done`.
+/// Read off the fake BlueZ, which tells no one when it changes.
+async fn until_volumes(fixture: &Fixture, what: &str, done: impl Fn(&[u16]) -> bool + Copy) {
+    eventually(what, move || async move { done(&volumes_set(fixture)) }).await;
+}
+
+/// Waits until the pair's transport reads `volume`.
+async fn until_volume(fixture: &Fixture, what: &str, volume: u16) {
+    let world = &fixture.world;
+    eventually(what, move || async move {
+        world.volume(PAIR).await == Some(volume)
+    })
+    .await;
+}
+
+/// [`aware_on_aap`], with audio playing to the pair at [`VOLUME`], which
+/// answers the app's volumes as [`SLOW_ANSWER`] says.
+async fn aware_and_playing() -> (Fixture, App) {
+    let (fixture, app) = aware_on_aap().await;
+    fixture.world.set_volume_answer(PAIR, SLOW_ANSWER).unwrap();
+    fixture.world.set_playing(PAIR, true).await.unwrap();
+    fixture.world.set_volume(PAIR, VOLUME).await.unwrap();
+    (fixture, app)
+}
+
+/// [`aware_and_playing`], with the pair speaking for `length`, and lowered:
+/// the pair has answered the lowering.
+async fn lowered_by_speech(length: Duration) -> (Fixture, App) {
+    let (fixture, app) = aware_and_playing().await;
+    fixture.world.speak(PAIR, length).await.unwrap();
+    until_volume(&fixture, "the volume lowered", VOLUME / 5).await;
+    (fixture, app)
+}
+
+/// Waits until the app has handled every level of a stretch of speech: the
+/// pair has nothing more due, and a battery change made after that, which
+/// comes over the same connection, has reached the snapshot. The volume
+/// hears of the levels from the coordinator before that change.
+async fn after_the_speech(fixture: &Fixture, app: &mut App) {
+    /// A left pod level the pair has not had yet.
+    const LATER: u8 = 29;
+    after_everything_due(fixture, LATER).await;
+    app.until("the battery change after the speech", |s| {
+        s.states
+            .get(&PAIR)
+            .is_some_and(|state| state.left_battery == Some(LATER))
+    })
+    .await;
+}
+
+/// Speech lowers the pair's own transport at once to a fifth of its volume,
+/// and once it is over the volume comes back to exactly what it was, in
+/// steps rather than at once (#150) - with the pair answering each step late
+/// and rounded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn speech_lowers_the_volume_and_it_fades_back() {
+    let (fixture, mut app) = aware_and_playing().await;
+    fixture
+        .world
+        .speak(PAIR, Duration::from_secs(3))
+        .await
+        .unwrap();
+    after_the_speech(&fixture, &mut app).await;
+
+    until_volumes(&fixture, "the volume lowered, and back", |set| {
+        set.last() == Some(&VOLUME)
+    })
+    .await;
+    let volumes = volumes_set(&fixture);
+    assert_eq!(volumes[0], VOLUME / 5, "down at once: {volumes:?}");
+    assert!(
+        volumes.len() >= 3 && volumes.windows(2).all(|w| w[0] < w[1]),
+        "up in steps: {volumes:?}"
+    );
+    until_volume(&fixture, "the volume back", VOLUME).await;
+    assert!(app.volume.settled().await);
+}
+
+/// A volume the user set while it was lowered is theirs: the end of the
+/// speech brings no fade, and nothing is put back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_volume_the_user_set_while_lowered_is_kept() {
+    let (fixture, mut app) = lowered_by_speech(Duration::from_secs(3)).await;
+    fixture.world.set_volume(PAIR, 50).await.unwrap();
+
+    after_the_speech(&fixture, &mut app).await;
+    assert!(app.volume.settled().await, "nothing more to set");
+    assert_eq!(volumes_set(&fixture), [VOLUME / 5]);
+    assert_eq!(fixture.world.volume(PAIR).await, Some(50));
+}
+
+/// The link going in the middle of the speech puts the volume back at once:
+/// no level would ever bring it back otherwise.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_link_going_puts_the_volume_back() {
+    let (fixture, mut app) = lowered_by_speech(Duration::from_secs(10)).await;
+
+    fixture.world.hang_up(PAIR).await.unwrap();
+    app.until("the link gone", |s| !s.is_connected(PAIR)).await;
+    until_volume(&fixture, "the volume put back", VOLUME).await;
+    assert_eq!(volumes_set(&fixture), [VOLUME / 5, VOLUME], "in one step");
+}
+
+/// The pair disconnecting in the middle of the speech takes its transport
+/// along, and bluetoothd keeps the lowered volume for the next one. Once
+/// the pair is back, linked and playing at that volume, it is put back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_volume_lowered_when_the_pair_went_is_put_back_when_it_returns() {
+    let (fixture, mut app) = lowered_by_speech(Duration::from_secs(10)).await;
+
+    app.detach(PAIR).await;
+    assert_eq!(fixture.world.volume(PAIR).await, None, "no transport");
+    assert!(!app.volume.settled().await, "waiting to put it back");
+    app.attach(PAIR).await;
+    fixture.world.set_playing(PAIR, true).await.unwrap();
+    until_volume(&fixture, "the volume put back", VOLUME).await;
+    // In one step when the look for the transport finds it; faded, when the
+    // level 09 of the next link's dump came with the transport there.
+    let volumes = volumes_set(&fixture);
+    assert_eq!(volumes.first(), Some(&(VOLUME / 5)), "{volumes:?}");
+    assert_eq!(volumes.last(), Some(&VOLUME), "{volumes:?}");
+    assert!(volumes.windows(2).all(|w| w[0] < w[1]), "{volumes:?}");
+    assert!(app.volume.settled().await);
+}
+
+/// The pair back at another volume than was lowered to: that is the user's,
+/// or another host's, and is left alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_back_at_another_volume_is_left_alone() {
+    let (fixture, mut app) = lowered_by_speech(Duration::from_secs(10)).await;
+
+    app.detach(PAIR).await;
+    fixture.world.set_volume(PAIR, 50).await.unwrap();
+    app.attach(PAIR).await;
+    fixture.world.set_playing(PAIR, true).await.unwrap();
+    let volume = &app.volume;
+    eventually("the volume left as it is", move || async move {
+        volume.settled().await
+    })
+    .await;
+    assert_eq!(volumes_set(&fixture), [VOLUME / 5]);
+    assert_eq!(fixture.world.volume(PAIR).await, Some(50));
+}
+
+/// With nothing playing to the pair - no A2DP transport at all - speech has
+/// nothing to lower, and the app sets nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn speech_with_nothing_playing_lowers_nothing() {
+    let (fixture, mut app) = aware_on_aap().await;
+    fixture
+        .world
+        .speak(PAIR, Duration::from_secs(3))
+        .await
+        .unwrap();
+    after_the_speech(&fixture, &mut app).await;
+    assert!(app.volume.settled().await, "nothing to set");
+    assert_eq!(volumes_set(&fixture), [] as [u16; 0]);
+    assert_eq!(fixture.world.volume(PAIR).await, None);
+}
+
+/// In a call speech is the call: nothing is lowered, and A2DP comes back
+/// after the call at the volume it had.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn speech_in_a_call_lowers_nothing() {
+    let (fixture, mut app) = aware_and_playing().await;
+    fixture.world.set_call(PAIR, true).await.unwrap();
+    fixture
+        .world
+        .speak(PAIR, Duration::from_secs(3))
+        .await
+        .unwrap();
+    after_the_speech(&fixture, &mut app).await;
+    assert!(app.volume.settled().await, "nothing to set");
+    assert_eq!(volumes_set(&fixture), [] as [u16; 0]);
+
+    fixture.world.set_call(PAIR, false).await.unwrap();
+    assert_eq!(fixture.world.volume(PAIR).await, Some(VOLUME));
+}
+
+/// The app quitting in the middle of the speech puts the volume back, as
+/// `main.rs` asks before the runtime goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quitting_puts_the_volume_back() {
+    let (fixture, app) = lowered_by_speech(Duration::from_secs(10)).await;
+
+    timeout(volume::RESTORE_LIMIT, app.volume.restore_all())
+        .await
+        .expect("put back in time");
+    assert_eq!(volumes_set(&fixture), [VOLUME / 5, VOLUME]);
+    until_volume(&fixture, "the volume put back", VOLUME).await;
 }
 
 /// Whether each pod is in an ear, left then right, while the pair's reading
