@@ -622,18 +622,72 @@ async fn a_key_that_arrives_on_connect_is_stored_and_makes_the_ble_reading_exact
     .await;
 
     // The next session, which loads the key from the keystore. The fake
-    // BlueZ still has the pods' devices from the first, so it hears them only
-    // once a payload or an address changes: up to half a rotation, while
-    // both pods advertise (#153).
+    // BlueZ still has the pods' devices from the first, which nothing
+    // announces again and whose payloads have not changed: the app reads
+    // them as it starts discovery, and takes each in by its next
+    // advertisement, as the first session's discovery ended (#153). That
+    // is an advertising interval; waiting for a payload or an address to
+    // change took up to half a rotation.
     drop(app);
     let mut app = fixture.start_app().await;
-    let snapshot = app
-        .until("an exact BLE reading in the next session", |s| {
+    let snapshot = timeout(
+        ADDRESS_ROTATION / 4,
+        app.until("an exact BLE reading in the next session", |s| {
             levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
-        })
-        .await;
+        }),
+    )
+    .await
+    .expect("an exact BLE reading in the next session, well before a rotation");
     assert_eq!(snapshot.known_keys, [PAIR]);
     assert!(snapshot.connected_macs.is_empty());
+}
+
+/// A pair BlueZ has heard already when the app starts discovery is heard at
+/// once, though nothing announces it to the app and its payload has not
+/// changed (#153). While another client discovers - GNOME Settings'
+/// Bluetooth panel, say - BlueZ has it with its strength, and the app takes
+/// it in from there. Once discovery has ended since, BlueZ keeps it without
+/// its strength, and the next app takes it in as it is heard again: its
+/// strength alone, the same payload.
+///
+/// The pair is none of the world's, so nothing advertises for it but the
+/// test: no rotation, no change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pair_bluez_has_heard_already_is_heard_at_once() {
+    let fixture = Fixture::new(&[]).await;
+    let pods = pods_at(PAIR, PAIR_LEVELS);
+    let keys = pods.keys().clone();
+    fixture
+        .keystore()
+        .save(&HashMap::from([(
+            PAIR,
+            PairKeys::new(keys.enc_key, Some(keys.irk)),
+        )]))
+        .unwrap();
+    let advert = pods.advertisement(PodSide::Right, Duration::ZERO);
+    let bluez = fixture.world.bluez();
+
+    let other = fixture.bus.connect().await.unwrap();
+    Scanner::with_connection(other.clone())
+        .start_discovery()
+        .await
+        .unwrap();
+    assert!(bluez.advertise(advert.address, &advert.data).await.unwrap());
+    let mut app = fixture.start_app().await;
+    app.until("the reading BlueZ heard before the app started", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+
+    drop(app);
+    drop(other);
+    eventually("discovery to end", || async { !bluez.is_discovering(HCI0) }).await;
+    let mut app = fixture.start_app().await;
+    assert!(bluez.advertise(advert.address, &advert.data).await.unwrap());
+    app.until("the reading heard again, its payload unchanged", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
 }
 
 /// An AAP link to one pair leaves a second pair's BLE reading alone: the
