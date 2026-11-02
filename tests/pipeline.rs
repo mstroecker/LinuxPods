@@ -1655,9 +1655,10 @@ async fn a_pod_taken_out_shows_from_the_link_alone() {
     .await;
 }
 
-/// The primary pod taken out moves the role to the other, as the #142
-/// capture has it: the ear report in the new order comes first, the primary
-/// pod packet 10 ms later. Left and right stay where they are throughout.
+/// The primary pod taken out moves the role to the other, as the #142 and
+/// #71 captures have it: the ear report in the new order comes first, and the
+/// fake's primary pod packet 10 ms later. Left and right stay where they are
+/// throughout.
 ///
 /// Every snapshot from the left pod going out on is watched, until a battery
 /// change made once the switch is over has arrived: it comes over the same

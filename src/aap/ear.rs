@@ -186,8 +186,9 @@ pub fn primary_packet(primary: PodSide, secondary: bool, switching: bool) -> [u8
 }
 
 /// How long an ear report taken for the first half of a role switch waits
-/// for the primary pod packet that completes it - see [`EarState`]. In the
-/// #142 captures the packet came 1-31 ms after the report.
+/// for the primary pod packet that completes it - see [`EarState`]. The
+/// packet came 0.2-31 ms after the report on a Pro 3 in the #142 captures, and
+/// 0.5-87 ms after it on a Pro 2 (USB-C) on 2026-11-02 (#71).
 pub const ROLE_SWITCH_HOLD: Duration = Duration::from_millis(250);
 
 /// Which pod is in an ear, as a link's ear reports and primary pod packets
@@ -202,12 +203,13 @@ pub const ROLE_SWITCH_HOLD: Duration = Duration::from_millis(250);
 /// # The role switch
 ///
 /// When the primary pod comes out, the pod still worn becomes primary about a
-/// second later, and the pair sends the ear report in the new order 1-31 ms
-/// before the primary pod packet that names the new primary. Read with the
-/// old primary in between, the report has the two pods swapped: the one just
-/// taken out in an ear, the one still worn out. Broadcast, that swap reached
-/// a watcher shaped like the window's render loop - which wakes at the first
-/// change, then pauses 100 ms - at nearly every switch in a pipeline test.
+/// second later, and the pair sends the ear report in the new order before
+/// the primary pod packet that names the new primary, by up to the gaps
+/// [`ROLE_SWITCH_HOLD`] records. Read with the old primary in between, the
+/// report has the two pods swapped: the one just taken out in an ear, the one
+/// still worn out. Broadcast, that swap reached a watcher shaped like the
+/// window's render loop - which wakes at the first change, then pauses
+/// 100 ms - at nearly every switch in a pipeline test.
 ///
 /// So a report that puts the primary pod in an ear and the secondary out,
 /// where the last one had the primary out and the secondary in, is held back

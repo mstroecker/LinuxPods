@@ -84,12 +84,14 @@ pub const STALE_REPORT: Duration = Duration::from_millis(330);
 const OPCODE: usize = 4;
 
 /// How long after the ear report in the new order a role switch's first
-/// primary pod packet comes. In the #142 captures the ear report came 1-31 ms
-/// before it, at every switch.
+/// primary pod packet comes. The ear report came before it at every switch:
+/// 0.2-31 ms on a Pro 3 in the #142 captures, 0.5-87 ms on a Pro 2 (USB-C) on
+/// 2026-11-02 (#71).
 pub const PRIMARY_AFTER_EAR: Duration = Duration::from_millis(10);
 
 /// How long after a role switch's first primary pod packet its second one
-/// comes: 30-90 ms in the #142 captures.
+/// comes: 31-88 ms on a Pro 3 in the #142 capture that shows it, 28-291 ms on
+/// a Pro 2 (USB-C) on 2026-11-02 (#71).
 pub const SECOND_PRIMARY: Duration = Duration::from_millis(60);
 
 // A stretch of speech with Conversation Awareness on, as the first of the
@@ -2659,8 +2661,10 @@ mod tests {
         assert!(pods.poll(ms(50)).is_empty(), "no change, no packet");
     }
 
-    /// The #142 captures' switch: the ear report in the new order first, then
-    /// the primary pod twice, the first marked as a switch.
+    /// The switch as the #142 and #71 captures have it: the ear report in the
+    /// new order first, then the primary pod twice, the first marked as a
+    /// switch. The hardware sends the battery between the two, the fake with
+    /// the ear report.
     #[test]
     fn a_role_switch_sends_the_ear_report_first() {
         let mut pods = subscribed();
