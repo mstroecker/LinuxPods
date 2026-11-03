@@ -64,11 +64,15 @@ carries a GTK object toward tokio.
 - new per-device state on the coordinator outside `Link` (goes with the link) or
   `Inner::ble` (cached). A separate map outlives the link: that is how a reconnect once
   showed the previous session's noise mode (1fa1632). The exceptions are
+  `Inner::firmware_versions`, which outlives the link on purpose (#161), set only
+  through `live_link` and replaced by the next link's report, never pruned;
   `Coordinator::queues`, changed only together with `Inner::links` under its write lock
-  and removed only past the client check in `drop_link`, and `Coordinator::resolved`
+  and removed only past the client check in `drop_link`; and `Coordinator::resolved`
   (`rpa::ResolvedAddresses`), which maps advertising addresses to pairs: bounded,
   expiring, only addresses that resolved, each with the IRK that resolved it and
-  re-checked against the stored IRK on every hit, taken alone and never across an await;
+  re-checked against the stored IRK on every hit, taken alone and never across an await.
+  Flag the firmware version dropped with the link or pruned with `BLE_CACHE_TTL`, and
+  anything else of AAP kept beside it;
 - a read loop or command that finds its link by MAC alone. Writes from a loop or a
   command go through `live_link` or an `Arc::ptr_eq` check on the client, or a stale
   session writes into its replacement. `Coordinator::command` routes by MAC on purpose;
@@ -102,7 +106,11 @@ carries a GTK object toward tokio.
 - sets or clears `Device1.Alias`; sends a rename over 127 bytes, empty or with a NUL, or
   cuts one by bytes instead of refusing it; waits for an answer after a rename instead of
   recording it;
-- reads a name from a `0x1D` without `02` at byte 6 and `04 00` at bytes 9-10.
+- reads a name or a version from a `0x1D` without `02` at byte 6 and `04 00` at bytes
+  9-10; reads, keeps or logs any field of it but the name (0) and the Marketing Version
+  (10), or puts a field's bytes in an error; lets one field's failure drop the other;
+  shows field 10 other than through `aap::info::FirmwareVersion`, or logs the reading
+  without field 10's value beside it.
 
 **Volume.** The volume lowered while the user speaks (`volume`, #150). Flag a diff that:
 - keeps a `MediaTransport1` path across calls, or finds the transport other than under
@@ -120,7 +128,7 @@ carries a GTK object toward tokio.
 - waits in a test on a sleep for a volume set that must not come, rather than on
   `VolumeControl::settled`.
 
-**Parsing and tests.** `aap::battery`, `aap::conversation`, `aap::ear`, `aap::keys`, `aap::name`, `aap::noise`, `aap::message`, `ble::parser`,
+**Parsing and tests.** `aap::battery`, `aap::conversation`, `aap::ear`, `aap::info`, `aap::keys`, `aap::name`, `aap::noise`, `aap::message`, `ble::parser`,
 `ble::decrypt` and `ble::rpa` take bytes and return values, and `volume::Ducking` and
 `volume::a2dp_in` take the time or BlueZ's objects as values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
@@ -142,6 +150,8 @@ accepted exception), or a captured advertisement committed together with the key
   a snapshot turning the switch outside `syncing_features`, which sends the setting
   back out.
 - The Name row sensitive when the device is not on AAP or the pods' name is not known.
+- The Firmware row made a command or activatable, gated on AAP rather than on a
+  version being known, or showing anything but "Unknown" while none is.
 - A resource path the UI loads that is missing from `assets/resources.gresource.xml`, or
   from the list in the `bundled_resources_resolve` test.
 - Placeholder UI the user has not built yet must stay visible but insensitive, with a

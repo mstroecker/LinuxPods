@@ -45,7 +45,8 @@ where the logs are. Only one world runs at a time.
 
 Each new pair starts with both pods in the open case: left 80%, right 70%, case 50%,
 Noise Cancellation, Conversation Awareness off, named as `AddPods` names it - a
-scenario's `AirPods Pro 3 (fake)` and `AirPods Pro 2 (fake)` - with no alias set. A
+scenario's `AirPods Pro 3 (fake)` and `AirPods Pro 2 (fake)` - with no alias set, on
+firmware `9A348` (field 10 of `0x1D`, `9442752`, the hardware's value). A
 scenario's pairs have their keys - IRK and ENC_KEY - saved in the
 app's keystore before it starts, as though each had connected once before. A pair added
 later with `AddPods` has no keys until it connects, so until then the app shows nothing of
@@ -160,6 +161,12 @@ nothing. ASCII stops at 127 characters, which `max-length` cuts a longer `SetTex
 and so is never over. The dialog's body changes once an alias is set: `world SetAlias
 ... Kitchen`, then `Disconnect` and `Connect`. A rename sent just after `world HangUp`
 fails, and the `toasts` overlay holds `Couldn’t rename the AirPods`.
+
+The Firmware row (#161): `firmware-version` reads `Unknown`, and `firmware` is
+insensitive, until the pair's first AAP link of the app's run - so in `in-range` until
+`world Connect` - then `9A348`, and it stays after `world Disconnect`. No `FakeWorld1`
+method changes the version; the pipeline tests update it with
+`Pods::set_marketing_version`.
 
 Conversation Awareness: `app SetActive conversation-awareness true` turns it on (`world
 Received` shows `0x28 01` sent); then `world Speak 00:00:5E:00:53:01 4000`, and the

@@ -1,6 +1,6 @@
 # AAP Rename
 
-The pods have a name of their own: the one they report to a host as it connects, and the one BlueZ shows as `Device1.Name`. Apple devices keep a name of their own for the pair (see the hardware run). This document describes the packet that changes it, where the pods report it, and what a rename does on this computer and on Apple devices. Read by `aap::name`; sent by `Command::Rename`, from the Name row of the device page's Info group.
+The pods have a name of their own: the one they report to a host as it connects, and the one BlueZ shows as `Device1.Name`. Apple devices keep a name of their own for the pair (see the hardware run). This document describes the packet that changes it, where the pods report it, and what a rename does on this computer and on Apple devices. The packet is built by `aap::name`, and the name read by `aap::info`; sent by `Command::Rename`, from the Name row of the device page's Info group.
 
 **Status:** the rename packet confirmed on AirPods Pro 3 on 2026-11-02 with `examples/rename_probe` on 67e0365 (#160), the name in `0x1D` seen on a Pro 3 and a Pro 2 (USB-C) in earlier runs' logs. That a Pro 2 (USB-C) takes a rename the same way is assumed, not checked, as for the rest of AAP. The app's rename has run against the fake world only.
 
@@ -33,20 +33,11 @@ Hex:     04 00 04 00 1A 00 01 LL 00 [UTF-8 name, LL bytes]
 
 ## Device information: `0x1D`
 
-```
-Offset:  0  1  2  3  4  5  6  7  8  9  10  11 ...
-Hex:     04 00 04 00 1D 00 02 LL LL 04 00  [name] 00 [model number] 00 [serial numbers] ...
-         ~~~~~~~~~~  ~~    ~~ ~~~~~ ~~~~~  ~~~~~~~~~
-         Header      Cmd       Len         NUL-terminated strings, the name first
-```
+The pods report their name as the first string of the device information packet they send at the start of every AAP connection. Its layout, its other fields - the firmware version, read for the Firmware row, and the serial numbers, never read - and where each name and value comes from are in [`aap-device-info.md`](aap-device-info.md).
 
-- Byte 6 was `02` in every one seen. A `0x1D` without it, or without `04 00` at bytes 9-10, is not read for a name (`aap::name::is_info_packet`), as a `0x09` report is not read for a mode unless byte 6 names the setting; it is redacted all the same, by its opcode.
-- Bytes 7-8 are a little-endian u16 length of what follows: `f8 00`, 248, in a 257-byte packet. The `04 00` after it counts.
-- Then NUL-terminated strings, the name first. The rest holds the model number and the serial numbers.
+Of it the name and the firmware version alone are read (`aap::info::parse_device_info`), each on its own, and only they are logged or printed: `aap::keys::redacted_hex` cuts a `0x1D` packet to its 11-byte preamble wherever a packet is logged. A `0x1D` without `02` at byte 6 and `04 00` at bytes 9-10 is not read at all. A name that is not UTF-8, as a name the pods cut inside a character would be, is not taken; the version in the same packet is.
 
-Only the name is read (`aap::name::parse_info_name`), and only the name is logged or printed: `aap::keys::redacted_hex` cuts a `0x1D` packet to its 11-byte preamble wherever a packet is logged - the read loop's debug and trace lines, the probes - as it cuts a key packet to its preamble. A name that is not UTF-8, as a name the pods cut inside a character would be, is not taken.
-
-The fake pods send `0x1D` laid out so, with made-up stand-ins for the model and serial numbers, and take a rename (`src/harness/pods.rs`).
+The fake pods send `0x1D` laid out as [`aap-device-info.md`](aap-device-info.md) describes, with made-up stand-ins for the fields between, and take a rename (`src/harness/pods.rs`).
 
 ## Hardware run (Pro 3, 2026-11-02)
 
