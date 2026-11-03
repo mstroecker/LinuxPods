@@ -13,8 +13,12 @@ nothing is uploaded by hand.
    # set version = "0.2.0" in Cargo.toml
    cargo check                              # updates Cargo.lock
    git cliff --unreleased --tag v0.2.0 --prepend CHANGELOG.md
+   # set the version in README.md's install commands (Installing → From a release)
    git commit -am "chore(release): v0.2.0"
    ```
+
+   The README goes into the tarball, so its install commands name the version
+   being released.
 
    `--prepend` adds only the new section, so earlier entries keep any edits.
    Edit the new one freely: the release notes are taken from this section of

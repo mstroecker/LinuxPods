@@ -2,6 +2,48 @@
 
 User-facing changes in each release.
 
+## [0.4.0] - 2026-11-03
+
+Conversation Awareness, with the volume lowered while you speak; low battery
+notifications; renaming the AirPods and showing their firmware version; and in-ear
+detection that follows the pods live over AAP.
+
+### Features
+
+- **Conversation Awareness:** a switch on the Control page turns it on and off. With it
+  on, the pods switch to Transparency while you speak, and the app lowers the pair's own
+  volume - its A2DP volume in BlueZ, which PipeWire follows - to a fifth at once, and
+  fades it back over 1.5 s once you stop, as an iPhone or a Mac does. Only while audio
+  plays to the pair; a volume you change meanwhile is left as you set it, and a lowered
+  volume is put back when the pair disconnects or the app quits (#150).
+- **Low battery notifications** at 20% and 5%, UPower's defaults, as GNOME gives none for
+  Bluetooth batteries (#126). One per pair, once per crossing rather than on every
+  reading, and only from a fresh reading. A switch in Preferences turns them off. They
+  need the launcher entry that `install.sh` or `make install` writes.
+- **Preferences kept across restarts:** the battery notifications switch is saved in
+  `~/.config/linuxpods/settings.json` (#146).
+- **Rename the AirPods** from the Name row in the new Info group at the bottom of the
+  Control page: the name the pods give every host, up to 127 bytes. The window shows it
+  at once; GNOME shows it once the pair connects again, unless you gave the pair a name
+  in GNOME Settings, and Apple devices keep the name they have (#160).
+- **Firmware version** in the Info group, as the iPhone shows it (such as `9A348`),
+  selectable for a bug report, and kept after the pair disconnects until the app quits
+  (#161).
+
+### Fixes
+
+- **In-ear detection:** while a pair was connected over AAP, in-ear came from its
+  advertisements, which change seldom while connected, so the icons lagged or missed
+  changes. It now comes from the pods' own reports over AAP, and stays right through a
+  role switch between the pods (#142).
+- **Connections confirmed with BlueZ:** any program on the system bus could signal a pair
+  connected or disconnected, and the app took it as given - it could reconnect AirPods
+  you had just disconnected, or withdraw their battery from GNOME Settings. The app now
+  asks BlueZ before acting on such a signal (#132).
+- **Less work while connected:** with a pod in the case, the other pod's advertisements,
+  a few a minute, woke the window, the tray and the app's other tasks although nothing on
+  show had changed (#152).
+
 ## [0.3.0] - 2026-10-29
 
 Pairs are now recognized over BLE by their own rotating addresses, AAP reconnects on its
