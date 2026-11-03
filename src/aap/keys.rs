@@ -6,8 +6,8 @@
 //! Then per key: [type] [unknown] [len] [unknown] [data...]
 
 use crate::KEY_LEN;
+use crate::aap::info;
 use crate::aap::message::{self, HEADER};
-use crate::aap::name;
 
 /// Identity-Resolving Key / Encryption Key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,14 +179,14 @@ pub const PREAMBLE_LEN: usize = 7;
 /// packet's keys and a device information packet's strings left out: of
 /// either, only its preamble goes out - a key packet's first
 /// [`PREAMBLE_LEN`] bytes, a device information packet's first
-/// [`name::INFO_PREAMBLE_LEN`] - and a note. The keys are the pair's IRK and
-/// ENC_KEY; the device information holds the pods' name, model number and
-/// serial numbers (#160). Any packet with either opcode is cut short, whether
-/// it parses or not.
+/// [`info::PREAMBLE_LEN`] - and a note. The keys are the pair's IRK and
+/// ENC_KEY; the device information holds the pods' name, model number,
+/// firmware version and serial numbers (#160, #161). Any packet with either
+/// opcode is cut short, whether it parses or not.
 pub fn redacted_hex(packet: &[u8]) -> String {
     let (keep, what) = match message::opcode(packet) {
         Some(KEY_MARKER) => (PREAMBLE_LEN, "keys"),
-        Some(name::INFO_OPCODE) => (name::INFO_PREAMBLE_LEN, "device information"),
+        Some(info::OPCODE) => (info::PREAMBLE_LEN, "device information"),
         _ => return crate::hex(packet),
     };
     let preamble = &packet[..packet.len().min(keep)];
@@ -271,16 +271,16 @@ mod tests {
     }
 
     /// The device information packet prints its preamble alone: past it
-    /// come the name, the model number and the serial numbers.
+    /// come the name, the model number, the serial numbers and the version.
     #[test]
     fn hex_leaves_the_device_information_out() {
-        let info = name::info_packet("Pods", &["A0000", "SERIAL0000"]);
+        let packet = info::info_packet("Pods", &["A0000", "SERIAL0000"]);
         assert_eq!(
-            redacted_hex(&info),
+            redacted_hex(&packet),
             "04 00 04 00 1d 00 02 18 00 04 00 (device information redacted)"
         );
         assert_eq!(
-            redacted_hex(&info[..6]),
+            redacted_hex(&packet[..6]),
             "04 00 04 00 1d 00 (device information redacted)"
         );
     }

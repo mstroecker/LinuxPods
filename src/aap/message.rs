@@ -6,14 +6,15 @@
 //! ear report (0x06), the primary pod (0x08), the 0x09 settings family - of
 //! which the noise control mode (sub-command 0x0D) and Conversation
 //! Awareness (0x28) are read - the proximity keys (0x31) and the speech
-//! level (0x4B), and the pods' name in the device information packet (0x1D).
-//! Each parser checks what is its own beyond that, as it always has.
+//! level (0x4B), and the pods' name and firmware version in the device
+//! information packet (0x1D). Each parser checks what is its own beyond
+//! that, as it always has.
 
 use crate::aap::battery::{self, BatteryInfo, BatteryParseError};
 use crate::aap::conversation::{self, ConversationParseError};
 use crate::aap::ear::{self, EarReport};
+use crate::aap::info::{self, DeviceInfo};
 use crate::aap::keys::{self, KeyParseError, ProximityKey};
-use crate::aap::name::{self, InfoParseError};
 use crate::aap::noise::{self, NoiseMode, NoiseParseError};
 use crate::ble::parser::PodSide;
 
@@ -55,10 +56,12 @@ pub enum Message {
     SpeechLevel(u8),
     /// The proximity keys, in answer to the key request.
     Keys(Vec<ProximityKey>),
-    /// The pods' own name, from the device information packet at the start
-    /// of every connection - the rest of that packet is not read. After a
-    /// rename, the next connection's carries the new name.
-    DeviceName(String),
+    /// The pods' own name and their firmware version, from the device
+    /// information packet at the start of every connection - the rest of
+    /// that packet is not read. After a rename, the next connection's
+    /// carries the new name. Each field is read on its own, and carries its
+    /// own error: the packet as a whole does not fail.
+    DeviceInfo(DeviceInfo),
     /// Anything else: another opcode, another setting of the 0x09 family, or
     /// one of the opcodes above too short to be what it names, as the parsers
     /// have always passed those over. `None` for a packet without the
@@ -77,8 +80,6 @@ pub enum DecodeError {
     ConversationAwareness(#[from] ConversationParseError),
     #[error("key packet rejected: {0}")]
     Keys(#[from] KeyParseError),
-    #[error("device information parse error: {0}")]
-    DeviceName(#[from] InfoParseError),
 }
 
 /// Reads one packet from the device.
@@ -104,9 +105,7 @@ pub fn decode(packet: &[u8]) -> Result<Message, DecodeError> {
             Message::SpeechLevel(conversation::read_level(packet))
         }
         keys::OPCODE if keys::is_key_packet(packet) => Message::Keys(keys::read(packet)?),
-        name::INFO_OPCODE if name::is_info_packet(packet) => {
-            Message::DeviceName(name::read_info_name(packet)?)
-        }
+        info::OPCODE if info::is_info_packet(packet) => Message::DeviceInfo(info::read(packet)),
         _ => Message::Unknown {
             opcode: Some(opcode),
         },
@@ -118,6 +117,7 @@ mod tests {
     use super::*;
     use crate::aap::battery::{Battery, Component, Status, battery_packet};
     use crate::aap::ear::{Place, ear_packet, primary_packet};
+    use crate::aap::info::{FieldError, FirmwareVersion};
     use crate::aap::keys::{KeyType, key_packet};
 
     fn left(level: u8) -> Battery {
@@ -204,13 +204,35 @@ mod tests {
     }
 
     #[test]
-    fn decodes_the_device_name() {
+    fn decodes_the_device_information() {
         assert_eq!(
-            decode(&name::info_packet(
-                "Someone’s Pods",
-                &["A0000", "SERIAL0000"]
-            )),
-            Ok(Message::DeviceName("Someone’s Pods".into()))
+            decode(&info::info_packet_with_version("Someone’s Pods", "9442752")),
+            Ok(Message::DeviceInfo(DeviceInfo {
+                name: Ok("Someone’s Pods".into()),
+                version: Ok(FirmwareVersion::from_raw(9_442_752)),
+            }))
+        );
+    }
+
+    /// A field that does not read is the field's error, not the packet's:
+    /// the other field comes through.
+    #[test]
+    fn a_device_information_field_that_does_not_read_leaves_the_other() {
+        let mut not_utf8 = info::info_packet_with_version("Pods", "9442752");
+        not_utf8[info::PREAMBLE_LEN] = 0xFF;
+        assert_eq!(
+            decode(&not_utf8),
+            Ok(Message::DeviceInfo(DeviceInfo {
+                name: Err(FieldError::NotUtf8),
+                version: Ok(FirmwareVersion::from_raw(9_442_752)),
+            }))
+        );
+        assert_eq!(
+            decode(&info::info_packet("Pods", &["A0000"])),
+            Ok(Message::DeviceInfo(DeviceInfo {
+                name: Ok("Pods".into()),
+                version: Err(FieldError::Missing),
+            }))
         );
     }
 
@@ -245,13 +267,6 @@ mod tests {
             decode(&no_keys),
             Err(DecodeError::Keys(KeyParseError::NoKeys))
         );
-
-        let mut not_utf8 = name::info_packet("Pods", &[]);
-        not_utf8[name::INFO_PREAMBLE_LEN] = 0xFF;
-        assert_eq!(
-            decode(&not_utf8),
-            Err(DecodeError::DeviceName(InfoParseError::NotUtf8))
-        );
     }
 
     /// What the app has no use for is passed over, by its opcode: the startup
@@ -262,9 +277,9 @@ mod tests {
     fn other_packets_are_unknown() {
         let mut other_4b = conversation::level_packet(0x09);
         other_4b[8] = 0x02;
-        let mut other_1d = name::info_packet("Pods", &["A0000"]);
+        let mut other_1d = info::info_packet("Pods", &["A0000"]);
         other_1d[6] = 0x01;
-        let mut other_1d_start = name::info_packet("Pods", &["A0000"]);
+        let mut other_1d_start = info::info_packet("Pods", &["A0000"]);
         other_1d_start[9] = 0x05;
         let others: [(&[u8], u8); 6] = [
             (&noise::settings_report(0x1F, &[0x50, 0x50]), 0x09),
@@ -300,7 +315,7 @@ mod tests {
             &[0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00],
             &[0x04, 0x00, 0x04, 0x00, 0x08, 0x00],
             &conversation::level_packet(0x01)[..9],
-            &name::info_packet("Pods", &[])[..name::INFO_PREAMBLE_LEN],
+            &info::info_packet("Pods", &[])[..info::PREAMBLE_LEN],
         ];
         for packet in short {
             assert_eq!(

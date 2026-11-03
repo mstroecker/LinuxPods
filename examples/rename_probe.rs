@@ -48,7 +48,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
-use linuxpods::aap::name::{info_name_bytes, is_info_packet, parse_info_name, rename_packet};
+use linuxpods::aap::info::{info_name_bytes, is_info_packet, parse_device_info};
+use linuxpods::aap::name::rename_packet;
 use linuxpods::aap::{Client, keys, message};
 use linuxpods::hex;
 use tokio::time::Instant;
@@ -224,11 +225,12 @@ async fn print_bluez_names(mac: Address, when: &str) {
     }
 }
 
-/// A packet as it is printed: a device information packet as its name only,
-/// a key packet as its preamble only, anything else whole.
+/// A packet as it is printed: a device information packet as its name only -
+/// a 0x1D shaped otherwise as its preamble only, as a key packet - anything
+/// else whole.
 fn shown(packet: &[u8]) -> String {
-    if is_info_packet(packet) {
-        return match parse_info_name(packet) {
+    if let Ok(info) = parse_device_info(packet) {
+        return match info.name {
             Ok(name) => format!("device information, name {name:?}"),
             Err(e) => format!("device information, no name read: {e}"),
         };

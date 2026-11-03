@@ -31,6 +31,7 @@ use bluer::Address;
 use crate::aap::battery::{Battery, Component, Status, battery_packet};
 use crate::aap::conversation;
 use crate::aap::ear::{EarReport, Place, ear_packet, primary_packet};
+use crate::aap::info;
 use crate::aap::keys::{KeyType, ProximityKey, key_packet};
 use crate::aap::message::HEADER;
 use crate::aap::name;
@@ -233,7 +234,7 @@ impl Dumped {
                 conversation::set_packet(conversation_awareness).to_vec()
             }
             Self::Setting(sub_cmd, value) => noise::settings_report(sub_cmd, value).to_vec(),
-            Self::DeviceInfo => name::info_packet(name, &INFO_REST),
+            Self::DeviceInfo => info::info_packet(name, &INFO_REST),
             Self::Other(opcode) => {
                 let mut packet = header(opcode);
                 packet.extend_from_slice(&[0x00, 0x00]);
@@ -2511,7 +2512,7 @@ mod tests {
     /// The name in a startup dump, as the app reads it.
     fn dumped_name(dump: &[Vec<u8>]) -> Vec<Vec<u8>> {
         dump.iter()
-            .filter_map(|p| name::info_name_bytes(p).map(<[u8]>::to_vec))
+            .filter_map(|p| info::info_name_bytes(p).map(<[u8]>::to_vec))
             .collect()
     }
 
@@ -2524,7 +2525,7 @@ mod tests {
         let dump = dump_of(&mut pods, ms(0));
         assert_eq!(
             dump.iter()
-                .filter_map(|p| name::parse_info_name(p).ok())
+                .filter_map(|p| info::parse_device_info(p).ok()?.name.ok())
                 .collect::<Vec<_>>(),
             [DEFAULT_NAME]
         );
