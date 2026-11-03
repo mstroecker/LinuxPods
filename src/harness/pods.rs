@@ -139,9 +139,11 @@ pub const DEFAULT_NAME: &str = "AirPods Pro";
 /// first 127 bytes, silently, in the name run of #160. The real value.
 pub const NAME_KEPT: usize = 127;
 
-/// What the device information packet carries after the name, made up: the
-/// hardware's holds the model number and serial numbers.
-const INFO_REST: [&str; 3] = ["A0000", "FAKESERIAL0", "FAKESERIAL1"];
+/// The Marketing Version the pods send in the device information packet,
+/// field 10, until [`Pods::set_marketing_version`] changes it: a Pro 3's
+/// and a Pro 2 (USB-C)'s on 2026-11-02, which the iPhone showed as `9A348`
+/// (#161). The real value; the fields around it are made up.
+pub const MARKETING_VERSION: u32 = 9_442_752;
 
 /// The answer to the handshake, all 18 bytes, as a Pro 3 sent it in every #71
 /// capture. The app, like LibrePods, matches the first four.
@@ -217,7 +219,8 @@ enum Dumped {
     /// Another setting of the 0x09 family: its sub-command and value.
     Setting(u8, &'static [u8]),
     /// 0x1D, the device information: the pair's name, then made-up stand-ins
-    /// for the model number and the serial numbers, laid out as a Pro 3's.
+    /// for the model number, the serial numbers and the rest, and the
+    /// pair's Marketing Version in field 10, laid out as a Pro 3's.
     DeviceInfo,
     /// A packet nothing reads, by its opcode: a short stand-in for one that
     /// ran to hundreds of bytes on the hardware.
@@ -225,7 +228,13 @@ enum Dumped {
 }
 
 impl Dumped {
-    fn packet(self, mode: NoiseMode, conversation_awareness: bool, name: &[u8]) -> Vec<u8> {
+    fn packet(
+        self,
+        mode: NoiseMode,
+        conversation_awareness: bool,
+        name: &[u8],
+        marketing_version: u32,
+    ) -> Vec<u8> {
         match self {
             // The mode packet serves both directions: this is the report.
             Self::Mode => noise::set_packet(mode).to_vec(),
@@ -234,7 +243,9 @@ impl Dumped {
                 conversation::set_packet(conversation_awareness).to_vec()
             }
             Self::Setting(sub_cmd, value) => noise::settings_report(sub_cmd, value).to_vec(),
-            Self::DeviceInfo => info::info_packet(name, &INFO_REST),
+            Self::DeviceInfo => {
+                info::info_packet_with_version(name, &marketing_version.to_string())
+            }
             Self::Other(opcode) => {
                 let mut packet = header(opcode);
                 packet.extend_from_slice(&[0x00, 0x00]);
@@ -332,14 +343,20 @@ fn report_packets(
 }
 
 /// The second 0x0C, naming this host, and the startup dump after it, with
-/// `mode`, the Conversation Awareness setting and the pair's name in it - and
-/// with the setting on, level 09 after it, unasked, as in the #150 run.
-fn startup_dump(mode: NoiseMode, conversation_awareness: bool, name: &[u8]) -> Vec<Vec<u8>> {
+/// `mode`, the Conversation Awareness setting, the pair's name and its
+/// Marketing Version in it - and with the setting on, level 09 after it,
+/// unasked, as in the #150 run.
+fn startup_dump(
+    mode: NoiseMode,
+    conversation_awareness: bool,
+    name: &[u8],
+    marketing_version: u32,
+) -> Vec<Vec<u8>> {
     std::iter::once(in_use_packet(THIS_HOST, true))
         .chain(
             STARTUP_DUMP
                 .iter()
-                .map(|dumped| dumped.packet(mode, conversation_awareness, name)),
+                .map(|dumped| dumped.packet(mode, conversation_awareness, name, marketing_version)),
         )
         .chain(conversation_awareness.then(|| conversation::level_packet(LEVEL_IDLE).to_vec()))
         .collect()
@@ -655,6 +672,9 @@ pub struct Pods {
     /// The pair's own name, as the pods hold it: bytes, as a rename cut at
     /// [`NAME_KEPT`] may leave a character half there.
     name: Vec<u8>,
+    /// The firmware's Marketing Version, as the device information carries
+    /// it in field 10.
+    marketing_version: u32,
     /// A stretch of speech, while one is under way.
     speaking: Option<Speaking>,
     keys: Keys,
@@ -706,6 +726,7 @@ impl Pods {
             allow_off: false,
             conversation_awareness: false,
             name: DEFAULT_NAME.as_bytes().to_vec(),
+            marketing_version: MARKETING_VERSION,
             speaking: None,
             keys,
             connected: false,
@@ -754,6 +775,11 @@ impl Pods {
     /// The pair's own name, as the pods hold it and send it in 0x1D.
     pub fn name(&self) -> &[u8] {
         &self.name
+    }
+
+    /// The firmware's Marketing Version, as the pods send it in 0x1D.
+    pub fn marketing_version(&self) -> u32 {
+        self.marketing_version
     }
 
     /// Whether a stretch of speech is under way at `now` - see
@@ -886,6 +912,13 @@ impl Pods {
     /// connection's startup dump carries it.
     pub fn set_name(&mut self, name: &str) {
         self.name = name.as_bytes().to_vec();
+    }
+
+    /// Updates the firmware to the one whose Marketing Version is `raw`, as
+    /// an update through a phone does. Over AAP nothing reports it; the next
+    /// connection's startup dump carries it.
+    pub fn set_marketing_version(&mut self, raw: u32) {
+        self.marketing_version = raw;
     }
 
     /// The user speaks at `now` for `length`, and the pods hear it. With
@@ -1322,7 +1355,12 @@ impl Pods {
                 }
                 Due::Dump => {
                     let mode = self.noise_mode;
-                    let dump = startup_dump(mode, self.conversation_awareness, &self.name);
+                    let dump = startup_dump(
+                        mode,
+                        self.conversation_awareness,
+                        &self.name,
+                        self.marketing_version,
+                    );
                     actions.extend(dump.into_iter().map(Action::Send));
                     session.mode = Some(mode);
                 }
@@ -2537,6 +2575,29 @@ mod tests {
         pods.aap_closed();
         let dump = dump_of(&mut pods, ms(20_000));
         assert_eq!(dumped_name(&dump), [b"Test Pods".to_vec()]);
+    }
+
+    /// The firmware version in a startup dump, as the app reads it.
+    fn dumped_version(dump: &[Vec<u8>]) -> Vec<String> {
+        dump.iter()
+            .filter_map(|p| info::parse_device_info(p).ok()?.version.ok())
+            .map(|version| version.to_string())
+            .collect()
+    }
+
+    /// The Marketing Version is in field 10 of the startup dump's 0x1D,
+    /// as a Pro 3's was, and the next connection's after an update carries
+    /// the new one.
+    #[test]
+    fn the_dump_carries_the_firmware_version() {
+        let mut pods = Pods::new(PRO_3, MAC);
+        assert_eq!(dumped_version(&dump_of(&mut pods, ms(0))), ["9A348"]);
+
+        pods.set_marketing_version(0x00A0_0010);
+        assert!(pods.poll(ms(10_000)).is_empty(), "nothing reports it");
+        pods.aap_closed();
+        let dump = dump_of(&mut pods, ms(20_000));
+        assert_eq!(dumped_version(&dump), ["10A1"]);
     }
 
     /// Past 127 bytes the pods keep the first 127, as a Pro 3 did in the
