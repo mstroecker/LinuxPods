@@ -85,7 +85,9 @@ pub struct Transport {
     /// Its `Volume`, 0 to [`MAX_VOLUME`].
     pub volume: u16,
     /// Whether a stretch of speech may lower it: it is `active`, streaming
-    /// and acquired. Not in a call, as far as is assumed - see the doc.
+    /// and acquired. Not in a call, as far as is assumed - see the doc. What
+    /// `crate::media` takes as audio playing to the pair, too, through
+    /// [`a2dp_active_in`].
     pub playing: bool,
 }
 
@@ -458,11 +460,18 @@ pub struct A2dp {
     pub transport: Transport,
 }
 
-/// The A2DP transport of the pair at `mac` among `objects`, BlueZ's, if it
-/// has one with a volume: under the pair's device path, its `Device` that
-/// device, its `UUID` A2DP's audio source. One that is `active` is taken
-/// before one that is not.
-pub fn a2dp_in(objects: &ManagedObjects, mac: Address) -> Option<A2dp> {
+/// A transport of the pair's A2DP among BlueZ's objects: where it is, its
+/// `Volume` if it has one, and whether it is `active`.
+struct Found {
+    path: OwnedObjectPath,
+    volume: Option<u16>,
+    active: bool,
+}
+
+/// The A2DP transports of the pair at `mac` among `objects`, BlueZ's: under
+/// the pair's device path, their `Device` that device, their `UUID` A2DP's
+/// audio source.
+fn a2dp_transports(objects: &ManagedObjects, mac: Address) -> Vec<Found> {
     let devices: Vec<&str> = objects
         .iter()
         .filter(|(_, interfaces)| {
@@ -475,7 +484,7 @@ pub fn a2dp_in(objects: &ManagedObjects, mac: Address) -> Option<A2dp> {
         })
         .map(|(path, _)| path.as_str())
         .collect();
-    let mut a2dp: Vec<A2dp> = objects
+    objects
         .iter()
         .filter_map(|(path, interfaces)| {
             let props = interfaces.get(TRANSPORT_INTERFACE)?;
@@ -495,14 +504,36 @@ pub fn a2dp_in(objects: &ManagedObjects, mac: Address) -> Option<A2dp> {
             {
                 return None;
             }
-            let volume = u16::try_from(props.get("Volume")?.clone()).ok()?;
-            let playing = props
+            let volume = props
+                .get("Volume")
+                .and_then(|volume| u16::try_from(volume.clone()).ok());
+            let active = props
                 .get("State")
                 .and_then(|state| String::try_from(state.clone()).ok())
                 .is_some_and(|state| state == "active");
-            Some(A2dp {
+            Some(Found {
                 path: path.clone(),
-                transport: Transport { volume, playing },
+                volume,
+                active,
+            })
+        })
+        .collect()
+}
+
+/// The A2DP transport of the pair at `mac` among `objects`, BlueZ's, if it
+/// has one with a volume: under the pair's device path, its `Device` that
+/// device, its `UUID` A2DP's audio source. One that is `active` is taken
+/// before one that is not.
+pub fn a2dp_in(objects: &ManagedObjects, mac: Address) -> Option<A2dp> {
+    let mut a2dp: Vec<A2dp> = a2dp_transports(objects, mac)
+        .into_iter()
+        .filter_map(|found| {
+            Some(A2dp {
+                path: found.path,
+                transport: Transport {
+                    volume: found.volume?,
+                    playing: found.active,
+                },
             })
         })
         .collect();
@@ -514,6 +545,15 @@ pub fn a2dp_in(objects: &ManagedObjects, mac: Address) -> Option<A2dp> {
     a2dp.into_iter().next()
 }
 
+/// Whether an A2DP transport of the pair at `mac` among `objects`, BlueZ's,
+/// is `active` - found as [`a2dp_in`] finds one, with a `Volume` or not:
+/// audio plays to the pair, for `crate::media`, which sets no volume.
+pub fn a2dp_active_in(objects: &ManagedObjects, mac: Address) -> bool {
+    a2dp_transports(objects, mac)
+        .iter()
+        .any(|found| found.active)
+}
+
 /// `call`, unless it takes longer than [`CALL_LIMIT`].
 async fn bounded<T>(what: &str, call: impl Future<Output = Result<T>>) -> Result<T> {
     tokio::time::timeout(CALL_LIMIT, call)
@@ -521,23 +561,28 @@ async fn bounded<T>(what: &str, call: impl Future<Output = Result<T>>) -> Result
         .with_context(|| format!("BlueZ did not answer within {CALL_LIMIT:?} {what}"))?
 }
 
+/// BlueZ's objects, read on `conn` now without auto-start. Unbounded: the
+/// caller bounds it.
+pub async fn bluez_objects(conn: &Connection) -> Result<ManagedObjects> {
+    let manager = zbus::fdo::ObjectManagerProxy::builder(conn)
+        .destination(BLUEZ_SERVICE)?
+        .path("/")?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    let objects: Option<ManagedObjects> = manager
+        .inner()
+        .call_with_flags("GetManagedObjects", MethodFlags::NoAutoStart.into(), &())
+        .await
+        .context("failed to read BlueZ's objects")?;
+    objects.context("BlueZ sent no reply")
+}
+
 /// The A2DP transport of the pair at `mac`, read from BlueZ on `conn` now.
 /// `None` when it has none.
 pub async fn find_a2dp(conn: &Connection, mac: Address) -> Result<Option<A2dp>> {
     bounded("reading its objects", async {
-        let manager = zbus::fdo::ObjectManagerProxy::builder(conn)
-            .destination(BLUEZ_SERVICE)?
-            .path("/")?
-            .cache_properties(CacheProperties::No)
-            .build()
-            .await?;
-        let objects: Option<ManagedObjects> = manager
-            .inner()
-            .call_with_flags("GetManagedObjects", MethodFlags::NoAutoStart.into(), &())
-            .await
-            .context("failed to read BlueZ's objects")?;
-        let objects = objects.context("BlueZ sent no reply")?;
-        Ok(a2dp_in(&objects, mac))
+        Ok(a2dp_in(&bluez_objects(conn).await?, mac))
     })
     .await
 }
@@ -568,7 +613,8 @@ pub async fn set_volume(conn: &Connection, path: &OwnedObjectPath, volume: u16) 
 
 /// Where [`Volume`] reaches BlueZ: a builder for the system bus, or under
 /// the harness a private one's. Built when first needed, and again after a
-/// connection failed.
+/// connection failed. `crate::media::Media` takes one for BlueZ's bus too,
+/// and another for the session bus, where the media players are.
 pub type Connect = Box<dyn FnMut() -> zbus::Result<zbus::connection::Builder<'static>> + Send>;
 
 /// What lowers the volume while the user speaks, for every pair with a
@@ -1357,6 +1403,26 @@ mod tests {
             );
             assert_eq!(found.unwrap().transport, idle(64).unwrap(), "{state}");
         }
+    }
+
+    /// Pausing the media needs no volume: an active transport without one
+    /// is audio playing to the pair all the same, and an idle one, another
+    /// pair's or a sink is not.
+    #[test]
+    fn an_active_transport_needs_no_volume_to_be_playing() {
+        let active = |transports: &[(&str, Address, &str, &str, Option<u16>)]| {
+            a2dp_active_in(&objects(transports), PAIR)
+        };
+        assert!(active(&[("/sep1/fd0", PAIR, SOURCE, "active", None)]));
+        assert!(active(&[("/sep1/fd0", PAIR, SOURCE, "active", Some(64))]));
+        assert!(active(&[
+            ("/sep1/fd0", PAIR, SOURCE, "idle", Some(30)),
+            ("/sep2/fd1", PAIR, SOURCE, "active", None),
+        ]));
+        assert!(!active(&[]));
+        assert!(!active(&[("/sep1/fd0", PAIR, SOURCE, "idle", None)]));
+        assert!(!active(&[("/sep1/fd0", OTHER, SOURCE, "active", None)]));
+        assert!(!active(&[("/sep1/fd0", PAIR, SINK, "active", None)]));
     }
 
     /// Of two A2DP transports, the active one.
