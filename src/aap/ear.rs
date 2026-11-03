@@ -82,6 +82,11 @@ impl Place {
             Self::Unknown(_) => None,
         }
     }
+
+    /// Whether the pod is in the case, its lid open or closed.
+    pub fn in_case(self) -> bool {
+        matches!(self, Self::InCase | Self::InClosedCase)
+    }
 }
 
 /// An ear report: both pods' places, the primary pod's first.
@@ -291,16 +296,22 @@ impl EarState {
         self.held.map(|(_, at)| at + self.hold)
     }
 
+    /// Where each pod is, left then right: `None` until both an ear report
+    /// and a primary pod are known.
+    pub fn places(&self) -> Option<(Place, Place)> {
+        let (report, primary) = (self.report?, self.primary?);
+        Some(match primary {
+            PodSide::Left => (report.primary, report.secondary),
+            PodSide::Right => (report.secondary, report.primary),
+        })
+    }
+
     /// Whether each pod is in an ear, left then right: `None` until both an
     /// ear report and a primary pod are known, and `None` for a pod whose
     /// place is unknown.
     pub fn in_ear(&self) -> Option<(Option<bool>, Option<bool>)> {
-        let (report, primary) = (self.report?, self.primary?);
-        let (primary_in, secondary_in) = (report.primary.in_ear(), report.secondary.in_ear());
-        Some(match primary {
-            PodSide::Left => (primary_in, secondary_in),
-            PodSide::Right => (secondary_in, primary_in),
-        })
+        let (left, right) = self.places()?;
+        Some((left.in_ear(), right.in_ear()))
     }
 
     /// Whether `report` swaps the pods the last one gave: the primary out
@@ -497,6 +508,24 @@ mod tests {
             ear_state(PodSide::Right, 0x02, 0x03).in_ear(),
             Some((Some(false), Some(false)))
         );
+        assert_eq!(
+            ear_state(PodSide::Right, 0x02, 0x03).places(),
+            Some((Place::InClosedCase, Place::InCase))
+        );
+        assert_eq!(
+            ear_state(PodSide::Left, 0x00, 0x01).places(),
+            Some((Place::InEar, Place::Out))
+        );
+    }
+
+    /// In the case is the lid open or closed; out of the ear and out of the
+    /// case, or a place unknown, is not.
+    #[test]
+    fn in_the_case_is_either_case_place() {
+        for (byte, in_case) in [(0x00, false), (0x01, false), (0x02, true), (0x03, true)] {
+            assert_eq!(Place::from_byte(byte).in_case(), in_case, "{byte:02x}");
+        }
+        assert!(!Place::Unknown(0x04).in_case());
     }
 
     /// Neither is any use alone: an ear report without the primary pod could
