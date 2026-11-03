@@ -50,6 +50,8 @@
 //! | `Connect(s mac)` | Connects them to the host, which the app takes up; their services are resolved 4 s later, as bluetoothd signals - see [`FakeBluez::set_connected`] |
 //! | `Disconnect(s mac)` | Disconnects them, which takes the AAP connection along, after BlueZ's `Connected=false` |
 //! | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case`; a level above 100 is unknown |
+//! | `SetInEar(s mac, s pod, b in_ear)` | `left` or `right` into an ear, out of the case, or out of the ear; over AAP an ear report follows - see [`Pods::set_in_ear`] |
+//! | `SetInCase(s mac, s pod, b in_case)` | `left` or `right` into the case, out of the ear, or out of the case - see [`Pods::set_in_case`] |
 //! | `SetLid(s mac, b open)` | Opens or closes the case; closed on both pods, it drops their link. The pods in the closed case stop advertising 4 s later, and come back under new addresses once it opens, the right pod 1 s later, the left 5.5 s |
 //! | `Repair(s mac)` | Re-pairs: new keys, sent at the next key request |
 //! | `HangUp(s mac)` | Closes the AAP connection from the AirPods' end; the Bluetooth link stays |
@@ -772,6 +774,16 @@ fn parse_mac(mac: &str) -> fdo::Result<Address> {
         .map_err(|_| fdo::Error::InvalidArgs(format!("not a MAC: {mac:?}")))
 }
 
+fn parse_pod(pod: &str) -> fdo::Result<PodSide> {
+    match pod {
+        "left" => Ok(PodSide::Left),
+        "right" => Ok(PodSide::Right),
+        _ => Err(fdo::Error::InvalidArgs(format!(
+            "no pod {pod:?}: left or right"
+        ))),
+    }
+}
+
 fn parse_part(part: &str) -> Result<Part, String> {
     match part {
         "left" => Ok(Part::Left),
@@ -880,6 +892,22 @@ impl FakeWorld1 {
         let level = (level <= 100).then_some(level);
         self.world
             .with_pods(mac, |pods| pods.set_battery(part, level))
+            .await
+            .map_err(failed)
+    }
+
+    async fn set_in_ear(&self, mac: &str, pod: &str, in_ear: bool) -> fdo::Result<()> {
+        let (mac, pod) = (parse_mac(mac)?, parse_pod(pod)?);
+        self.world
+            .with_pods(mac, |pods| pods.set_in_ear(pod, in_ear))
+            .await
+            .map_err(failed)
+    }
+
+    async fn set_in_case(&self, mac: &str, pod: &str, in_case: bool) -> fdo::Result<()> {
+        let (mac, pod) = (parse_mac(mac)?, parse_pod(pod)?);
+        self.world
+            .with_pods(mac, |pods| pods.set_in_case(pod, in_case))
             .await
             .map_err(failed)
     }
@@ -1019,6 +1047,7 @@ mod tests {
     use zbus::{MatchRule, MessageStream};
 
     use super::*;
+    use crate::aap::ear::Place;
     use crate::aap::noise::{self, NoiseMode};
     use crate::aap::{Client, parse_battery_packet};
     use crate::ble::decrypt::decrypt_for_device;
@@ -1484,6 +1513,21 @@ mod tests {
             .unwrap();
         control.call_method("Repair", &(&other,)).await.unwrap();
         control
+            .call_method("SetInEar", &(&other, "left", true))
+            .await
+            .unwrap();
+        control
+            .call_method("SetInCase", &(&other, "right", false))
+            .await
+            .unwrap();
+        let places = world
+            .with_pods(OTHER, |pods| {
+                (pods.place_of(PodSide::Left), pods.place_of(PodSide::Right))
+            })
+            .await
+            .unwrap();
+        assert_eq!(places, (Place::InEar, Place::Out));
+        control
             .call_method("SetConversationAwareness", &(&other, true))
             .await
             .unwrap();
@@ -1592,6 +1636,12 @@ mod tests {
             ),
             (
                 control.call_method("Connect", &("not a mac",)).await,
+                "org.freedesktop.DBus.Error.InvalidArgs",
+            ),
+            (
+                control
+                    .call_method("SetInEar", &(&other, "middle", true))
+                    .await,
                 "org.freedesktop.DBus.Error.InvalidArgs",
             ),
             (

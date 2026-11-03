@@ -1,14 +1,16 @@
 #!/bin/sh
 # Runs LinuxPods against the fake world of the test harness (#72): fakepods
 # serves a fake BlueZ and fake AirPods on a private bus that stands in for the
-# system bus, and the app runs on a second private bus as its session bus. The
-# real bluetoothd, a running LinuxPods and its tray never see any of it.
+# system bus, and the app runs on a second private bus as its session bus,
+# with a fake media player beside it. The real bluetoothd, a running LinuxPods,
+# its tray and the user's players never see any of it.
 #
 #   scripts/fake-world.sh start [SCENARIO]       in-range (default), connected,
 #                                                two-pairs, flood or empty
 #   scripts/fake-world.sh stop
 #   scripts/fake-world.sh world METHOD [ARG...]  calls FakeWorld1
 #   scripts/fake-world.sh app METHOD [ARG...]    calls the app's Automation1
+#   scripts/fake-world.sh player METHOD [ARG...] calls the fake player's FakePlayer1
 #   scripts/fake-world.sh tree                   prints Automation1.Tree's JSON
 #
 # HEADLESS=1 puts the app on its own Broadway display, to watch in a browser,
@@ -22,7 +24,7 @@
 # and `env`, which holds the bus addresses for gdbus and busctl:
 #   . "$XDG_RUNTIME_DIR/linuxpods-harness/world/env"
 #   gdbus call --address "$SYSTEM_BUS" ...   # fake BlueZ, FakeWorld1
-#   gdbus call --address "$SESSION_BUS" ...  # the app, Automation1
+#   gdbus call --address "$SESSION_BUS" ...  # the app, Automation1, the player
 # The paths stay short: a Unix socket path over 108 bytes cannot be bound.
 set -eu
 
@@ -38,6 +40,9 @@ AUTOMATION=io.github.mstroecker.LinuxPods.Automation1
 WORLD_NAME=io.github.mstroecker.LinuxPods.FakeWorld
 WORLD_PATH=/io/github/mstroecker/LinuxPods/FakeWorld
 WORLD=io.github.mstroecker.LinuxPods.FakeWorld1
+PLAYER_NAME=org.mpris.MediaPlayer2.fakeplayer
+PLAYER_PATH=/org/mpris/MediaPlayer2
+PLAYER=io.github.mstroecker.LinuxPods.FakePlayer1
 
 die() {
     echo "fake-world: $*" >&2
@@ -137,7 +142,8 @@ start() {
     spawn fakepods "$run/log/fakepods.log" env $common \
         RUST_LOG="${RUST_LOG:-linuxpods=debug,fakepods=debug}" \
         "$bin/fakepods" --address "$SYSTEM_BUS" --socket-dir "$run/aap" \
-        --scenario "$scenario" --adapter "$adapter" --keystore "$run/home/data/linuxpods"
+        --scenario "$scenario" --adapter "$adapter" --keystore "$run/home/data/linuxpods" \
+        --player-address "$SESSION_BUS"
     fakepods=$(tail -n 1 "$pids" | cut -d' ' -f1)
     i=0
     until has_name "$SYSTEM_BUS" "$WORLD_NAME"; do
@@ -194,6 +200,7 @@ start() {
     echo "               fake BlueZ with /org/bluez/$adapter, and $WORLD_NAME at $WORLD_PATH"
     echo "  session bus: $SESSION_BUS"
     echo "               the app, and Automation1 at $AUTOMATION_PATH"
+    echo "               $PLAYER_NAME, a fake media player, Stopped"
     [ -z "$display" ] || echo "  watch:       http://127.0.0.1:$port"
     echo "  logs:        $run/log/"
     echo "  addresses:   . $run/env"
@@ -247,6 +254,13 @@ call_world() {
         --method "$WORLD.$method" "$@"
 }
 
+call_player() {
+    method=$1
+    shift
+    gdbus call --address "$SESSION_BUS" --dest "$PLAYER_NAME" --object-path "$PLAYER_PATH" \
+        --method "$PLAYER.$method" "$@"
+}
+
 call_app() {
     method=$1
     shift
@@ -272,6 +286,12 @@ case "${1:-}" in
         load_env
         call_app "$@"
         ;;
+    player)
+        [ $# -ge 2 ] || die "usage: $0 player METHOD [ARG...]"
+        shift
+        load_env
+        call_player "$@"
+        ;;
     tree)
         # gdbus prints the JSON escaped inside GVariant text; busctl's JSON
         # output carries it as a plain string.
@@ -280,5 +300,5 @@ case "${1:-}" in
             "$APP_NAME" "$AUTOMATION_PATH" "$AUTOMATION" Tree |
             python3 -I -c 'import json, sys; print(json.load(sys.stdin)["data"][0])'
         ;;
-    *) die "usage: $0 start [SCENARIO] | stop | world METHOD [ARG...] | app METHOD [ARG...] | tree" ;;
+    *) die "usage: $0 start [SCENARIO] | stop | world METHOD [ARG...] | app METHOD [ARG...] | player METHOD [ARG...] | tree" ;;
 esac

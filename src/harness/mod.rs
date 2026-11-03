@@ -6,11 +6,14 @@
 //!   the app's scanner, and for attachment and its battery providers.
 //! - [`world`]: pairs, the fake BlueZ and their AAP sockets running together,
 //!   changed over D-Bus or from the same process. `fakepods` runs one.
+//! - [`player`]: a fake MPRIS media player, on a session bus of its own, for
+//!   the app to pause and play as a pod leaves an ear and comes back.
 //!
 //! Built only with the `harness` feature, which `lib.rs` refuses outside debug
 //! builds.
 
 pub mod bluez;
+pub mod player;
 pub mod pods;
 pub mod world;
 
@@ -20,6 +23,7 @@ use std::process::{Child, Command, Stdio};
 use anyhow::{Context, Result};
 
 pub use bluez::FakeBluez;
+pub use player::FakePlayer;
 pub use pods::Pods;
 pub use world::World;
 
