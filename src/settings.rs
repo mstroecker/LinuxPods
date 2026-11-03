@@ -2,7 +2,7 @@
 //! group that do something.
 //!
 //! Stored at ~/.config/linuxpods/settings.json (XDG Base Directory):
-//! {"version": 1, "battery_notifications": true}
+//! {"version": 1, "battery_notifications": true, "pause_on_ear": true}
 //!
 //! Every field has a default, and a missing field takes it, so a file from an
 //! older build loads. A field this build does not know is kept as it was read
@@ -46,6 +46,9 @@ pub struct Settings {
     version: u32,
     /// Whether low battery notifications are sent. On by default.
     pub battery_notifications: bool,
+    /// Whether the media pauses when a pod leaves an ear, and plays again
+    /// once it is back - see `crate::media`. On by default, as on an iPhone.
+    pub pause_on_ear: bool,
     /// The fields this build does not know, from a newer build's file: kept
     /// and saved again as they were, so a change made here does not drop
     /// that build's settings.
@@ -58,6 +61,7 @@ impl Default for Settings {
         Self {
             version: FORMAT_VERSION,
             battery_notifications: true,
+            pause_on_ear: true,
             extra: Map::new(),
         }
     }
@@ -375,6 +379,23 @@ mod tests {
     }
 
     #[test]
+    fn pausing_on_the_ears_is_on_by_default() {
+        assert!(Settings::default().pause_on_ear);
+    }
+
+    /// A file from before the setting existed - every file so far - turns
+    /// it on, and one that turned it off keeps it off.
+    #[test]
+    fn pausing_on_the_ears_loads_as_saved() {
+        let (store, _dir) = store_with(r#"{"version":1,"battery_notifications":false}"#);
+        assert!(store.load().pause_on_ear);
+        let (store, _dir) = store_with(r#"{"version":1,"pause_on_ear":false}"#);
+        let settings = store.load();
+        assert!(!settings.pause_on_ear);
+        assert!(settings.battery_notifications);
+    }
+
+    #[test]
     fn a_missing_file_means_the_defaults_and_writes_nothing() {
         let (store, dir) = store();
         assert_eq!(store.load(), Settings::default());
@@ -428,6 +449,7 @@ mod tests {
             serde_json::json!({
                 "version": 2,
                 "battery_notifications": true,
+                "pause_on_ear": true,
                 "auto_connect": true,
                 "x": {"y": [1]},
             })
@@ -444,7 +466,11 @@ mod tests {
             serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"version": FORMAT_VERSION, "battery_notifications": false})
+            serde_json::json!({
+                "version": FORMAT_VERSION,
+                "battery_notifications": false,
+                "pause_on_ear": true,
+            })
         );
     }
 
@@ -492,7 +518,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"version": 1, "battery_notifications": true})
+            serde_json::json!({"version": 1, "battery_notifications": true, "pause_on_ear": true})
         );
     }
 

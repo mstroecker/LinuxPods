@@ -24,6 +24,7 @@ use gtk::gio;
 #[cfg(feature = "harness")]
 mod automation;
 mod control;
+mod media;
 mod notifications;
 mod preferences;
 mod rename;
@@ -31,6 +32,7 @@ mod window;
 
 #[cfg(feature = "harness")]
 pub use automation::register as register_automation;
+pub use media::add_action as add_pause_on_ear;
 pub use notifications::deliver as deliver_notifications;
 pub use window::activate;
 

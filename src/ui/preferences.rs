@@ -18,6 +18,7 @@ pub(super) fn create_preferences_dialog() -> (adw::PreferencesDialog, DeviceRows
     let settings_group = adw::PreferencesGroup::builder().title("General").build();
     settings_group.add(&unavailable_row("auto-connect", "Auto-connect"));
     settings_group.add(&battery_notifications_row());
+    settings_group.add(&pause_on_ear_row());
     page.add(&settings_group);
 
     let dev_group = adw::PreferencesGroup::builder()
@@ -54,6 +55,24 @@ fn battery_notifications_row() -> adw::ActionRow {
             "Warn when a battery is at {}% or below",
             crate::notify::LOW
         ))
+        .activatable_widget(&switch)
+        .build();
+    row.add_suffix(&switch);
+    row
+}
+
+/// The switch for pausing the media when a pod leaves an ear, bound to the
+/// application action that `media::add_action` adds, as the battery
+/// notifications' switch is to theirs.
+fn pause_on_ear_row() -> adw::ActionRow {
+    let switch = gtk::Switch::builder()
+        .name("pause-on-ear")
+        .action_name(format!("app.{}", super::media::ACTION))
+        .valign(gtk::Align::Center)
+        .build();
+    let row = adw::ActionRow::builder()
+        .title("Pause when a pod is taken out")
+        .subtitle("And play again once it is back in")
         .activatable_widget(&switch)
         .build();
     row.add_suffix(&switch);
