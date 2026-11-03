@@ -128,9 +128,26 @@ carries a GTK object toward tokio.
 - waits in a test on a sleep for a volume set that must not come, rather than on
   `VolumeControl::settled`.
 
+**Media.** The media paused when a pod leaves an ear (`media`, #167). Flag a diff that:
+- pauses or plays on in-ear from anywhere but `Coordinator::ear_events` - the snapshot's
+  in-ear, the advertisement's - or tells an `EarEvent` outside `inner`'s write lock, or
+  after the snapshot that shows its places;
+- sends `PlayPause`, or synthesizes a key, rather than an explicit `Pause` and `Play`;
+- pauses while the pair's A2DP transport is not `active`, plays a player that was not
+  remembered as paused or that no longer reads `Paused` (past `media::PAUSE_SETTLE`), or
+  stops forgetting the pause on a pod into the case, `LinkGone` or the setting off - a
+  switch turned off and on again before the task looked included - or remembers a
+  player that refused `Pause`;
+- needs a `Volume` on the transport to pause: that is the volume's, not the pause's;
+- calls the session or system bus without `NoAutoStart` or `media::CALL_LIMIT`, calls
+  players one after another rather than side by side, subscribes the task to a signal,
+  or moves the work into a pair's supervisor;
+- puts the harness's fake player on a bus that is not private, or waits in a test on a
+  sleep rather than on `MediaControl::settled` after the snapshot shows the move.
+
 **Parsing and tests.** `aap::battery`, `aap::conversation`, `aap::ear`, `aap::info`, `aap::keys`, `aap::name`, `aap::noise`, `aap::message`, `ble::parser`,
-`ble::decrypt` and `ble::rpa` take bytes and return values, and `volume::Ducking` and
-`volume::a2dp_in` take the time or BlueZ's objects as values - flag I/O, global state or coordinator access
+`ble::decrypt` and `ble::rpa` take bytes and return values, and `volume::Ducking`,
+`media::EarPause`, `volume::a2dp_in` and `volume::a2dp_active_in` take the time or BlueZ's objects as values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
 literals; flag what it cannot: a test reading the real keystore or settings
 (`~/.local/share/linuxpods`, `~/.config/linuxpods`, `$HOME`, `XDG_DATA_HOME` or
@@ -142,7 +159,7 @@ accepted exception), or a captured advertisement committed together with the key
 - A widget updated from anywhere but the snapshot stream - a button handler setting a
   label from a command's result, say. A setting is not device state: its switch bound to
   an app action and showing that action's state is fine, as Battery notifications' is with
-  `app.battery-notifications`.
+  `app.battery-notifications` and pausing on the ears' with `app.pause-on-ear`.
 - A `StringList` behind a `DropDown` spliced, appended or removed without reading
   `selected()` first.
 - Noise Control or the Conversation Awareness switch left sensitive when the device is

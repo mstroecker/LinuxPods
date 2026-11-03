@@ -99,6 +99,17 @@ a pair (#161). See [`docs/aap-device-info.md`](docs/aap-device-info.md).
 | Native libadwaita interface following the GNOME HIG | ✅ |
 | Low battery notifications, at 20% and 5% as UPower's defaults, with a switch in Preferences | ✅ |
 | Preferences kept across restarts, in the XDG config directory | ✅ |
+| Media paused when a pod is taken out, and played again once it is back, with a switch in Preferences | 🚧 |
+
+Taking a pod out of an ear pauses what plays, and putting it back plays it again, as on
+an iPhone: every media player that is playing (over MPRIS), and only while audio plays to
+the pair - so, assuming a call leaves the pair's audio stream idle, which is not checked
+yet, a call is left alone. With one pod worn and the other in the case, taking
+the worn one out pauses too; with both taken out, the media plays again once both are
+back. A pod put in the case forgets the pause, and a player you played or stopped
+meanwhile is left as you left it. It works from the pods' live ear reports, so only for a
+pair connected here. The switch in Preferences is on by default. Not yet tried on a pair
+(#167); see [`docs/aap-ear-detection.md`](docs/aap-ear-detection.md#pausing-the-media).
 
 ### Unexplored
 
@@ -211,8 +222,9 @@ The window shows the three battery levels, charging state and in-ear detection; 
 them the model and its color, and which source the reading came from. With more than
 one pair to show - each one it holds a key for, and each one connected over AAP - the
 header bar switches between them. **Preferences**, in the main menu, lists every one of
-them with its encryption key status, and turns low battery notifications off and on. The
-switch is kept across restarts, in `~/.config/linuxpods/settings.json`. Low battery
+them with its encryption key status, turns low battery notifications off and on, and
+pausing the media when a pod is taken out. Both switches are kept across restarts, in
+`~/.config/linuxpods/settings.json`. Low battery
 notifications need the launcher entry that `make install` writes: GNOME Shell shows none
 for an app it has no desktop entry for.
 
@@ -324,12 +336,13 @@ src/
 ├── bluez.rs       # Adapters, the device watch, a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # Key storage under XDG data dir
+├── media.rs       # The media paused when a pod leaves an ear, played again once it is back (MPRIS)
 ├── settings.rs    # Preferences' settings under XDG config dir
 ├── indicator.rs   # System tray (StatusNotifierItem)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
 ├── volume.rs      # The volume lowered while the user speaks, through BlueZ's MediaTransport1
 ├── ui/            # GTK4/libadwaita: window, Control page, rename dialog, Preferences, notifications; automation.rs, harness only
-├── harness/       # harness only: fake AirPods (pods.rs), fake BlueZ (bluez.rs), the world (world.rs)
+├── harness/       # harness only: fake AirPods (pods.rs), fake BlueZ (bluez.rs), a fake media player (player.rs), the world (world.rs)
 └── bin/           # harness only: fakepods.rs, the fake world make fake-world runs
 ```
 
@@ -338,7 +351,8 @@ channels, since GTK types are `!Send`: snapshots reach the window and tray on a 
 channel, the tray's window commands and the low battery notifications reach the main
 context on an `async-channel`, and a command to the AirPods - a noise control mode -
 goes on the queue of that pair's AAP link, which carries its commands out in the order
-they were sent and hands each result back to its caller.
+they were sent and hands each result back to its caller. The Preferences switch for
+pausing the media reaches the task that pauses it on a `watch` channel.
 
 ## Contributing
 
