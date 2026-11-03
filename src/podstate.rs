@@ -15,10 +15,12 @@
 //! device's own advertisements while AAP supersedes them. When the link drops the
 //! cached reading takes over at once, rather than the device going blank until
 //! it next advertises - which, lid closed in the case, can be a long wait. AAP
-//! state is only ever the live link's and goes with it. While the link is up,
-//! the device's snapshot takes from its cached advertisement what AAP does not
-//! carry: lid and connection state - and in-ear until the link has reported
-//! it, see [`EarState`].
+//! state is only ever the live link's and goes with it - all but the firmware
+//! version, which is the pair's and stays for the run, see
+//! [`Inner::firmware_versions`]. While the link is up, the device's snapshot
+//! takes from its cached advertisement what AAP does not carry: lid and
+//! connection state - and in-ear until the link has reported it, see
+//! [`EarState`].
 //!
 //! A link supersedes the cached reading from its first battery packet, not
 //! from when it comes up: in between - about a second on one pair - the
@@ -53,6 +55,7 @@ use tracing::Instrument;
 
 use crate::KEY_LEN;
 use crate::aap::ear::{EarReport, EarState, ROLE_SWITCH_HOLD};
+use crate::aap::info::{DeviceInfo, FirmwareVersion};
 use crate::aap::noise::{ModeState, Report};
 use crate::aap::{self, Message};
 use crate::ble::decode_model_name;
@@ -357,6 +360,10 @@ pub struct Snapshot {
     /// reports them, and it stays empty when BlueZ is unreachable, so
     /// consumers need a fallback.
     pub device_names: HashMap<Address, DeviceNames>,
+    /// Each pair's firmware version: the last one a link of the pair
+    /// reported this run - kept after the link goes, see
+    /// [`Inner::firmware_versions`]. A pair with no link this run has none.
+    pub firmware_versions: HashMap<Address, FirmwareVersion>,
 }
 
 impl Snapshot {
@@ -407,6 +414,11 @@ impl Snapshot {
                 .and_then(|state| state.identity)
                 .map(|identity| identity.model_name())
         })
+    }
+
+    /// The firmware version `mac` last reported this run, connected or not.
+    pub fn firmware_version(&self, mac: Address) -> Option<FirmwareVersion> {
+        self.firmware_versions.get(&mac).copied()
     }
 
     pub fn is_connected(&self, mac: Address) -> bool {
@@ -548,6 +560,13 @@ struct Inner {
     /// Each pair's ENC_KEY, and its IRK once one has arrived.
     keys: HashMap<Address, PairKeys>,
     device_names: HashMap<Address, DeviceNames>,
+    /// Each pair's firmware version, from the device information of its
+    /// links. Unlike the rest of AAP, kept after the link goes, for the
+    /// app's run: it changes only with an update, which the next link
+    /// reports, and a bug report needs it whether the pair is connected or
+    /// not. Never pruned, unlike `ble`: bounded by the pairs linked to,
+    /// which are attached AirPods alone.
+    firmware_versions: HashMap<Address, FirmwareVersion>,
 }
 
 impl Inner {
@@ -669,6 +688,7 @@ impl Inner {
             connected_macs: links.into_iter().map(|(&mac, _)| mac).collect(),
             known_keys,
             device_names: self.device_names.clone(),
+            firmware_versions: self.firmware_versions.clone(),
         }
     }
 }
@@ -917,6 +937,7 @@ impl Coordinator {
             links: HashMap::new(),
             keys: loaded,
             device_names: HashMap::new(),
+            firmware_versions: HashMap::new(),
         };
         let (updates, _) = watch::channel(inner.snapshot());
 
@@ -1476,10 +1497,9 @@ impl Coordinator {
                 Ok(Message::SpeechLevel(level)) => {
                     self.handle_speech_level(level, mac_addr, client).await;
                 }
-                Ok(Message::DeviceInfo(info)) => match info.name {
-                    Ok(name) => self.handle_device_name(name, mac_addr, client).await,
-                    Err(e) => tracing::warn!("Name reported by {mac_addr} not read: {e}"),
-                },
+                Ok(Message::DeviceInfo(info)) => {
+                    self.handle_device_info(info, mac_addr, client).await;
+                }
                 Ok(Message::Unknown { .. }) => {}
                 Err(e) => tracing::warn!("AAP {e}"),
             }
@@ -1675,24 +1695,55 @@ impl Coordinator {
         );
     }
 
-    /// Records the pods' name as the device reported it on `client`'s link -
-    /// in the startup dump - and broadcasts if that changed it. Only the name
-    /// is logged: the packet it came in holds serial numbers.
-    async fn handle_device_name(&self, name: String, mac_addr: Address, client: &Arc<aap::Client>) {
-        {
+    /// Takes the device information reported on `client`'s link, in the
+    /// startup dump: the pods' name onto the link, and the firmware version
+    /// into those kept for the run. Broadcasts if that changed either. A
+    /// field that did not read is logged and passed over, and the other
+    /// taken all the same. Only the two are logged: the packet they came in
+    /// holds serial numbers.
+    async fn handle_device_info(
+        &self,
+        info: DeviceInfo,
+        mac_addr: Address,
+        client: &Arc<aap::Client>,
+    ) {
+        let DeviceInfo { name, version } = info;
+        let name = name
+            .inspect_err(|e| tracing::warn!("Name reported by {mac_addr} not read: {e}"))
+            .ok();
+        let version = version
+            .inspect_err(|e| tracing::warn!("Firmware reported by {mac_addr} not read: {e}"))
+            .ok();
+        let renamed = {
             let mut inner = self.inner.write().await;
             // A packet read just before a disconnect must not land on a
-            // newer link.
+            // newer link, nor its version over the newer link's.
             let Some(link) = inner.live_link(mac_addr, client) else {
                 return;
             };
-            if link.name.as_ref() == Some(&name) {
-                return;
+            let renamed = name.is_some() && link.name != name;
+            if renamed {
+                link.name.clone_from(&name);
             }
-            link.name = Some(name.clone());
-            self.broadcast(&inner);
+            let updated = version.is_some_and(|version| {
+                inner.firmware_versions.insert(mac_addr, version) != Some(version)
+            });
+            if renamed || updated {
+                self.broadcast(&inner);
+            }
+            renamed
+        };
+        if let Some(name) = name.filter(|_| renamed) {
+            tracing::info!("Name reported by {mac_addr}: {name:?}");
         }
-        tracing::info!("Name reported by {mac_addr}: {name:?}");
+        // Field 10 as sent, beside our reading of it, which one value alone
+        // confirms: a wrong reading shows in the log.
+        if let Some(version) = version {
+            tracing::info!(
+                "Firmware reported by {mac_addr}: {version} (Marketing Version {})",
+                version.raw()
+            );
+        }
     }
 
     /// Records a speech level from `client`'s link, broadcasts if it is
@@ -1996,6 +2047,7 @@ impl Coordinator {
 mod tests {
     use super::*;
     use crate::aap::ear::Place;
+    use crate::aap::info::FieldError;
     use crate::ble::decrypt::random_key;
 
     fn entry(age: Duration) -> Entry {
@@ -2014,6 +2066,7 @@ mod tests {
             links: HashMap::new(),
             keys: HashMap::new(),
             device_names: HashMap::new(),
+            firmware_versions: HashMap::new(),
         }
     }
 
@@ -3591,13 +3644,13 @@ mod tests {
         assert_eq!(name(&coordinator), None);
 
         coordinator
-            .handle_device_name("Test Pods".into(), AA, &client)
+            .handle_device_info(info(Ok("Test Pods"), None), AA, &client)
             .await;
         assert_eq!(name(&coordinator).as_deref(), Some("Test Pods"));
 
         let stale = Arc::new(aap::Client::new(Address::any()));
         coordinator
-            .handle_device_name("Old Pods".into(), AA, &stale)
+            .handle_device_info(info(Ok("Old Pods"), None), AA, &stale)
             .await;
         assert_eq!(name(&coordinator).as_deref(), Some("Test Pods"));
 
@@ -3606,6 +3659,89 @@ mod tests {
         assert!(
             !snapshot.states.contains_key(&AA),
             "no reading but the link's"
+        );
+    }
+
+    /// Device information as `aap::info` reads it: `name`, and field 10's
+    /// value where there is one.
+    fn info(name: Result<&str, FieldError>, version: Option<u32>) -> DeviceInfo {
+        DeviceInfo {
+            name: name.map(str::to_string),
+            version: version
+                .map(FirmwareVersion::from_raw)
+                .ok_or(FieldError::Missing),
+        }
+    }
+
+    /// The firmware version is the pair's, not the link's: reported by the
+    /// startup dump, it stays on show after the link goes, without a
+    /// reading, until the next link reports another. One reported on a
+    /// replaced link is dropped.
+    #[tokio::test]
+    async fn the_firmware_version_outlives_the_link() {
+        let mut inner = inner_with(vec![]);
+        inner.links.insert(AA, link(None));
+        let (coordinator, _dir) = coordinator_with(inner);
+        let version = |coordinator: &Coordinator| {
+            let snapshot = coordinator.subscribe().borrow().clone();
+            snapshot.firmware_version(AA).map(|v| v.to_string())
+        };
+        assert_eq!(version(&coordinator), None);
+
+        let client = client_of(&coordinator, AA).await;
+        coordinator
+            .handle_device_info(info(Ok("Pods"), Some(9_442_752)), AA, &client)
+            .await;
+        assert_eq!(version(&coordinator).as_deref(), Some("9A348"));
+
+        let stale = Arc::new(aap::Client::new(Address::any()));
+        coordinator
+            .handle_device_info(info(Ok("Pods"), Some(0x0081_00E0)), AA, &stale)
+            .await;
+        assert_eq!(version(&coordinator).as_deref(), Some("9A348"));
+
+        coordinator.disconnect_aap(AA).await;
+        let snapshot = coordinator.subscribe().borrow().clone();
+        assert!(!snapshot.states.contains_key(&AA));
+        assert_eq!(version(&coordinator).as_deref(), Some("9A348"));
+
+        // The next link, after an update.
+        coordinator.inner.write().await.links.insert(AA, link(None));
+        let client = client_of(&coordinator, AA).await;
+        coordinator
+            .handle_device_info(info(Ok("Pods"), Some(0x00A0_0010)), AA, &client)
+            .await;
+        assert_eq!(version(&coordinator).as_deref(), Some("10A1"));
+    }
+
+    /// A field that did not read leaves the other: a name that is not
+    /// UTF-8 still brings the version, and a version that does not read
+    /// leaves the name and the version last reported.
+    #[tokio::test]
+    async fn each_field_of_the_device_information_is_taken_on_its_own() {
+        let mut inner = inner_with(vec![]);
+        inner
+            .links
+            .insert(AA, link(Some(PodState::empty(DataSource::Aap))));
+        let (coordinator, _dir) = coordinator_with(inner);
+        let client = client_of(&coordinator, AA).await;
+        let shown = |coordinator: &Coordinator| {
+            let snapshot = coordinator.subscribe().borrow().clone();
+            let version = snapshot.firmware_version(AA).map(|v| v.to_string());
+            (snapshot.states[&AA].name.clone(), version)
+        };
+
+        let unnamed = info(Err(FieldError::NotUtf8), Some(9_442_752));
+        coordinator.handle_device_info(unnamed, AA, &client).await;
+        assert_eq!(shown(&coordinator), (None, Some("9A348".into())));
+
+        let unversioned = info(Ok("Pods"), None);
+        coordinator
+            .handle_device_info(unversioned, AA, &client)
+            .await;
+        assert_eq!(
+            shown(&coordinator),
+            (Some("Pods".into()), Some("9A348".into()))
         );
     }
 
@@ -3717,7 +3853,7 @@ mod tests {
                 .collect(),
             connected_macs: connected.to_vec(),
             known_keys: known.to_vec(),
-            device_names: HashMap::new(),
+            ..Snapshot::default()
         }
     }
 
@@ -4025,7 +4161,7 @@ mod tests {
             let (coordinator, link, fake, _dir) = opened().await;
             let run = tokio::spawn(link.run());
             fake.send(&BATTERY).await.unwrap();
-            let info = aap::info::info_packet("Old Pods", &["A0000", "SERIAL0000"]);
+            let info = aap::info::info_packet_with_version("Old Pods", "9442752");
             fake.send(&info).await.unwrap();
             let mut rx = coordinator.subscribe();
             let named = |s: &Snapshot| s.states.get(&MAC).and_then(|s| s.name.clone());

@@ -1566,6 +1566,53 @@ async fn a_name_the_pods_would_not_take_is_never_sent() {
     );
 }
 
+/// The firmware version, as the snapshot shows it.
+fn firmware(snapshot: &Snapshot, mac: Address) -> Option<String> {
+    snapshot.firmware_version(mac).map(|v| v.to_string())
+}
+
+/// The firmware version comes from the startup dump's device information,
+/// and stays on show once the link has gone, where the rest of AAP goes with
+/// it. The next connection's replaces it: after an update, say (#161). A
+/// pair not linked this run has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_firmware_version_is_kept_after_the_link_goes() {
+    let fixture = Fixture::new(&[
+        (PAIR, PRO_3, PAIR_LEVELS),
+        (OTHER, PRO_2_USB_C, OTHER_LEVELS),
+    ])
+    .await;
+    let mut app = fixture.start_app().await;
+    app.attach(PAIR).await;
+    let snapshot = app
+        .until("the version from the startup dump", |s| {
+            firmware(s, PAIR).is_some()
+        })
+        .await;
+    assert_eq!(firmware(&snapshot, PAIR).as_deref(), Some("9A348"));
+    assert_eq!(firmware(&snapshot, OTHER), None, "never linked");
+
+    app.detach(PAIR).await;
+    let snapshot = app.updates.borrow().clone();
+    assert_eq!(
+        pods_name(&snapshot, PAIR),
+        None,
+        "the name goes with the link"
+    );
+    assert_eq!(firmware(&snapshot, PAIR).as_deref(), Some("9A348"));
+
+    fixture
+        .world
+        .with_pods(PAIR, |pods| pods.set_marketing_version(0x00A0_0010))
+        .await
+        .unwrap();
+    app.attach(PAIR).await;
+    app.until("the updated version from the next dump", |s| {
+        firmware(s, PAIR).as_deref() == Some("10A1")
+    })
+    .await;
+}
+
 /// What a snapshot shows of the pair while the user speaks: the noise mode,
 /// the speech level and the left pod's battery.
 type Speaking = (Option<NoiseMode>, Option<u8>, Option<u8>);
