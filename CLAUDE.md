@@ -41,6 +41,8 @@ and the tray's window commands, the low battery notifications and the signal tas
 request (SIGTERM, SIGINT) on an `async-channel`, all consumed with
 `glib::spawn_future_local`. Commands to the AirPods go the other way,
 onto their link's queue (`Coordinator::command`), and each result comes back on a oneshot.
+The Preferences switch for pausing on the ears goes that way too, to `media::Media` on a
+`watch`.
 Never touch a widget from a tokio task.
 
 **State.** `Coordinator` merges AAP (exact, needs L2CAP) and BLE (exact, and only from an
