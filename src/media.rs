@@ -1,7 +1,8 @@
 //! Pausing the media when a pod leaves an ear, and playing it again once it
 //! is back (#167): the host's half of ear detection, as an iPhone or a Mac
-//! does it. The pods only report where they are; nothing here is known to
-//! pause on its own (#167, not yet checked on a pair).
+//! does it. The pods only report where they are; that they pause nothing
+//! themselves is believed, not checked, and none of this has been tried on a
+//! pair yet (#167).
 //!
 //! A pod that was in an ear leaving it, while the pair's A2DP transport is
 //! `active`, pauses every MPRIS player that is `Playing` on the session bus,

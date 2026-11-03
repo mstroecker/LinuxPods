@@ -25,12 +25,13 @@ src/
 ├── bluez.rs       # Adapters, devices, connection watch; a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # ENC_KEY and IRK per pair at ~/.local/share/linuxpods/keys.json (0600)
+├── media.rs       # The media paused when a pod leaves an ear, played again once back (MPRIS)
 ├── settings.rs    # Preferences' settings at ~/.config/linuxpods/settings.json
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
 ├── volume.rs      # The pair's volume lowered while the user speaks (MediaTransport1)
 ├── ui/            # GTK4/libadwaita: window, Control page, rename dialog, Preferences, notifications, automation
-├── harness/       # Harness only: fake AirPods, fake BlueZ, the fake world
+├── harness/       # Harness only: fake AirPods, fake BlueZ, a fake media player, the fake world
 └── bin/fakepods.rs # Harness only: the fake world's process, which `make fake-world` runs
 ```
 
@@ -93,9 +94,9 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
   write lock or alone, never held across an await, changed only together with
   `Inner::links`, and removed only past `drop_link`'s client check. `AapLink::run`
   carries the commands out one at a time beside the read loop, so they go with the link.
-  The speech-event consumers are a std mutex beside `inner`, taken under `inner`'s write
-  lock to tell an event, so a link's levels come between its coming up and its going, or
-  alone to register; never held across an await.
+  The speech-event and ear-event consumers are a std mutex each beside `inner`, taken
+  under `inner`'s write lock to tell an event, so a link's levels and places come between
+  its coming up and its going, or alone to register; never held across an await.
   Each caller gets a `Result`: an error without a link, from the send, or when the link
   goes first - `ConnectionLost` when it went mid-command, as the packet may have gone out.
   Dropping the future does not withdraw the command. The window toasts a failure; the
@@ -251,7 +252,8 @@ advertisement. A snapshot shows no primary pod: the advertisement's flag says on
 pod was heard last, and for a pair on AAP every advertisement from the other pod broadcast
 a snapshot that differed in nothing else (#152). The noise control mode is kept on the
 link (`Link::noise_mode`), apart from the reading every battery packet replaces, and goes
-with the link like `Link::ear`.
+with the link like `Link::ear`. Each change of a pod's place in `Link::ear` also goes out
+as an `EarEvent`, for pausing the media - see below.
 
 **Off needs sub-command 0x34 first.** Recent firmware refuses a bare `0x0D 01` with an
 error chime - confirmed on Pro 3 and Pro Gen 2, while the other three modes work
@@ -368,6 +370,39 @@ out in a task of its own.
   so `VolumeControl::settled` answers for every event told before it: tests wait on it,
   never on a sleep.
 
+**The media paused when a pod leaves an ear is every MPRIS player's, from the link's ear
+state alone.** The pods only report where they are; that they pause nothing themselves is
+believed, not checked (#167). `media::EarPause` decides, pure and taking the time;
+`media::Media` carries it out in a task of its own, on the session bus for the players
+and the system bus for the transport. `docs/aap-ear-detection.md` has the table.
+- The places reach it as events (`Coordinator::ear_events`, `podstate::EarEvent`), from
+  the link's `EarState` once it has both packets, never from the advertisement or the
+  snapshot: the snapshot falls back to the advertisement's in-ear and does not say so,
+  and that lags and contradicts itself (#142). Told under `inner`'s write lock, before
+  the snapshot that shows them, between the link's `LinkUp` and `LinkGone`. A link's
+  first places pause nothing.
+- A pod in an ear leaving it, with nothing paused, pauses every `Playing` player - only
+  while an A2DP transport of the pair is `active` (`volume::a2dp_active_in`, with a
+  `Volume` or not), so a call, assumed to leave A2DP not active, is left alone - and
+  remembers the players and the pods worn just before, less any that refused `Pause`
+  (one that timed out is kept: the pause may have landed). Every pod worn then back in an ear plays each remembered player still
+  `Paused`, or still `Playing` within `media::PAUSE_SETTLE` (a guess) of the pause, and
+  forgets the rest: the user's. The transport is not read for that. A pod going into the
+  case (`02`/`03`), the link going and the setting turned off forget the pause; the
+  switch reaches the task as a `media::Switch` that counts each turning off, so off and
+  on again before the task looked forgets too.
+- Explicit `Pause` and `Play`, never `PlayPause`: a toggle could start what the user
+  paused. No key is synthesized: that needs `/dev/uinput`, and the shell picks a player.
+- Players are `org.mpris.MediaPlayer2.*` names, called at their owner's unique name, one
+  owner once. Every call goes without auto-start and within `media::CALL_LIMIT`, the
+  players' side by side; the task reads only what a decision needs (`media::Needs`) and
+  takes no signal, so the players are seen only when the pods are back: one played by
+  hand reads `Playing` and is forgotten once `PAUSE_SETTLE` has passed, but one played and
+  paused again by hand reads `Paused`, and plays. Tests give it a longer limit
+  (`Media::with_call_limit`, harness only).
+  Not in a pair's supervisor. Events go first in its `select!`, the setting next, so
+  `MediaControl::settled` answers for every event told before it: tests wait on it.
+
 **Nothing goes out before the handshake is answered.** The AirPods drop what they are
 sent until they have answered it (`01 00 04 00 …`), and a pair that had only just
 connected took 1.2 s: requests sent after a fixed 500 ms were never answered, so a pair
@@ -406,9 +441,9 @@ deadlocked every command sent meanwhile.
 - Keep protocol parsing pure and tested. `aap::battery`, `aap::conversation`, `aap::ear`,
   `aap::info`, `aap::keys`, `aap::name`, `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
   return values, and carry the bulk of the test suite; `noise::ModeState`,
-  `ear::EarState`, `rpa::ResolvedAddresses`, `notify::Alerts` and `volume::Ducking` take
-  the time as an argument for the same reason; `volume::a2dp_in` reads BlueZ's objects
-  as values. `aap::decode` routes every packet by its header and opcode;
+  `ear::EarState`, `rpa::ResolvedAddresses`, `notify::Alerts`, `volume::Ducking` and
+  `media::EarPause` take the time as an argument for the same reason; `volume::a2dp_in`
+  and `volume::a2dp_active_in` read BlueZ's objects as values. `aap::decode` routes every packet by its header and opcode;
   each module's `is_*` and `parse_*` still check the header themselves, so they stay safe
   to call on their own.
 - Use synthetic test vectors - never commit a real device key. New test keys come from
@@ -434,18 +469,21 @@ deadlocked every command sent meanwhile.
   up at its first error, and the app stayed deaf until restarted (#50). `volume::Volume`
   calls BlueZ only for a speech level, a fade step, a look for a transport that went, a
   link going or the quit, connecting when one needs it and again after a connection
-  failed, so it has no retry loop to back off.
+  failed, so it has no retry loop to back off; `media::Media` likewise calls only for a
+  pod leaving an ear or coming back.
 - A harness build must behave like a plain one unless the fake world's environment asks
   otherwise (`LINUXPODS_AAP_SOCKET_DIR`, `LINUXPODS_HARNESS_AUTOMATION=1`, set only by
   `scripts/fake-world.sh`): `make test` and `make fake-world` leave it at
   `target/debug/linuxpods`, where it meets real AirPods and the user's session. Nothing in
-  the harness writes to the app's real data or config directory.
+  the harness writes to the app's real data or config directory, and its fake media
+  player goes only on a private session bus: `fakepods` refuses `/run/user/<uid>/bus`.
 
 **UI.** Widget updates arrive only from the snapshot stream. The one exception is a
 command that fails: its result comes back to the main context and goes up as a toast, an
 event, never a control's state, so the noise radios keep showing the recorded mode. A
 setting is not device state: its switch is bound to an app action and shows that action's
-state, as Battery notifications does with `app.battery-notifications`. Read
+state, as Battery notifications does with `app.battery-notifications` and pausing on the
+ears with `app.pause-on-ear`. Read
 a selection *before* mutating the widget - splicing a `StringList` makes `GtkDropDown`
 emit `selected-notify`, clobbering the user's choice. Noise Control, Conversation
 Awareness and the Info group's Name row are commands, so they stay insensitive unless
@@ -474,7 +512,11 @@ on tracking crossings. Its state is saved: `settings::open` loads the settings a
 before the action is created, so a switch saved off starts off and sends nothing, and
 `settings::Saver` writes each change on tokio's blocking pool, never the main loop - the
 latest settings, whatever order the saves run in. A file that does not parse is set aside
-and the defaults used; a save that fails keeps the change in memory.
+and the defaults used; a save that fails keeps the change in memory. The switch for
+pausing the media when a pod leaves an ear is the app action `app.pause-on-ear`
+(`Settings::pause_on_ear`, on by default, and for a file from before it), saved the same
+way; each change reaches `media::Media` on a `watch`, read at every ear event, and off
+forgets what was paused.
 Artwork and the app icon are compiled into a GResource by `build.rs`
 (`assets/resources.gresource.xml`); a missing resource fails silently, so a test asserts
 every name the UI loads is in the bundle. The tray still points the shell at
@@ -499,7 +541,7 @@ A `Co-Authored-By:` trailer is fine.
   hardware run, the pods' own switch to Transparency, the 0x4D requirement, the volume
   lowered on the levels through `MediaTransport1`
 - `docs/aap-ear-detection.md` - the ear report (0x06) and primary pod (0x08), the role
-  switch
+  switch, the media paused when a pod leaves an ear and played again once it is back
 - `docs/aap-device-info.md` - the device information packet (0x1D): its layout and
   fields, where each name comes from, the name and the firmware version read from it,
   the version's layout as read off one value

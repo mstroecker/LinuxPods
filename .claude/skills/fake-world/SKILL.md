@@ -8,18 +8,19 @@ description: Run LinuxPods against fake AirPods and a fake BlueZ on private D-Bu
 `make fake-world` runs the real app - scanner, coordinator, keystore, UI - against
 `fakepods`: a fake BlueZ and fake AirPods on a private bus standing in for the system
 bus, with each pair's AAP on a Unix socket in place of L2CAP. The app runs on a second
-private bus as its session bus. Change the devices through `FakeWorld1`; read and press
-the UI through `Automation1`.
+private bus as its session bus, with a fake media player beside it. Change the devices
+through `FakeWorld1`, the player through `FakePlayer1`; read and press the UI through
+`Automation1`.
 
 Reference: `src/harness/world.rs` (FakeWorld1), `src/harness/bluez.rs` (what the fake
-BlueZ signals), `src/ui/automation.rs` (Automation1, the tree's JSON and every widget
-ID).
+BlueZ signals), `src/harness/player.rs` (the fake player, FakePlayer1),
+`src/ui/automation.rs` (Automation1, the tree's JSON and every widget ID).
 
 ## Safety
 
 The user may be logged in with real AirPods and their own LinuxPods running.
 
-- Talk to the fake world only through `scripts/fake-world.sh world|app|tree`, or pass
+- Talk to the fake world only through `scripts/fake-world.sh world|app|player|tree`, or pass
   `--address` from its `env` file. Bare `gdbus` and `busctl` go to the real buses.
 - Run with `HEADLESS=1` unless the user asks to see the window on their desktop.
 - Stop the world when done. `stop` kills only the PIDs that `start` recorded; never
@@ -81,6 +82,8 @@ Arguments are `gdbus call` text: strings bare, variants as `'<true>'` or `'<4>'`
 | `AddPods(s mac, q model, s name)` | pairs new AirPods with the first adapter there is now, model by product ID: `0x2027` Pro 3, `0x2024` Pro 2 (USB-C); `name` is the pods' own, BlueZ's `Name`, and its `Alias` until one is set |
 | `Connect(s mac)`, `Disconnect(s mac)` | the Bluetooth link; the app attaches or detaches, and disconnecting closes AAP right after BlueZ's `Connected=false`, as the hardware's AAP dies with the link. BlueZ signals `ServicesResolved=true` 4 s after `Connected=true`, and `false` just before `Connected=false`, as bluetoothd does; nothing in the app waits on it |
 | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case` |
+| `SetInEar(s mac, s pod, b in_ear)` | `left` or `right` into an ear - out of the case - or out of it; over AAP an ear report follows within milliseconds |
+| `SetInCase(s mac, s pod, b in_case)` | `left` or `right` into the case - out of the ear - or out of it, onto the table |
 | `SetLid(s mac, b open)` | the case lid; closed on both pods in the case, the pods drop their link, as real ones do. Over BLE, a pod in the closed case stops advertising 4 s after it closes; opened, the pods come back under new addresses, the right one 1 s later and the left 5.5 s |
 | `Repair(s mac)` | new keys, sent at the next key request; the old IRK stops resolving the pair's addresses, and the old key stops decrypting BLE |
 | `HangUp(s mac)` | closes AAP from the pods' end; the link stays, and the app links the pair again after a second, longer after repeated hang-ups (#49) |
@@ -194,6 +197,34 @@ within a second or so. `SetVolumeAnswer 00:00:5E:00:53:01 150 true` first has th
 answer as real pods may, late and rounded; the app's debug log shows each volume set
 and what the transport read then: `set to 30 ..., reading 24`.
 
+The media paused when a pod leaves an ear (#167), with the pair connected and the
+Preferences switch `pause-on-ear` on, as it starts. The fake player,
+`org.mpris.MediaPlayer2.fakeplayer` on the app's session bus, starts `Stopped`; the
+pods start in the case, so wear them first:
+
+```sh
+scripts/fake-world.sh world SetInEar 00:00:5E:00:53:01 left true
+scripts/fake-world.sh world SetInEar 00:00:5E:00:53:01 right true
+scripts/fake-world.sh world SetPlaying 00:00:5E:00:53:01 true
+scripts/fake-world.sh player SetStatus Playing   # the user presses play in the player
+scripts/fake-world.sh world SetInEar 00:00:5E:00:53:01 right false
+scripts/fake-world.sh player Status              # 'Paused'
+scripts/fake-world.sh world SetInEar 00:00:5E:00:53:01 right true
+scripts/fake-world.sh player Calls               # ['Pause', 'Play']
+```
+
+The app logs `Pausing org.mpris.MediaPlayer2.fakeplayer: a pod of <MAC> left an ear` and
+`Playing ... again`. Without `SetPlaying`, or with `SetCall ... true`, nothing is paused.
+`world SetInCase 00:00:5E:00:53:01 right true` while paused forgets the pause, and so do
+`HangUp`, `Disconnect` and `app SetActive pause-on-ear false` - with Preferences open, as
+for the battery switch (see below). `player SetStatus Stopped` while paused is the
+user's, and the pod back plays nothing; so is `player SetStatus Playing`, but only once
+`media::PAUSE_SETTLE` (2 s) has passed since the pause - before that the app takes the
+player for one still pausing, and sends it `Play`. `player` calls
+`io.github.mstroecker.LinuxPods.FakePlayer1`: `SetStatus(s)` (`Playing`, `Paused`,
+`Stopped`, as the user sets it in the player), `Status() → s` and `Calls() → as` (every
+MPRIS method the app called, in order - never `PlayPause`).
+
 Change, settle, then read: `SetBattery`, `Settle`, `tree`.
 
 Low battery notifications: `SetBattery` a part to 20 or below (5 or below is critical),
@@ -204,7 +235,7 @@ notification server, so nothing is shown and GLib warns once; the list records w
 sent. `Settle` does not wait for a notification: read again until it is there.
 
 The Preferences switch `battery-notifications` turns them off and on, once Preferences is
-open (see below): `app SetActive battery-notifications false` withdraws what is on show
+open (see below), as `pause-on-ear` turns pausing on the ears: `app SetActive battery-notifications false` withdraws what is on show
 and sends nothing more, and `true` shows again what is low. The app saves the switch in
 the fake world's own config directory, never the user's -
 `$XDG_RUNTIME_DIR/linuxpods-harness/world/home/config/linuxpods/settings.json` - and
