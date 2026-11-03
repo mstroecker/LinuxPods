@@ -101,12 +101,16 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
   Dropping the future does not withdraw the command. The window toasts a failure; the
   tray logs it.
 - Both `open_aap` and `disconnect_aap` broadcast. Disconnect also drops the device's
-  AAP state, or the UI keeps showing a stale exact-looking reading.
-- BLE is cached, AAP never is. `Inner::ble` keeps the last advertisement per device -
-  also the connected one's, underneath AAP - so disconnect falls back to it at once.
-  AAP lives in the device's link and goes with it. Identified readings expire after
-  `BLE_CACHE_TTL` (30 min) and carry `last_seen` for the UI; `expiry_task` prunes on a
-  clock, since with no device in range no advertisement ever triggers a prune.
+  AAP state - all but the firmware version - or the UI keeps showing a stale
+  exact-looking reading.
+- BLE is cached, AAP never is - but for the firmware version, the pair's rather than the
+  link's: `Inner::firmware_versions` keeps the last each pair's links reported, for the
+  app's run, never pruned, and the next link's replaces it (#161). `Inner::ble` keeps
+  the last advertisement per device - also the connected one's, underneath AAP - so
+  disconnect falls back to it at once. AAP lives in the device's link and goes with it.
+  Identified readings expire after `BLE_CACHE_TTL` (30 min) and carry `last_seen` for
+  the UI; `expiry_task` prunes on a clock, since with no device in range no
+  advertisement ever triggers a prune.
 - Both pods advertise, so one reading never wholly replaces the lid. A worn pod whose
   partner is in the case reports no lid but sets status bit 4 (`one_in_case`), and
   `handle_advertisement` keeps the cached lid for it; with bit 4 clear the lid goes.
@@ -302,8 +306,20 @@ has a NUL or runs over 127 bytes is refused, never sent - by the dialog, by
 before it is sent; the entry's `max-length` stops a text at 127 characters.
 `Device1.Alias` is never set or cleared (`docs/aap-rename.md` says why). `0x1D` is read
 only with `02` at byte 6 and `04 00` at bytes 9-10, and the rest of it holds serial
-numbers: only the name is read or logged, and `aap::keys::redacted_hex` cuts any `0x1D`
-to its preamble.
+numbers: only the name and the firmware version are read or logged (`aap::info`), and
+`aap::keys::redacted_hex` cuts any `0x1D` to its preamble.
+
+**The firmware version is `0x1D`'s field 10, packed.** The dissector's Marketing Version,
+a decimal string: `9442752` = `0x9015C0` on a Pro 3 and a Pro 2 (USB-C) on 2026-11-02,
+when the iPhone showed `9A348` for both. `aap::info::FirmwareVersion` reads bits 20 and
+up as the major, 16-19 as a letter (`A` = 0), 4-15 as the build in decimal, and the low
+nibble as a suffix letter (`a` = 1, none for 0) - ours, read off that one value, and
+the suffix and a major past 9 both guesses on top, all to be confirmed at the next
+update (`docs/aap-device-info.md`). Field 10's value is logged beside the reading, so
+a wrong one shows. Each field of `0x1D` carries its own error (`aap::info::DeviceInfo`):
+a name that is not UTF-8 leaves the version, and a version that does not read leaves
+the name; an error never carries the field's bytes, as one out of place could be a
+serial number.
 
 **The volume lowered while the user speaks is the pair's own, through BlueZ.** The
 pair's A2DP transport's `org.bluez.MediaTransport1.Volume` (0-127, AVRCP absolute
@@ -388,7 +404,7 @@ deadlocked every command sent meanwhile.
 ## Patterns
 
 - Keep protocol parsing pure and tested. `aap::battery`, `aap::conversation`, `aap::ear`,
-  `aap::keys`, `aap::name`, `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
+  `aap::info`, `aap::keys`, `aap::name`, `aap::noise`, `aap::message`, `ble::parser`, `ble::decrypt`, `ble::rpa` take bytes and
   return values, and carry the bulk of the test suite; `noise::ModeState`,
   `ear::EarState`, `rpa::ResolvedAddresses`, `notify::Alerts` and `volume::Ducking` take
   the time as an argument for the same reason; `volume::a2dp_in` reads BlueZ's objects
@@ -440,10 +456,12 @@ does not send the setting back out, and a failed command draws the last snapshot
 which puts it back. The Name row shows the pods' own name where the link has it, else
 BlueZ's alias, and the rename dialog starts from the pods' name, never the alias; it
 refuses what `aap::name` would, and the name the pods have, and a failed rename is a
-toast. Elsewhere - the switcher, a low battery notification - a pair is named by
-`Snapshot::display_name`: an alias set in BlueZ, else the pods' name, else the alias,
-then the model. BlueZ's alias keeps the old name until the pair connects again, so
-named by it the switcher showed a rename only then (#160).
+toast. The Firmware row below it is no command: it shows the version the pair last
+reported this run, connected or not, in a selectable label, and "Unknown", insensitive,
+before the pair's first link. Elsewhere - the switcher, a low battery notification - a
+pair is named by `Snapshot::display_name`: an alias set in BlueZ, else the pods' name,
+else the alias, then the model. BlueZ's alias keeps the old name until the pair connects
+again, so named by it the switcher showed a rename only then (#160).
 Low battery notifications are worked out on the tokio side (`notify::Alerts`) and sent
 from the main context as `GNotification`s, one per pair. They warn once per crossing, never
 per snapshot - the worst band stands until the part charges or clears
@@ -482,6 +500,9 @@ A `Co-Authored-By:` trailer is fine.
   lowered on the levels through `MediaTransport1`
 - `docs/aap-ear-detection.md` - the ear report (0x06) and primary pod (0x08), the role
   switch
+- `docs/aap-device-info.md` - the device information packet (0x1D): its layout and
+  fields, where each name comes from, the name and the firmware version read from it,
+  the version's layout as read off one value
 - `docs/aap-rename.md` - the rename packet (0x1A), the name in the device information
   packet (0x1D), the pods' name and BlueZ's alias, the hardware and name runs, 127 bytes
 - `docs/releasing.md` - release steps, what a release contains, verifying one

@@ -59,10 +59,10 @@ own. This is the only channel that can *send* commands.
 | Noise control - Transparency, Adaptive, ANC, Off | ✅ |
 | Conversation Awareness | ✅ |
 | Device rename - the pods' own name, which they report to a host as it connects | 🚧 |
+| Firmware version, as the iPhone shows it | 🚧 |
 | Press-and-hold gesture configuration | 📋 |
 | Personalized and adaptive volume | 📋 |
 | Loud sound reduction | 📋 |
-| Firmware version | 📋 |
 
 The window's switch turns Conversation Awareness on and off. With it on, the pods switch
 to Transparency while you speak, which the window shows, and the app lowers the pair's
@@ -73,13 +73,20 @@ you change meanwhile is left as you set it. The switch, the lowering and the fad
 checked on a Pro 3 (2026-11-02); a call, a volume changed while lowered, and the setting
 changed on a phone are still to be checked (#150).
 
-Device rename changes the name the pods give every host, from the Name row at the bottom
-of the window, up to 127 bytes. The packet is confirmed on a Pro 3 (#160); the window's
-rename is still to be checked on a pair. The pods take the name at once, and so does the
-app - the Name row, the device switcher, a low battery notification; the rest of this
-computer shows it once the pair connects again - unless you gave the pair a name in
+Device rename changes the name the pods give every host, from the Name row in the
+window's Info group, up to 127 bytes. The packet is confirmed on a Pro 3 (#160); the
+window's rename is still to be checked on a pair. The pods take the name at once, and so
+does the app - the Name row, the device switcher, a low battery notification; the rest of
+this computer shows it once the pair connects again - unless you gave the pair a name in
 GNOME Settings, which GNOME, the switcher and the notifications keep showing - and Apple
 devices keep the name they have. See [`docs/aap-rename.md`](docs/aap-rename.md).
+
+The Firmware row below Name shows the firmware version as the iPhone shows it, such as
+`9A348`, from the device information the pods send as they connect. It stays on show
+after the pair disconnects, until the app quits, and reads "Unknown" until the pair has
+connected since the app started. How the version is packed is read off one firmware
+(2026-11-02), to be confirmed at the next update, and the row is still to be checked on
+a pair (#161). See [`docs/aap-device-info.md`](docs/aap-device-info.md).
 
 ### Linux integration
 
@@ -312,7 +319,7 @@ src/
 ├── main.rs        # GTK main loop on the main thread, tokio runtime alongside it
 ├── lib.rs         # Library target, so the layers can be driven from tests
 ├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
-├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control, Conversation Awareness, the pods' name
+├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control, Conversation Awareness, rename, device information
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption
 ├── bluez.rs       # Adapters, the device watch, a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
