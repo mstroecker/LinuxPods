@@ -30,10 +30,11 @@ const RESPONSE_WINDOW: Duration = Duration::from_secs(4);
 /// long, so they are not mistaken for an answer to the next one.
 const DRAIN_WINDOW: Duration = Duration::from_secs(3);
 
-/// A received packet as it is printed: whole, except a key packet, of which
-/// only the header, opcode and key count go out - see [`keys::redacted_hex`].
-/// Probe output gets pasted into issues. The probe asks for no keys, but a key
-/// packet is held back whether asked for or not, parsable or not.
+/// A received packet as it is printed: whole, except a key packet and a
+/// device information packet, of which only the preamble goes out - see
+/// [`keys::redacted_hex`]. Probe output gets pasted into issues. The probe asks
+/// for no keys, but a key packet is held back whether asked for or not,
+/// parsable or not.
 fn shown(packet: &[u8]) -> String {
     keys::redacted_hex(packet)
 }
@@ -49,7 +50,7 @@ fn describe(packet: &[u8]) -> String {
         Ok(Message::Primary(primary)) => format!("primary pod: {primary:?}"),
         Ok(Message::ConversationAwareness(on)) => format!("Conversation Awareness: {on}"),
         // The rest of the packet, serial numbers among it, is left out.
-        Ok(Message::DeviceName(name)) => format!("device information, name {name:?}"),
+        Ok(Message::DeviceInfo(info)) => format!("device information, {info}"),
         // With Conversation Awareness on, a Pro 3 framed every mode change
         // with level 08 and 09, and AirPods 4 sent 09 after each. Neither
         // names the mode: they are no acknowledgment.

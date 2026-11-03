@@ -1476,9 +1476,10 @@ impl Coordinator {
                 Ok(Message::SpeechLevel(level)) => {
                     self.handle_speech_level(level, mac_addr, client).await;
                 }
-                Ok(Message::DeviceName(name)) => {
-                    self.handle_device_name(name, mac_addr, client).await;
-                }
+                Ok(Message::DeviceInfo(info)) => match info.name {
+                    Ok(name) => self.handle_device_name(name, mac_addr, client).await,
+                    Err(e) => tracing::warn!("Name reported by {mac_addr} not read: {e}"),
+                },
                 Ok(Message::Unknown { .. }) => {}
                 Err(e) => tracing::warn!("AAP {e}"),
             }
@@ -4024,7 +4025,7 @@ mod tests {
             let (coordinator, link, fake, _dir) = opened().await;
             let run = tokio::spawn(link.run());
             fake.send(&BATTERY).await.unwrap();
-            let info = aap::name::info_packet("Old Pods", &["A0000", "SERIAL0000"]);
+            let info = aap::info::info_packet("Old Pods", &["A0000", "SERIAL0000"]);
             fake.send(&info).await.unwrap();
             let mut rx = coordinator.subscribe();
             let named = |s: &Snapshot| s.states.get(&MAC).and_then(|s| s.name.clone());
