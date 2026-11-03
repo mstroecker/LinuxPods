@@ -3,7 +3,8 @@
 //! GTK owns the main thread; a multi-threaded tokio runtime carries the BLE, AAP
 //! and D-Bus work, and the two meet over channels: snapshots come to the UI on a
 //! watch channel, commands go to the AirPods on their link's queue - see
-//! `Coordinator::command` - and the tray's window commands, the low battery
+//! `Coordinator::command` - the switch for pausing on the ears to the media
+//! task on another, and the tray's window commands, the low battery
 //! notifications and a quit asked for by SIGTERM or SIGINT to the GTK main
 //! context on async channels.
 
