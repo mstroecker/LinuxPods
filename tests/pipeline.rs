@@ -56,8 +56,9 @@ use linuxpods::ble::scanner::{Advertisement, Scanner};
 use linuxpods::bluez::{BatteryProvider, ProviderConnection};
 use linuxpods::harness::bluez::{VolumeAnswer, device_path};
 use linuxpods::harness::pods::{ADDRESS_ROTATION, PRO_2_USB_C, PRO_3, Part, Pods};
-use linuxpods::harness::{PrivateBus, World};
+use linuxpods::harness::{FakePlayer, PrivateBus, World};
 use linuxpods::keystore::{KEYS_FILE, Keystore, PairKeys};
+use linuxpods::media::{Media, MediaControl, Playback, Switch};
 use linuxpods::podstate::{Command, Coordinator, DataSource, Snapshot};
 use linuxpods::volume::{self, Volume, VolumeControl};
 
@@ -2321,6 +2322,291 @@ async fn the_link_tells_the_ears_after_the_battery_and_the_mode_after_both() {
         "the cached in-ear, then the link's"
     );
     assert_eq!(mode, None, "a mode ahead of the startup dump");
+}
+
+/// The media task as `main.rs` wires it (#167): the transport read on the
+/// test's bus, where the fake BlueZ is, and the players on a session bus of
+/// its own - never the user's - with a fake player on it.
+struct Pausing {
+    /// The players' bus; stopped with the fixture.
+    _session: PrivateBus,
+    player: FakePlayer,
+    /// The Preferences switch, as the app action hands it on.
+    switch: watch::Sender<Switch>,
+    media: MediaControl,
+    task: JoinHandle<()>,
+}
+
+impl Drop for Pausing {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl Pausing {
+    /// Turns the Preferences switch on or off, as the app action does.
+    fn set_switch(&self, on: bool) {
+        self.switch.send_modify(|switch| switch.set(on));
+    }
+
+    /// Whether nothing is remembered as paused, once the media task has
+    /// taken every ear event told so far and carried out what it brought.
+    async fn settled(&self) -> bool {
+        timeout(TIMEOUT, self.media.settled())
+            .await
+            .expect("the media task answers")
+    }
+}
+
+impl Fixture {
+    /// Starts the media task on `app`'s coordinator, with the setting on.
+    /// Before a link comes up, as at the app's start: the task takes a
+    /// link's first places as where the pods are, and pauses only on a
+    /// change from there.
+    async fn start_pausing(&self, app: &App) -> Pausing {
+        let session = PrivateBus::start().expect("dbus-daemon starts");
+        let player = FakePlayer::serve(session.address(), "fake").await.unwrap();
+        let (switch, enabled) = watch::channel(Switch::new(true));
+        let bluez = self.bus.address().to_string();
+        let players = session.address().to_string();
+        let (media, control) = Media::new(
+            &app.coordinator,
+            enabled,
+            Box::new(move || zbus::connection::Builder::address(bluez.as_str())),
+            Box::new(move || zbus::connection::Builder::address(players.as_str())),
+        );
+        // A pause given up on fails the test: longer than the app's limit, for
+        // a loaded machine, and within the wait for `settled`.
+        let media = media.with_call_limit(MEDIA_CALL_LIMIT);
+        Pausing {
+            _session: session,
+            player,
+            switch,
+            media: control,
+            task: tokio::spawn(media.run()),
+        }
+    }
+}
+
+/// How long the media task's calls may take in a test: longer than
+/// `media::CALL_LIMIT`, so that a loaded machine does not skip a pause, and
+/// well within [`TIMEOUT`], which `Pausing::settled` waits.
+const MEDIA_CALL_LIMIT: Duration = Duration::from_secs(5);
+
+/// Both pods worn, the left one primary, on AAP and nothing heard over BLE,
+/// as [`worn_on_aap`] has them, with the media task watching from before
+/// the link came up, and the fake player playing.
+async fn worn_and_pausing() -> (Fixture, App, Pausing) {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture
+        .world
+        .with_pods(PAIR, |pods| {
+            pods.set_in_ear(PodSide::Left, true);
+            pods.set_in_ear(PodSide::Right, true);
+        })
+        .await
+        .unwrap();
+    let mut app = fixture.start_app().await;
+    app.stop_listening().await;
+    let pausing = fixture.start_pausing(&app).await;
+    app.attach(PAIR).await;
+    app.until("both pods worn, as the link reports it", |s| {
+        in_ear(s, PAIR) == Some((Some(true), Some(true)))
+    })
+    .await;
+    pausing.player.set_status(Playback::Playing).await.unwrap();
+    (fixture, app, pausing)
+}
+
+/// [`worn_and_pausing`], with audio playing to the pair: its A2DP transport
+/// active.
+async fn worn_playing_and_pausing() -> (Fixture, App, Pausing) {
+    let (fixture, app, pausing) = worn_and_pausing().await;
+    fixture.world.set_playing(PAIR, true).await.unwrap();
+    (fixture, app, pausing)
+}
+
+/// Moves the right pod - into an ear, out, into the case - and waits until
+/// the app has read everything that brought: the snapshot shows the left pod
+/// worn, the right one `in_ear`, and a battery change made once the pair had
+/// nothing more due, which comes over the same connection after the ear
+/// report. A move the snapshot does not show - out of the ear into the case -
+/// is read by then too, and its ear event told.
+async fn move_right_pod(
+    fixture: &Fixture,
+    app: &mut App,
+    change: impl FnOnce(&mut Pods) + Send,
+    in_ear_now: bool,
+) {
+    fixture.world.with_pods(PAIR, change).await.unwrap();
+    // Another level each time: 21, 22, 21...
+    let shown = app
+        .updates
+        .borrow()
+        .states
+        .get(&PAIR)
+        .and_then(|s| s.left_battery);
+    let last = if shown == Some(21) { 22 } else { 21 };
+    after_everything_due(fixture, last).await;
+    app.until(&format!("the right pod in an ear: {in_ear_now}"), |s| {
+        in_ear(s, PAIR) == Some((Some(true), Some(in_ear_now)))
+            && s.states[&PAIR].left_battery == Some(last)
+    })
+    .await;
+}
+
+/// A pod taken out while audio plays to the pair pauses the player, with
+/// `Pause`, and back in plays it again, with `Play` - never the toggle
+/// (#167).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pod_out_pauses_the_media_and_back_in_plays_it() {
+    let (fixture, mut app, pausing) = worn_playing_and_pausing().await;
+
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(!pausing.settled().await, "the pause remembered");
+    assert_eq!(pausing.player.status(), Playback::Paused);
+    assert_eq!(pausing.player.calls(), ["Pause"]);
+
+    let back = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, true);
+    move_right_pod(&fixture, &mut app, back, true).await;
+    assert!(pausing.settled().await, "nothing left to play");
+    assert_eq!(pausing.player.status(), Playback::Playing);
+    assert_eq!(pausing.player.calls(), ["Pause", "Play"]);
+}
+
+/// With nothing playing to the pair - no A2DP transport at all - a pod out
+/// pauses nothing: what plays may be playing elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pod_out_with_nothing_playing_to_the_pair_pauses_nothing() {
+    let (fixture, mut app, pausing) = worn_and_pausing().await;
+
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(pausing.settled().await);
+    let back = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, true);
+    move_right_pod(&fixture, &mut app, back, true).await;
+    assert!(pausing.settled().await);
+    assert_eq!(pausing.player.status(), Playback::Playing);
+    assert_eq!(pausing.player.calls(), [] as [&str; 0]);
+}
+
+/// In a call A2DP is not active, as is assumed of a call: a pod out pauses
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pod_out_in_a_call_pauses_nothing() {
+    let (fixture, mut app, pausing) = worn_playing_and_pausing().await;
+    fixture.world.set_call(PAIR, true).await.unwrap();
+
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(pausing.settled().await);
+    assert_eq!(pausing.player.calls(), [] as [&str; 0]);
+}
+
+/// A pod put in the case after it came out forgets the pause: worn again
+/// later, it plays nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pod_put_in_the_case_forgets_the_pause() {
+    let (fixture, mut app, pausing) = worn_playing_and_pausing().await;
+
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(!pausing.settled().await);
+    let into_case = |pods: &mut Pods| pods.set_in_case(PodSide::Right, true);
+    move_right_pod(&fixture, &mut app, into_case, false).await;
+    assert!(pausing.settled().await, "forgotten");
+    let back = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, true);
+    move_right_pod(&fixture, &mut app, back, true).await;
+    assert!(pausing.settled().await);
+    assert_eq!(pausing.player.status(), Playback::Paused);
+    assert_eq!(pausing.player.calls(), ["Pause"]);
+}
+
+/// The user playing the player while the pod is out, then stopping it,
+/// takes it over: back in, the pod plays nothing, and the player stays as
+/// the user left it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_player_the_user_played_meanwhile_is_left_alone() {
+    let (fixture, mut app, pausing) = worn_playing_and_pausing().await;
+
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(!pausing.settled().await);
+    assert_eq!(pausing.player.status(), Playback::Paused);
+    pausing.player.set_status(Playback::Playing).await.unwrap();
+    pausing.player.set_status(Playback::Stopped).await.unwrap();
+
+    let back = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, true);
+    move_right_pod(&fixture, &mut app, back, true).await;
+    assert!(pausing.settled().await);
+    assert_eq!(pausing.player.status(), Playback::Stopped);
+    assert_eq!(pausing.player.calls(), ["Pause"]);
+}
+
+/// The Preferences switch turned off forgets the pause, and pauses nothing
+/// from then on; on again, a pod out pauses once more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_switch_off_forgets_the_pause_and_pauses_nothing() {
+    let (fixture, mut app, pausing) = worn_playing_and_pausing().await;
+
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(!pausing.settled().await);
+    pausing.set_switch(false);
+    assert!(pausing.settled().await, "forgotten");
+    let back = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, true);
+    move_right_pod(&fixture, &mut app, back, true).await;
+    assert!(pausing.settled().await);
+    assert_eq!(pausing.player.status(), Playback::Paused);
+
+    pausing.player.set_status(Playback::Playing).await.unwrap();
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(pausing.settled().await);
+    assert_eq!(pausing.player.status(), Playback::Playing, "off");
+    assert_eq!(pausing.player.calls(), ["Pause"]);
+
+    pausing.set_switch(true);
+    let back = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, true);
+    move_right_pod(&fixture, &mut app, back, true).await;
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(!pausing.settled().await);
+    assert_eq!(pausing.player.status(), Playback::Paused, "on again");
+}
+
+/// The switch turned off and on again before the media task looked - the
+/// watch keeps the latest alone, which reads on - still forgets the pause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_switch_off_and_on_at_once_still_forgets_the_pause() {
+    let (fixture, mut app, pausing) = worn_playing_and_pausing().await;
+
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(!pausing.settled().await);
+    pausing.set_switch(false);
+    pausing.set_switch(true);
+    assert!(pausing.settled().await, "forgotten");
+    let back = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, true);
+    move_right_pod(&fixture, &mut app, back, true).await;
+    assert!(pausing.settled().await);
+    assert_eq!(pausing.player.status(), Playback::Paused);
+    assert_eq!(pausing.player.calls(), ["Pause"]);
+}
+
+/// The link going forgets the pause: nothing on the next link plays it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_link_going_forgets_the_pause() {
+    let (fixture, mut app, pausing) = worn_playing_and_pausing().await;
+
+    let out = |pods: &mut Pods| pods.set_in_ear(PodSide::Right, false);
+    move_right_pod(&fixture, &mut app, out, false).await;
+    assert!(!pausing.settled().await);
+    fixture.world.hang_up(PAIR).await.unwrap();
+    app.until("the link gone", |s| !s.is_connected(PAIR)).await;
+    assert!(pausing.settled().await, "forgotten");
+    assert_eq!(pausing.player.calls(), ["Pause"]);
 }
 
 /// Two quick commands to a pair go out in the order they were issued, however
