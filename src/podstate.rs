@@ -54,7 +54,7 @@ use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tracing::Instrument;
 
 use crate::KEY_LEN;
-use crate::aap::ear::{EarReport, EarState, ROLE_SWITCH_HOLD};
+use crate::aap::ear::{EarReport, EarState, Place, ROLE_SWITCH_HOLD};
 use crate::aap::info::{DeviceInfo, FirmwareVersion};
 use crate::aap::noise::{ModeState, Report};
 use crate::aap::{self, Message};
@@ -146,6 +146,35 @@ pub enum SpeechEvent {
     /// [`aap::conversation::Speech`].
     Level { mac: Address, level: u8 },
     /// The pair's link went: closed here, or lost. Its last level stands for
+    /// nothing any more.
+    LinkGone { mac: Address },
+}
+
+/// Where a link's pods are, or the link coming up or going, as
+/// [`Coordinator::ear_events`] tells them, for what pauses the media when a
+/// pod leaves an ear and plays it again when it is back - see `crate::media`.
+///
+/// From the link's ear state alone, never the advertisement: a connected
+/// pair's advertised in-ear lags its ears, and its two pods contradict each
+/// other (#142), while the snapshot falls back to it before the link has
+/// reported and after it goes, and does not say where its in-ear came from.
+/// Events rather than snapshots, too, as for [`SpeechEvent`]: the watch keeps
+/// the latest alone, and a pod out and back in quickly could be gone by the
+/// time a slow consumer looked. A link's places come after its
+/// [`EarEvent::LinkUp`] and before its [`EarEvent::LinkGone`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarEvent {
+    /// The pair has a link: nothing is known of its pods yet.
+    LinkUp { mac: Address },
+    /// Where each pod is, left then right, as the link's ear state reads
+    /// once it has an ear report and the primary pod - see [`EarState`] -
+    /// told as that changes: the first reading, and every change after it.
+    Places {
+        mac: Address,
+        left: Place,
+        right: Place,
+    },
+    /// The pair's link went: closed here, or lost. Its places stand for
     /// nothing any more.
     LinkGone { mac: Address },
 }
@@ -809,6 +838,10 @@ pub struct Coordinator {
     /// under `inner`'s write lock, so events go out in the order the links
     /// changed, or alone; never held across an await.
     speech: std::sync::Mutex<Vec<mpsc::UnboundedSender<SpeechEvent>>>,
+    /// Where [`EarEvent`]s go - see [`Coordinator::ear_events`]. Taken under
+    /// `inner`'s write lock, as `speech` is, or alone; never held across an
+    /// await.
+    ears: std::sync::Mutex<Vec<mpsc::UnboundedSender<EarEvent>>>,
     /// Held across a save, so saves never overlap - they share a temporary
     /// file. Owned by the save while it runs - see
     /// `Coordinator::store_keys`.
@@ -946,6 +979,7 @@ impl Coordinator {
             queues: std::sync::Mutex::default(),
             resolved: std::sync::Mutex::default(),
             speech: std::sync::Mutex::default(),
+            ears: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(persistence)),
             updates,
             #[cfg(feature = "harness")]
@@ -1009,6 +1043,33 @@ impl Coordinator {
         &self,
     ) -> std::sync::MutexGuard<'_, Vec<mpsc::UnboundedSender<SpeechEvent>>> {
         self.speech.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Registers a consumer of where every link's pods are, and of each link
+    /// coming up and going - see [`EarEvent`] - from now on.
+    ///
+    /// Each event is queued, none skipped: a pod out and back in is two
+    /// changes, and what pauses the media acts on each. They come from the
+    /// user's own pods over AAP, one per change of a pod's place, nothing an
+    /// advertiser can send. A consumer that is dropped is forgotten at the
+    /// next event.
+    pub fn ear_events(&self) -> mpsc::UnboundedReceiver<EarEvent> {
+        let (events, receiver) = mpsc::unbounded_channel();
+        self.ear_consumers().push(events);
+        receiver
+    }
+
+    /// Hands `event` to every consumer of [`Coordinator::ear_events`].
+    /// Called under `inner`'s write lock, so the events go out in the order
+    /// the links changed: a link's places before its going.
+    fn tell_ears(&self, event: EarEvent) {
+        self.ear_consumers()
+            .retain(|consumer| consumer.send(event).is_ok());
+    }
+
+    /// The consumers of ear events - see `Coordinator::ears`.
+    fn ear_consumers(&self) -> std::sync::MutexGuard<'_, Vec<mpsc::UnboundedSender<EarEvent>>> {
+        self.ears.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Replaces the snapshot every subscriber sees with one of `inner`.
@@ -1337,8 +1398,10 @@ impl Coordinator {
                     commands,
                 },
             );
-            // Ahead of the link's levels, which are told under this lock too.
+            // Ahead of the link's levels and places, which are told under
+            // this lock too.
             self.tell_speech(SpeechEvent::LinkUp { mac: mac_addr });
+            self.tell_ears(EarEvent::LinkUp { mac: mac_addr });
             self.broadcast(&inner);
             AapLink {
                 coordinator: self.clone(),
@@ -1406,9 +1469,10 @@ impl Coordinator {
                     queues.remove(&mac_addr);
                 }
                 drop(queues);
-                // After every level the link brought, as those were told
-                // under this lock too.
+                // After every level and place the link brought, as those
+                // were told under this lock too.
                 self.tell_speech(SpeechEvent::LinkGone { mac: mac_addr });
+                self.tell_ears(EarEvent::LinkGone { mac: mac_addr });
             }
             // Without this the UI, tray, attachment and notifier never hear
             // that the connection ended and keep showing the last AAP reading.
@@ -1617,8 +1681,10 @@ impl Coordinator {
     /// Changes the ear state of `client`'s link, and broadcasts if that
     /// changed what the snapshot shows - under the lock it was changed under
     /// (#88). Nothing it shows before the link's first battery packet: that
-    /// broadcasts with the ear state in. Returns when the report held for a
-    /// role switch is to be taken, if one is.
+    /// broadcasts with the ear state in. Tells the consumers of
+    /// [`Coordinator::ear_events`] where the pods are if that changed,
+    /// battery packet or not. Returns when the report held for a role switch
+    /// is to be taken, if one is.
     async fn update_ear(
         &self,
         mac_addr: Address,
@@ -1630,8 +1696,19 @@ impl Coordinator {
         // A packet read just before a disconnect must not land on a newer
         // link.
         let link = inner.live_link(mac_addr, client)?;
+        let places = link.ear.places();
         change(&mut link.ear);
         let held_until = link.ear.held_until();
+        // Under the lock, as the link's going is told: never after it. And
+        // before the snapshot, so whoever sees the pods' new places there
+        // finds the event queued already.
+        if let Some((left, right)) = link.ear.places().filter(|&now| Some(now) != places) {
+            self.tell_ears(EarEvent::Places {
+                mac: mac_addr,
+                left,
+                right,
+            });
+        }
         if inner.linked_live(mac_addr) != shown {
             self.broadcast(&inner);
         }
@@ -2099,6 +2176,7 @@ mod tests {
             queues: std::sync::Mutex::default(),
             resolved: std::sync::Mutex::default(),
             speech: std::sync::Mutex::default(),
+            ears: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(Persistence {
                 keystore: Some(keystore_in(&dir)),
                 saved: HashMap::new(),
@@ -3156,6 +3234,76 @@ mod tests {
                 .await;
             assert_eq!(in_ear(&coordinator), (Some(true), Some(false)), "{place:?}");
         }
+    }
+
+    /// Every link's places are told as they change, from the link's ear state
+    /// alone: nothing before it has both an ear report and the primary pod,
+    /// nothing for a report that changes no pod's place or is held for a
+    /// role switch, and nothing from a stale read loop, an advertisement or
+    /// after the link's going.
+    #[tokio::test]
+    async fn ear_events_are_the_links_places_as_they_change() {
+        let (coordinator, client, _dir) = linked();
+        let mut events = coordinator.ear_events();
+        let gone_consumer = coordinator.ear_events();
+        drop(gone_consumer);
+
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::InEar), MAC, &client)
+            .await;
+        coordinator
+            .handle_primary(Some(PodSide::Left), MAC, &client)
+            .await;
+        // The same again: nothing changed.
+        coordinator
+            .handle_primary(Some(PodSide::Left), MAC, &client)
+            .await;
+        coordinator
+            .handle_ear_report(ear(Place::Out, Place::InEar), MAC, &client)
+            .await;
+        // The first half of a role switch, held: then read with the new
+        // primary, which leaves each pod where it was.
+        assert!(
+            coordinator
+                .handle_ear_report(ear(Place::InEar, Place::Out), MAC, &client)
+                .await
+                .is_some()
+        );
+        coordinator
+            .handle_primary(Some(PodSide::Right), MAC, &client)
+            .await;
+        coordinator
+            .handle_ear_report(ear(Place::InEar, Place::InCase), MAC, &client)
+            .await;
+        // An advertisement, and a read loop of an older link: neither is
+        // the link's ear state.
+        coordinator
+            .handle_advertisement(advertisement(), BLE_MAC)
+            .await;
+        coordinator
+            .handle_ear_report(ear(Place::Out, Place::Out), MAC, &link(None).client)
+            .await;
+        assert!(coordinator.drop_link(MAC, Some(&client)).await);
+
+        let mut told = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            told.push(event);
+        }
+        let places = |left, right| EarEvent::Places {
+            mac: MAC,
+            left,
+            right,
+        };
+        assert_eq!(
+            told,
+            [
+                places(Place::InEar, Place::InEar),
+                places(Place::Out, Place::InEar),
+                places(Place::InCase, Place::InEar),
+                EarEvent::LinkGone { mac: MAC },
+            ]
+        );
+        assert_eq!(coordinator.ear_consumers().len(), 1, "the dropped one goes");
     }
 
     /// A place the app has no meaning for is not taken for out: the pod keeps
