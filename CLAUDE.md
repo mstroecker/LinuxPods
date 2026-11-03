@@ -438,9 +438,12 @@ show unknown, and the Name row until the pods' name is known; BLE is receive-onl
 snapshot turns that switch under `ControlView::syncing_features`, so its `notify::active`
 does not send the setting back out, and a failed command draws the last snapshot again,
 which puts it back. The Name row shows the pods' own name where the link has it, else
-BlueZ's alias, as the switcher does, and the rename dialog starts from the pods' name,
-never the alias; it refuses what `aap::name` would, and the name the pods have, and a
-failed rename is a toast.
+BlueZ's alias, and the rename dialog starts from the pods' name, never the alias; it
+refuses what `aap::name` would, and the name the pods have, and a failed rename is a
+toast. Elsewhere - the switcher, a low battery notification - a pair is named by
+`Snapshot::display_name`: an alias set in BlueZ, else the pods' name, else the alias,
+then the model. BlueZ's alias keeps the old name until the pair connects again, so
+named by it the switcher showed a rename only then (#160).
 Low battery notifications are worked out on the tokio side (`notify::Alerts`) and sent
 from the main context as `GNotification`s, one per pair. They warn once per crossing, never
 per snapshot - the worst band stands until the part charges or clears

@@ -11,9 +11,11 @@ The pods have a name of their own: the one they report to a host as it connects,
 - **The pods' name**: stored on the pods. They send it in the device information packet (`0x1D`) at the start of every AAP connection, and BlueZ reads it as `Device1.Name` when the pair connects.
 - **BlueZ's alias**: `Device1.Alias`, this computer's label for the pair, which GNOME Settings' rename sets and which never reaches the pods (#40, PR #62). Until one is set, BlueZ gives the name as the alias, so the alias follows the pods' name. Once set, it stays whatever the pods are called. Setting it to an empty string clears it; typing the old name back in GNOME does not.
 
-The app never touches the alias, neither setting nor clearing it. Set on every rename, it would pin the name, so that a later rename on the pods - from an iPhone, say - never showed here; cleared, it would throw away a name the user gave in GNOME. With no alias set, the new name shows here at the next reconnect on its own. Whether one is set the app reads as `Alias != Name`, from the names attachment reads with `GetManagedObjects` on every connection BlueZ confirms (`bluez::DeviceNames`). An alias set in GNOME while the pair stays connected is seen at its next connection event.
+The app never touches the alias, neither setting nor clearing it. Set on every rename, it would pin the name, so that a later rename on the pods - from an iPhone, say - never showed here; cleared, it would throw away a name the user gave in GNOME. With no alias set, the new name shows in GNOME at the next reconnect on its own. Whether one is set the app reads as `Alias != Name`, from the names attachment reads with `GetManagedObjects` on every connection BlueZ confirms (`bluez::DeviceNames`). An alias set in GNOME while the pair stays connected is seen at its next connection event.
 
 The Name row shows the pods' name where the link has reported it, else BlueZ's alias, and opens the dialog only once the link has reported the pods' name: started from the alias, Enter would rename the pods to it. The dialog's Rename stays insensitive for the name the pods have.
+
+Elsewhere - the switcher in the header bar, a low battery notification - the app names a pair as the rest of the desktop will once BlueZ has caught up (`Snapshot::display_name`): an alias set in BlueZ, else the pods' name where the link has it, else BlueZ's alias, then the model. Named by the alias alone, the switcher would keep the old name after a rename until the pair connected again: BlueZ's `Name` and `Alias` stayed old until then in the Pro 3 run above (#160). An alias typed back to the pods' old name is the exception: it reads as unset until the pair connects again, so the switcher shows the pods' new name until then, and the alias after; the dialog's body is wrong then too, saying Settings shows the new name once the AirPods connect again, when Settings keeps the alias. Off AAP the pods' name is not known, so a pair renamed and gone shows the old name until BlueZ reads the new one.
 
 ## Rename: `0x1A`
 
@@ -107,7 +109,8 @@ Any name up to 127 bytes is allowed, whatever its characters; over 127 bytes is 
 - Rename from the window on the Pro 3: the name in the next session, and after a reconnect in GNOME.
 - With an alias set in GNOME Settings: the dialog's other body, and the alias left as it was.
 - A name over 127 bytes refused in the dialog; a failed send's toast.
-- After a rename, one reconnect shows the new name in the switcher and in GNOME, without a second reconnect.
+- After a rename, the switcher shows the new name at once, and one reconnect shows it in GNOME, without a second reconnect.
+- With an alias set in GNOME Settings, the switcher keeps the alias after a rename.
 - A rename while another host - the iPhone - is active, before `0x0C` names this host. And does `0x1D` itself wait for `0x0C`, as the noise mode's report does? Then the Name row stays insensitive, on the alias, for as long as the other host is active.
 - The dialog on real GNOME: the focus, the cursor at the end, Enter, a long paste cut to 127 characters.
 - Whether a rename on the iPhone reaches the pods - it would come as `0x1A` from the phone - and so shows here at the next reconnect.

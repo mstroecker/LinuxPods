@@ -75,10 +75,11 @@ changed on a phone are still to be checked (#150).
 
 Device rename changes the name the pods give every host, from the Name row at the bottom
 of the window, up to 127 bytes. The packet is confirmed on a Pro 3 (#160); the window's
-rename is still to be checked on a pair. The pods take the name at once; this computer
-shows it once the pair connects again - unless you gave the pair a name in GNOME
-Settings, which stays - and Apple devices keep the name they have. See
-[`docs/aap-rename.md`](docs/aap-rename.md).
+rename is still to be checked on a pair. The pods take the name at once, and so does the
+app - the Name row, the device switcher, a low battery notification; the rest of this
+computer shows it once the pair connects again - unless you gave the pair a name in
+GNOME Settings, which GNOME, the switcher and the notifications keep showing - and Apple
+devices keep the name they have. See [`docs/aap-rename.md`](docs/aap-rename.md).
 
 ### Linux integration
 
