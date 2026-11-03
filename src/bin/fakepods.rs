@@ -13,6 +13,11 @@
 //! the app keeps keys - as though each had connected to the app before. The
 //! app reads nothing from a pair whose key it lacks.
 //!
+//! With `--player-address`, a fake media player - see `harness::player` -
+//! takes `org.mpris.MediaPlayer2.fakeplayer` on that bus, the app's session
+//! bus, for the app to pause and play as a pod leaves an ear (#167). It
+//! refuses the user's own session bus.
+//!
 //! The save replaces the key file outright, so `--keystore` refuses the app's
 //! own data directory and any directory with a key file in it already. Saved
 //! over the user's keys, the fake ones would leave the app reading nothing
@@ -25,14 +30,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bluer::Address;
-use linuxpods::harness::World;
 use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3};
 use linuxpods::harness::world::DEFAULT_ADAPTER;
+use linuxpods::harness::{FakePlayer, World};
 use linuxpods::keystore::{self, KEYS_FILE, Keystore, PairKeys};
 
 const USAGE: &str = "\
 usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--adapter NAME]
-                [--keystore DIR]
+                [--keystore DIR] [--player-address ADDRESS]
 
   --address ADDRESS  the bus to serve on - a private one, never the system bus
   --socket-dir DIR   where each pair's AAP socket goes: LINUXPODS_AAP_SOCKET_DIR
@@ -41,6 +46,9 @@ usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--adapter 
                      or another such as hci1
   --keystore DIR     save the pairs' keys in DIR/keys.json for the fake world's app;
                      never the app's own data directory, nor a DIR holding keys
+  --player-address ADDRESS
+                     serve a fake media player, org.mpris.MediaPlayer2.fakeplayer,
+                     on the app's session bus - a private one, never the user's
 
 Scenarios:
   in-range   one pair in range, disconnected
@@ -53,6 +61,9 @@ Scenarios:
 /// documentation, so they are nobody's.
 const FIRST: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x01]);
 const SECOND: Address = Address::new([0x00, 0x00, 0x5E, 0x00, 0x53, 0x02]);
+
+/// The fake media player's name, after `org.mpris.MediaPlayer2.`.
+const PLAYER: &str = "fakeplayer";
 
 /// How many advertisers the flood scenario adds a second.
 const FLOOD_RATE: u32 = 20;
@@ -112,6 +123,7 @@ struct Args {
     scenario: Scenario,
     adapter: String,
     keystore: Option<PathBuf>,
+    player_address: Option<String>,
 }
 
 /// `None` for `--help`. `app_dir` is where the app keeps its keys, which
@@ -120,7 +132,7 @@ fn parse_args(
     mut args: impl Iterator<Item = String>,
     app_dir: Option<&Path>,
 ) -> Result<Option<Args>, String> {
-    let (mut address, mut socket_dir, mut keystore) = (None, None, None);
+    let (mut address, mut socket_dir, mut keystore, mut player_address) = (None, None, None, None);
     let mut scenario = Scenario::InRange;
     let mut adapter = DEFAULT_ADAPTER.to_string();
     while let Some(arg) = args.next() {
@@ -133,6 +145,7 @@ fn parse_args(
             "--socket-dir" => socket_dir = Some(PathBuf::from(value)),
             "--adapter" => adapter = value,
             "--keystore" => keystore = Some(PathBuf::from(value)),
+            "--player-address" => player_address = Some(value),
             "--scenario" => {
                 scenario =
                     Scenario::parse(&value).ok_or_else(|| format!("no scenario {value:?}"))?
@@ -148,13 +161,32 @@ fn parse_args(
     if let Some(dir) = &keystore {
         check_keystore(dir, app_dir)?;
     }
+    // The user's players are there, and a fake one among them would be
+    // paused and played by their own LinuxPods.
+    if player_address.as_deref().is_some_and(is_user_session_bus) {
+        return Err("--player-address is the user's session bus; give a private one".into());
+    }
     Ok(Some(Args {
         address,
         socket_dir: socket_dir.ok_or("--socket-dir is required")?,
         scenario,
         adapter,
         keystore,
+        player_address,
     }))
+}
+
+/// Whether `address` names the user's session bus where systemd puts it,
+/// `/run/user/<uid>/bus`.
+fn is_user_session_bus(address: &str) -> bool {
+    address
+        .split([';', ','])
+        .filter_map(|part| part.split_once("path="))
+        .any(|(_, path)| {
+            path.strip_prefix("/run/user/")
+                .and_then(|rest| rest.strip_suffix("/bus"))
+                .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// Refuses a `--keystore` whose save would replace keys this run did not
@@ -212,6 +244,11 @@ async fn run(args: Args) -> Result<()> {
             .with_context(|| format!("failed to save the keys in {}", dir.display()))?;
     }
     world.publish().await?;
+    // Kept until the process ends, which takes it off the bus.
+    let _player = match &args.player_address {
+        Some(address) => Some(FakePlayer::serve(address, PLAYER).await?),
+        None => None,
+    };
     tracing::info!(
         "{} ready on {} with {} pair(s) on {}",
         args.scenario.name(),
@@ -284,6 +321,7 @@ mod tests {
         assert_eq!(args.socket_dir, PathBuf::from("/run/user/1000/aap"));
         assert_eq!(args.adapter, "hci0");
         assert_eq!(args.keystore, None);
+        assert_eq!(args.player_address, None);
         assert_eq!(parse(&["--help"]), Ok(None));
 
         let args = parse(&[
@@ -297,6 +335,41 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(args.adapter, "hci1");
+
+        let args = parse(&[
+            "--address",
+            "unix:path=/tmp/b",
+            "--socket-dir",
+            "/tmp/a",
+            "--player-address",
+            "unix:path=/run/user/1000/linuxpods-harness/world/session/dbus-x,guid=1",
+        ])
+        .unwrap()
+        .unwrap();
+        assert!(args.player_address.is_some());
+    }
+
+    /// The user's own players are there.
+    #[test]
+    fn refuses_the_users_session_bus_for_the_player() {
+        for address in [
+            "unix:path=/run/user/1000/bus",
+            "unix:path=/run/user/1000/bus,guid=0123",
+            "unix:abstract=/tmp/x;unix:path=/run/user/42/bus",
+        ] {
+            let err = parse(&[
+                "--address",
+                "unix:path=/tmp/b",
+                "--socket-dir",
+                "/tmp/a",
+                "--player-address",
+                address,
+            ])
+            .unwrap_err();
+            assert!(err.contains("session bus"), "{address}: {err}");
+        }
+        assert!(!is_user_session_bus("unix:path=/run/user/1000/busy"));
+        assert!(!is_user_session_bus("unix:path=/run/user//bus"));
     }
 
     #[test]

@@ -846,6 +846,14 @@ impl Pods {
         pod.in_ear &= !in_case;
     }
 
+    /// Where a pod is, as its next ear report would give it.
+    pub fn place_of(&self, side: PodSide) -> Place {
+        self.place(match side {
+            PodSide::Left => &self.left,
+            PodSide::Right => &self.right,
+        })
+    }
+
     /// Opens or closes the case. The advertisement carries the lid only while
     /// the pod that sends it is in the case, or both are. With the sending pod
     /// worn and the other in the case, it says only that a pod is in the case,
