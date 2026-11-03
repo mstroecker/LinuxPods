@@ -71,6 +71,8 @@
 //! | `info` | the Info group |
 //! | `rename` | its Name row, insensitive unless the device is on AAP and its link has reported the pods' name; clicked, it opens the rename dialog |
 //! | `device-name` | the row's name: the pods' own, else BlueZ's alias |
+//! | `firmware` | the Info group's Firmware row, insensitive while no version is known |
+//! | `firmware-version` | its version, `9A348`, kept after the link goes; `Unknown` before the pair's first AAP link this run |
 //! | `rename-dialog` | the rename dialog, while open; its responses are buttons labeled `_Cancel` and `_Rename` |
 //! | `rename-entry` | its entry, holding the name; clicked, it renames as Enter does, unless Rename is insensitive - as it is for an empty name, the name the pods have, or one over 127 bytes |
 //! | `rename-error` | the line under it, visible while the name is too long |

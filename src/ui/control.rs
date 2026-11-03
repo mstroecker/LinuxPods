@@ -1,5 +1,5 @@
 //! The Control page: battery display, status text, device switcher, Noise
-//! Control, Features, and Info with the pods' name.
+//! Control, Features, and Info with the pods' name and firmware version.
 
 use std::cell::{Cell, RefCell};
 
@@ -9,6 +9,7 @@ use gtk::{gio, glib};
 
 use super::{RESOURCE_PREFIX, last_seen_text};
 use crate::aap::NoiseMode;
+use crate::aap::info::FirmwareVersion;
 use crate::ble::{decode_color, decode_connection_state};
 use crate::podstate::{DataSource, PodState, Snapshot};
 
@@ -116,6 +117,12 @@ pub struct ControlView {
     /// Its suffix: the pods' own name, else BlueZ's alias - see
     /// [`shown_name`].
     pub name_label: gtk::Label,
+    /// The Info group's Firmware row: nothing to activate, insensitive while
+    /// no version is known.
+    pub firmware_row: adw::ActionRow,
+    /// Its suffix: the version the pair last reported this run, connected or
+    /// not - see [`firmware_text`]. Selectable, to copy into a bug report.
+    pub firmware_label: gtk::Label,
 }
 
 /// The Control page. An `AdwPreferencesPage` for its scrolling, width clamp and
@@ -335,6 +342,23 @@ pub(super) fn create_control_view() -> ControlView {
     name_row.add_suffix(&name_label);
     name_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
     info_group.add(&name_row);
+    // The firmware version, as iOS shows it below the name. Not a command:
+    // shown connected or not, insensitive only while unknown, so the group
+    // keeps its shape.
+    let firmware_label = gtk::Label::builder()
+        .name("firmware-version")
+        .label(firmware_text(None))
+        .selectable(true)
+        .build();
+    firmware_label.add_css_class("dim-label");
+    let firmware_row = adw::ActionRow::builder()
+        .name("firmware")
+        .title("Firmware")
+        .activatable(false)
+        .sensitive(false)
+        .build();
+    firmware_row.add_suffix(&firmware_label);
+    info_group.add(&firmware_row);
     page.add(&info_group);
 
     let content = gtk::Stack::builder().name("content").build();
@@ -354,6 +378,8 @@ pub(super) fn create_control_view() -> ControlView {
         syncing_features: Cell::default(),
         name_row,
         name_label,
+        firmware_row,
+        firmware_label,
     }
 }
 
@@ -453,11 +479,27 @@ fn shown_name(snapshot: &Snapshot, mac: Address) -> Option<String> {
         .or_else(|| snapshot.device_name(mac).map(str::to_string))
 }
 
+/// What the Firmware row shows: the version as the iPhone shows it, `9A348`,
+/// or that none is known - before the pair's first AAP link this run.
+fn firmware_text(version: Option<FirmwareVersion>) -> String {
+    version.map_or_else(|| "Unknown".to_string(), |v| v.to_string())
+}
+
 /// Draws one device, and gates noise control, the features and renaming on
 /// how the data arrived.
 pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option<Address>) {
     let state = mac.and_then(|m| snapshot.states.get(&m));
     let connected = mac.is_some_and(|m| snapshot.is_connected(m));
+
+    // Kept from the pair's last link, so shown whether a reading is or not.
+    let version = mac.and_then(|m| snapshot.firmware_version(m));
+    let text = firmware_text(version);
+    // Set only when it changes, so a render leaves alone a selection the
+    // user is making to copy it.
+    if view.firmware_label.text() != text {
+        view.firmware_label.set_text(&text);
+    }
+    view.firmware_row.set_sensitive(version.is_some());
 
     let name = mac
         .and_then(|m| shown_name(snapshot, m))
@@ -813,6 +855,15 @@ mod tests {
                 "AirPods Pro (11:22:33:44:55:66)",
             ]
         );
+    }
+
+    /// The Firmware row shows the version as the iPhone does, and "Unknown"
+    /// before one is reported.
+    #[test]
+    fn the_firmware_row_shows_the_version_or_unknown() {
+        assert_eq!(firmware_text(None), "Unknown");
+        let version = FirmwareVersion::from_raw(9_442_752);
+        assert_eq!(firmware_text(Some(version)), "9A348");
     }
 
     /// The MAC as the rest of the desktop shows it, uppercase.
