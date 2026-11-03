@@ -268,15 +268,7 @@ pub fn fresh(state: &PodState, now: Instant) -> bool {
 fn notice(mac: Address, warned: &[Option<Warned>; 3], snapshot: &Snapshot) -> Notice {
     let critical = warned.iter().flatten().any(|w| w.band == Band::Critical);
     let name = snapshot
-        .device_name(mac)
-        .map(str::to_string)
-        .or_else(|| {
-            snapshot
-                .states
-                .get(&mac)
-                .and_then(|s| s.identity)
-                .map(|identity| identity.model_name())
-        })
+        .display_name(mac)
         .unwrap_or_else(|| "AirPods".to_string());
     let title = if critical {
         format!("{name} battery critically low")
@@ -668,6 +660,21 @@ mod tests {
         assert_eq!(
             alerts.update(&snap, now),
             [Action::Withdraw("low-battery-00:00:5E:00:53:01".into())]
+        );
+
+        // Renamed, with no alias set: BlueZ's alias is the old name until the
+        // pair connects again, and the notice names the pods' new one.
+        let mut alerts = Alerts::default();
+        let mut renamed = snapshot([(PAIR, aap([Some(15), Some(50), None]))]);
+        renamed.states.get_mut(&PAIR).unwrap().name = Some("Test Pods".into());
+        let names = DeviceNames {
+            alias: "Marcel’s AirPods".into(),
+            name: Some("Marcel’s AirPods".into()),
+        };
+        renamed.device_names.insert(PAIR, names);
+        assert_eq!(
+            shown(&alerts.update(&renamed, now)),
+            [("Test Pods battery low", "Left 15%")]
         );
     }
 

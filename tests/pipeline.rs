@@ -1434,8 +1434,9 @@ async fn renames_sent(fixture: &Fixture, mac: Address) -> Vec<Vec<u8>> {
 /// The name comes from the startup dump, and a rename goes out as 0x1A, the
 /// snapshot showing it at once, as nothing answers it. The pods take it, the
 /// next connection's dump reports it, and BlueZ's `Name`, and so its alias,
-/// follow once the pair has connected again (#160). An alias set in BlueZ is
-/// left alone, and stays on show in the switcher.
+/// follow once the pair has connected again (#160). The name the app shows
+/// for the pair - the switcher's - is the new one at once, before BlueZ's.
+/// An alias set in BlueZ is left alone, and stays on show in the switcher.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rename_is_recorded_and_the_next_connection_reports_it() {
     let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
@@ -1453,10 +1454,10 @@ async fn a_rename_is_recorded_and_the_next_connection_reports_it() {
         .command(PAIR, Command::Rename("Test Pods".into()))
         .await
         .unwrap();
-    assert_eq!(
-        pods_name(&app.updates.borrow(), PAIR).as_deref(),
-        Some("Test Pods")
-    );
+    let snapshot = app.updates.borrow().clone();
+    assert_eq!(pods_name(&snapshot, PAIR).as_deref(), Some("Test Pods"));
+    assert_eq!(snapshot.device_name(PAIR), Some("Fake AirPods"));
+    assert_eq!(snapshot.display_name(PAIR).as_deref(), Some("Test Pods"));
     let world = &fixture.world;
     eventually("the pair to take the name", move || async move {
         world.name(PAIR).await.unwrap() == b"Test Pods"
@@ -1499,10 +1500,12 @@ async fn a_rename_is_recorded_and_the_next_connection_reports_it() {
         })
         .await;
     assert!(snapshot.has_alias(PAIR));
-    app.until("the pods' own name", |s| {
-        pods_name(s, PAIR).as_deref() == Some("Test Pods")
-    })
-    .await;
+    let snapshot = app
+        .until("the pods' own name", |s| {
+            pods_name(s, PAIR).as_deref() == Some("Test Pods")
+        })
+        .await;
+    assert_eq!(snapshot.display_name(PAIR).as_deref(), Some("Kitchen"));
 }
 
 /// A name the pods would not take - empty, with a NUL, over 127 bytes, in

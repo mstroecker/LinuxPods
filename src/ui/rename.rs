@@ -3,10 +3,11 @@
 //!
 //! The name is the pods' own - the one they report to a host - and never
 //! BlueZ's alias, which this computer keeps for itself: the body says when the
-//! new name shows here, and that Apple devices keep theirs. A name the pods would
-//! not take is refused here, as `aap::name` refuses it again before anything
-//! is sent: over 127 bytes marks the entry as an error, and an empty one
-//! leaves Rename insensitive, as does the name the pods have already.
+//! rest of this computer - GNOME Settings, say - shows the new name, and that
+//! Apple devices keep theirs. A name the pods would not take is refused here,
+//! as `aap::name` refuses it again before anything is sent: over 127 bytes
+//! marks the entry as an error, and an empty one leaves Rename insensitive,
+//! as does the name the pods have already.
 //! Nothing is cut by bytes: a name over 127 bytes in fewer characters is
 //! marked, not cut. `max-length` stops a text at 127 characters, and cuts a
 //! longer paste to them.
@@ -19,15 +20,18 @@ use crate::aap::name::{self, NameError};
 const CANCEL: &str = "cancel";
 const RENAME: &str = "rename";
 
-/// The dialog's body: when the new name shows on this computer, which is
-/// never while an alias is set in GNOME Settings, and that Apple devices
-/// keep their own name - an iPhone did not follow a rename made here.
+/// The dialog's body: when GNOME Settings shows the new name, which is never
+/// while an alias is set there, and that Apple devices keep their own name -
+/// an iPhone did not follow a rename made here. The window's Name row shows
+/// the new name at once, alias or not; an alias set in GNOME Settings stays
+/// on show there, on the rest of the desktop, and in the switcher and the
+/// notifications - see `Snapshot::display_name`.
 pub(super) fn body(alias_set: bool) -> &'static str {
     if alias_set {
-        "This computer keeps showing the name you gave the AirPods in Settings. \
+        "Settings keeps showing the name you gave the AirPods there. \
          Apple devices keep the name they have."
     } else {
-        "This computer shows the new name once the AirPods connect again. \
+        "Settings shows the new name once the AirPods connect again. \
          Apple devices keep the name they have."
     }
 }
@@ -183,8 +187,12 @@ mod tests {
 
     #[test]
     fn the_body_says_where_the_name_shows() {
-        assert!(body(false).contains("once the AirPods connect again"));
-        assert!(body(true).contains("the name you gave the AirPods in Settings"));
+        assert!(
+            body(false).starts_with("Settings shows the new name once the AirPods connect again.")
+        );
+        assert!(
+            body(true).starts_with("Settings keeps showing the name you gave the AirPods there.")
+        );
         for alias_set in [false, true] {
             assert!(body(alias_set).ends_with("Apple devices keep the name they have."));
         }
