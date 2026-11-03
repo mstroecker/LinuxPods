@@ -408,26 +408,18 @@ pub(super) fn sync_device_list(view: &ControlView, macs: &[Address], snapshot: &
     view.device_dropdown.set_visible(macs.len() > 1);
 }
 
-/// Names one entry of the switcher, in descending order of usefulness: the BlueZ
-/// alias (what the user named the device, and what the rest of the desktop shows),
-/// then the model decoded from BLE, then the bare MAC.
+/// Names one entry of the switcher by [`Snapshot::display_name`] - an alias
+/// set in BlueZ, else the pods' own name, else BlueZ's alias, then the model -
+/// and by the bare MAC when nothing names it. The pods' name comes before
+/// BlueZ's alias so that a rename shows at once, not when the pair connects
+/// again; the labels are compared on every snapshot, so a new name alone
+/// redraws the switcher.
 ///
 /// The MAC is appended whenever a label would otherwise be ambiguous - two pairs of
 /// the same model, or two devices the user gave the same name - since the entries
 /// would otherwise be impossible to tell apart.
 fn device_labels(macs: &[Address], snapshot: &Snapshot) -> Vec<String> {
-    let names: Vec<Option<String>> = macs
-        .iter()
-        .map(|&mac| {
-            snapshot.device_name(mac).map(str::to_string).or_else(|| {
-                snapshot
-                    .states
-                    .get(&mac)
-                    .and_then(|s| s.identity)
-                    .map(|identity| identity.model_name())
-            })
-        })
-        .collect();
+    let names: Vec<Option<String>> = macs.iter().map(|&mac| snapshot.display_name(mac)).collect();
 
     macs.iter()
         .zip(&names)
@@ -450,8 +442,9 @@ pub(super) fn choose_device(current: Option<Address>, snapshot: &Snapshot) -> Op
 }
 
 /// The name the Name row shows for `mac`: the pods' own, as the link reports
-/// it and a rename records it, else BlueZ's alias, as the switcher shows -
-/// the pods' name is known only on AAP.
+/// it and a rename records it, else BlueZ's alias - the pods' name is known
+/// only on AAP. Unlike the switcher's [`Snapshot::display_name`], the pods'
+/// name comes before an alias set in BlueZ too, as it is what the row renames.
 fn shown_name(snapshot: &Snapshot, mac: Address) -> Option<String> {
     snapshot
         .states
@@ -757,6 +750,69 @@ mod tests {
         snap.states.get_mut(&MAC_1).unwrap().name = Some("Test Pods".into());
         assert_eq!(shown_name(&snap, MAC_1).as_deref(), Some("Test Pods"));
         assert_eq!(shown_name(&snap, MAC_2), None);
+    }
+
+    /// The switcher names a pair by the pods' own name, where the link has
+    /// it, before BlueZ's alias: after a rename the alias keeps the old name
+    /// until the pair connects again, and the switcher showed it that long
+    /// (#160). Without the pods' name it is the alias, as before.
+    #[test]
+    fn labels_take_the_pods_name_before_the_alias() {
+        let macs = [MAC_1, MAC_2];
+        let mut snap = snapshot(
+            &[(MAC_1, "Old Pods"), (MAC_2, "AirPods Pro")],
+            &[(MAC_1, Some(0x2027)), (MAC_2, Some(0x2024))],
+        );
+        // BlueZ's names before an alias is set: the alias is the name.
+        for names in snap.device_names.values_mut() {
+            names.name = Some(names.alias.clone());
+        }
+        assert_eq!(device_labels(&macs, &snap), ["Old Pods", "AirPods Pro"]);
+
+        snap.states.get_mut(&MAC_1).unwrap().name = Some("Test Pods".into());
+        assert_eq!(device_labels(&macs, &snap), ["Test Pods", "AirPods Pro"]);
+        assert_eq!(snap.display_name(MAC_1).as_deref(), Some("Test Pods"));
+
+        // BlueZ's names not read at all: the pods' name still wins.
+        snap.device_names.clear();
+        assert_eq!(
+            device_labels(&macs, &snap),
+            ["Test Pods", "AirPods Pro (2nd gen, USB-C)"]
+        );
+    }
+
+    /// An alias set in BlueZ - GNOME Settings' rename - is what this computer
+    /// shows whatever the pods are called, so it wins over the pods' name in
+    /// the switcher, though the Name row shows the pods'.
+    #[test]
+    fn an_alias_set_in_bluez_wins_over_the_pods_name() {
+        let macs = [MAC_1];
+        let mut snap = snapshot(&[(MAC_1, "Kitchen")], &[(MAC_1, None)]);
+        snap.device_names.get_mut(&MAC_1).unwrap().name = Some("Old Pods".into());
+        snap.states.get_mut(&MAC_1).unwrap().name = Some("Test Pods".into());
+        assert!(snap.has_alias(MAC_1));
+        assert_eq!(device_labels(&macs, &snap), ["Kitchen"]);
+        assert_eq!(snap.display_name(MAC_1).as_deref(), Some("Kitchen"));
+        assert_eq!(shown_name(&snap, MAC_1).as_deref(), Some("Test Pods"));
+    }
+
+    /// The pods' name is compared like any other label: a pair renamed to
+    /// another's name carries its MAC.
+    #[test]
+    fn a_pods_name_like_another_pairs_keeps_the_mac() {
+        let macs = [MAC_1, MAC_2];
+        let mut snap = snapshot(
+            &[(MAC_1, "Old Pods"), (MAC_2, "AirPods Pro")],
+            &[(MAC_1, None)],
+        );
+        snap.states.get_mut(&MAC_1).unwrap().name = Some("AirPods Pro".into());
+        assert_eq!(
+            device_labels(&macs, &snap),
+            [
+                "AirPods Pro (AA:BB:CC:DD:EE:FF)",
+                "AirPods Pro (11:22:33:44:55:66)",
+            ]
+        );
     }
 
     /// The MAC as the rest of the desktop shows it, uppercase.

@@ -376,6 +376,39 @@ impl Snapshot {
             .is_some_and(DeviceNames::has_alias)
     }
 
+    /// The name the app gives `mac` where it names a pair - the switcher, a
+    /// low battery notification: the one the rest of the desktop shows once
+    /// BlueZ has caught up. An alias set in BlueZ first, as this computer
+    /// shows it whatever the pods are called; else the pods' own name, where
+    /// the link has reported it or a rename recorded it - BlueZ's `Name`, and
+    /// the alias that follows it, keep the old name until the pair connects
+    /// again, so a rename showed in the switcher only then (#160); else
+    /// BlueZ's alias, then the model. `None` when nothing names it.
+    ///
+    /// But for an alias typed back to the pods' old name: [`has_alias`] reads
+    /// it as unset until the pair connects again, so the pods' new name shows
+    /// until then, and the alias after.
+    ///
+    /// Not the Info group's Name row, which shows the pods' name before any
+    /// alias: that row is what a rename changes.
+    ///
+    /// [`has_alias`]: Snapshot::has_alias
+    pub fn display_name(&self, mac: Address) -> Option<String> {
+        let state = self.states.get(&mac);
+        let alias = self.device_name(mac).map(str::to_string);
+        let pods = state.and_then(|state| state.name.clone());
+        if self.has_alias(mac) {
+            alias
+        } else {
+            pods.or(alias)
+        }
+        .or_else(|| {
+            state
+                .and_then(|state| state.identity)
+                .map(|identity| identity.model_name())
+        })
+    }
+
     pub fn is_connected(&self, mac: Address) -> bool {
         self.connected_macs.contains(&mac)
     }

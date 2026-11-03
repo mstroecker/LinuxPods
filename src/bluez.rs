@@ -913,15 +913,18 @@ impl Devices {
     /// [`DeviceNames`].
     ///
     /// The alias is the name the user sees everywhere else on the desktop - their
-    /// own rename if they made one, the device's advertised name otherwise - so it
-    /// is what the device switcher should show. The name says whether the alias
-    /// is a rename: read from the same reply, it costs no call of its own.
+    /// own rename if they made one, the device's advertised name otherwise. The
+    /// device switcher shows it first only when one is set, and the pods' own
+    /// name before it otherwise - see `Snapshot::display_name`. The name says
+    /// whether the alias is a rename: read from the same reply, it costs no
+    /// call of its own.
     pub async fn device_names(&self) -> HashMap<Address, DeviceNames> {
         match self.read_device_names().await {
             Ok(names) => names,
             Err(e) => {
                 // Names are cosmetic: without them the switcher falls back to the
-                // model or the MAC, so this must never be fatal.
+                // pods' own name, then the model or the MAC, so this must never
+                // be fatal.
                 tracing::debug!("failed to read device names: {e:#}");
                 HashMap::new()
             }
@@ -1249,7 +1252,8 @@ pub struct DeviceNames {
 impl DeviceNames {
     /// Whether an alias is set: one that differs from the device's own name.
     /// Typed back to the name in GNOME Settings it reads as unset, though
-    /// BlueZ keeps it: it shows the same, and only clearing it would tell.
+    /// BlueZ keeps it: it shows the same until the pods' name changes, and
+    /// BlueZ reads the new one at the next connection.
     pub fn has_alias(&self) -> bool {
         self.name.as_ref().is_some_and(|name| *name != self.alias)
     }
