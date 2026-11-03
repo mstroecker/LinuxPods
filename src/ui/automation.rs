@@ -79,6 +79,7 @@
 //! | `preferences` | the Preferences dialog, while open |
 //! | `auto-connect` | its switch, always insensitive |
 //! | `battery-notifications` | its switch for low battery notifications, as saved: on unless turned off |
+//! | `pause-on-ear` | its switch for pausing the media when a pod leaves an ear, as saved: on unless turned off |
 //! | `device-<MAC>` | a device's row in the Development group |
 //! | `device-status-<MAC>` | its status: Connected, Advertising, ... |
 //! | `about` | the About dialog, while open |

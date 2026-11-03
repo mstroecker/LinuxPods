@@ -7,7 +7,9 @@
 //! notifications and a quit asked for by SIGTERM or SIGINT to the GTK main
 //! context on async channels.
 
-use linuxpods::{APP_ID, attachment, ble, indicator, notify, podstate, settings, ui, volume};
+use linuxpods::{
+    APP_ID, attachment, ble, indicator, media, notify, podstate, settings, ui, volume,
+};
 
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
@@ -119,6 +121,20 @@ impl Primary {
         let (lowering, volume) =
             volume::Volume::new(&coordinator, Box::new(zbus::connection::Builder::system));
         runtime.spawn(lowering.run());
+        // Players on the session bus, the transport on the system bus, each
+        // connected once an ear event asks for it; on or off as the
+        // Preferences switch is, which starts as saved before anything is
+        // decided.
+        let (pause_on_ear, switch) =
+            tokio::sync::watch::channel(media::Switch::new(settings.get().pause_on_ear));
+        let (pausing, _) = media::Media::new(
+            &coordinator,
+            switch,
+            Box::new(zbus::connection::Builder::system),
+            Box::new(zbus::connection::Builder::session),
+        );
+        runtime.spawn(pausing.run());
+        ui::add_pause_on_ear(app, settings.clone(), pause_on_ear);
         // Worked out on the runtime, beside the tray, and sent from the main
         // context, where the application is.
         let (notices_tx, notices_rx) = async_channel::unbounded();
