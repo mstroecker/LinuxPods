@@ -9,7 +9,7 @@
 //! context on async channels.
 
 use linuxpods::{
-    APP_ID, attachment, ble, indicator, media, notify, podstate, settings, ui, volume,
+    APP_ID, attachment, ble, indicator, media, notify, podstate, readings, settings, ui, volume,
 };
 
 use std::cell::{OnceCell, RefCell};
@@ -299,11 +299,19 @@ fn main() -> glib::ExitCode {
     // A volume lowered while the user spoke is put back before the runtime
     // goes, which would take the task along with it - but not for longer
     // than a moment: a BlueZ that does not answer must not hold the quit up.
+    // The last readings are saved meanwhile, as they are, for the next run.
+    // That is waited for, without a bound: a small file on the local disk, as
+    // the keys are, and a bound would stop only the wait - the write runs on
+    // the blocking pool, which dropping the runtime waits for anyway.
     if let Some(primary) = primary.get() {
         let volume = primary.volume.clone();
+        let coordinator = primary.coordinator.clone();
         // The timeout made inside the runtime, whose timer it needs.
-        let restored = runtime.block_on(async move {
-            tokio::time::timeout(volume::RESTORE_LIMIT, volume.restore_all()).await
+        let (restored, ()) = runtime.block_on(async move {
+            tokio::join!(
+                tokio::time::timeout(volume::RESTORE_LIMIT, volume.restore_all()),
+                coordinator.save_readings(std::time::Duration::ZERO),
+            )
         });
         if restored.is_err() {
             tracing::warn!(
@@ -383,11 +391,15 @@ async fn quit_on_signals(quit: async_channel::Sender<()>) {
 
 /// Expires cached BLE readings on a clock. Advertisements prune as they arrive,
 /// but with no device in range none arrive, and a cached reading would never go.
+///
+/// Saves them for the next run on the same clock, when they are worth a write
+/// (`readings::due`): never per advertisement, and at most once a minute.
 async fn expiry_task(coordinator: Arc<Coordinator>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
     loop {
         tick.tick().await;
         coordinator.expire().await;
+        coordinator.save_readings(readings::HEARD_REFRESH).await;
     }
 }
 

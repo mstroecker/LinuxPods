@@ -1037,6 +1037,52 @@ async fn a_closed_lid_stays_on_show_while_the_pods_are_quiet() {
         .await;
 }
 
+/// A pair put away in its closed case before a relaunch shows its last
+/// reading after it, though it says nothing: the app saves each pair's last
+/// reading as it quits, and the next one loads it (#170). The lid, stale by
+/// then, stays behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_pairs_last_reading_outlives_a_relaunch() {
+    let fixture = Fixture::new(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let mut app = fixture.start_app().await;
+    app.until("a BLE reading", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+    let world = &fixture.world;
+    world
+        .with_pods(PAIR, |pods| pods.set_lid(false))
+        .await
+        .unwrap();
+    eventually("the pods to go quiet", move || async move {
+        world.advertising(PAIR).await.unwrap().is_empty()
+    })
+    .await;
+    // As main.rs does once the app has quit.
+    app.coordinator.save_readings(Duration::ZERO).await;
+    drop(app);
+
+    let app = fixture.start_app().await;
+    let snapshot = app.updates.borrow().clone();
+    let state = snapshot
+        .states
+        .get(&PAIR)
+        .expect("the last reading at once");
+    assert_eq!(
+        levels(&snapshot, PAIR, DataSource::Ble),
+        Some(PAIR_LEVELS),
+        "{state:#?}"
+    );
+    assert_eq!(state.identity.map(|i| i.product_id), Some(PRO_3));
+    assert_eq!(state.lid_open, None, "stale by the time it loaded");
+    assert!(
+        state
+            .last_seen
+            .is_some_and(|seen| seen <= SystemTime::now())
+    );
+}
+
 /// What the pair's key decrypts counts only from an address its IRK
 /// resolves: from any other address - a replay, or a spoof - it is dropped,
 /// though it decrypts. From the pair's own address the same advertisement

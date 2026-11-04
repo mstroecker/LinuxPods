@@ -599,17 +599,11 @@ impl Attachment {
 
     /// Mirrors each attached pair's lowest earbud into GNOME Settings, from
     /// whichever source has it - AAP once the link has reported, BLE
-    /// otherwise.
+    /// otherwise - see [`exported_levels`].
     async fn sync_batteries(&mut self, updates: &mut watch::Receiver<Snapshot>) {
         // Read out first: the borrow is a read lock every broadcast waits for, so it
         // must not live across the awaits below.
-        let levels: HashMap<Address, u8> = {
-            let snapshot = updates.borrow_and_update();
-            self.attached
-                .keys()
-                .filter_map(|&mac| Some((mac, snapshot.states.get(&mac)?.lowest_earbud()?)))
-                .collect()
-        };
+        let levels = exported_levels(&self.attached, &updates.borrow_and_update());
 
         for action in battery_actions(&self.attached, &levels) {
             let Some(adapter) = self.attached.get(&action.mac()).map(|p| p.adapter.clone()) else {
@@ -819,6 +813,28 @@ async fn register_provider(conn: &ProviderConnection, adapter: &str) -> Option<B
     }
 }
 
+/// The level GNOME Settings shows for each attached pair with a reading: its
+/// lowest earbud.
+///
+/// Not from a reading an earlier run saved (`PodState::restored`): the pair
+/// connected at login would show yesterday's level there until its first
+/// packet. The app's window shows that reading, with its age; `Battery1`
+/// has none, and shows it as now. A freshness window would not do: the
+/// battery would be withdrawn and exported again as a reading aged past it
+/// and came back, #62's flapping.
+fn exported_levels(
+    attached: &HashMap<Address, Attached>,
+    snapshot: &Snapshot,
+) -> HashMap<Address, u8> {
+    attached
+        .keys()
+        .filter_map(|&mac| {
+            let state = snapshot.states.get(&mac).filter(|state| !state.restored)?;
+            Some((mac, state.lowest_earbud()?))
+        })
+        .collect()
+}
+
 /// Decides how the GNOME Settings batteries change so that each attached pair
 /// shows its reading, and one without a reading shows nothing.
 ///
@@ -858,6 +874,7 @@ fn battery_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::podstate::{DataSource, PodState};
 
     const MAC_A: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
     const PATH_A: &str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
@@ -882,6 +899,32 @@ mod tests {
 
     fn levels(entries: &[(Address, u8)]) -> HashMap<Address, u8> {
         entries.iter().copied().collect()
+    }
+
+    /// A reading an earlier run saved is not exported: GNOME Settings would
+    /// show it as now. Heard again this run, the pair's reading is.
+    #[test]
+    fn a_restored_reading_is_not_exported() {
+        let mut state = PodState::empty(DataSource::Ble);
+        state.left_battery = Some(40);
+        state.right_battery = Some(50);
+        state.restored = true;
+        let mut snapshot = Snapshot {
+            states: HashMap::from([(MAC_A, state.clone())]),
+            ..Snapshot::default()
+        };
+        assert!(exported_levels(&attached_a(None), &snapshot).is_empty());
+
+        state.restored = false;
+        snapshot.states.insert(MAC_A, state);
+        assert_eq!(
+            exported_levels(&attached_a(None), &snapshot),
+            levels(&[(MAC_A, 40)])
+        );
+        assert!(
+            exported_levels(&HashMap::new(), &snapshot).is_empty(),
+            "only an attached pair's"
+        );
     }
 
     /// Nothing is exported until the first reading, and then at that level -

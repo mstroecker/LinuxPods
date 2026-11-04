@@ -22,6 +22,12 @@
 //! connection state - and in-ear until the link has reported it, see
 //! [`EarState`].
 //!
+//! The cache outlives the app, too: each cached reading's levels, charging and
+//! model are saved in [`readings`], every so often and as the app quits, and
+//! loaded at the next start, so a pair put away in its case before a relaunch
+//! shows its last reading rather than nothing (#170). Ages are on the wall
+//! clock for that, and for a machine that slept - see [`age`].
+//!
 //! A link supersedes the cached reading from its first battery packet, not
 //! from when it comes up: in between - about a second on one pair - the
 //! device would show no reading at all, and its GNOME Settings battery would
@@ -64,6 +70,7 @@ use crate::ble::parser::{PodSide, ProximityData};
 use crate::ble::rpa::{self, ResolvedAddresses};
 use crate::bluez::DeviceNames;
 use crate::keystore::{Keystore, PairKeys};
+use crate::readings::{self, Reading};
 
 /// How long the last advertisement of an identified device stays on show: a day,
 /// as a pair in a closed case says nothing, and its last levels are still a hint
@@ -77,7 +84,7 @@ pub const BLE_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// The wall clock, not [`Instant`]: on Linux that is `CLOCK_MONOTONIC`, which
 /// stands still while the machine sleeps, so a reading from before a night's
 /// suspend would read "30 min ago" the next morning and expire hours late -
-/// and a reading kept across a relaunch needs a time
+/// and a reading kept across a relaunch ([`crate::readings`]) needs a time
 /// that means something to the next run (#170).
 ///
 /// `None` for a time after `now`: the clock was set back since, and how old
@@ -342,9 +349,17 @@ pub struct PodState {
     /// from. `None` for AAP, which knows only the real one.
     pub current_ble_mac: Option<Address>,
 
+    /// Whether this is a reading an earlier run saved ([`crate::readings`]),
+    /// the pair not heard again since. Shown, with its age, but not exported
+    /// to GNOME Settings: a pair connected at login would get yesterday's
+    /// level there until its first packet. The next advertisement replaces it
+    /// with one that is not, and none turns back, so the battery there is
+    /// never withdrawn and exported again for it (#62). False for AAP.
+    pub restored: bool,
+
     /// When the advertisement behind a BLE reading arrived, on the wall clock -
     /// see [`age`]. It may be a cached one up to [`BLE_CACHE_TTL`] old, from
-    /// before the app started too. `None` for AAP, which
+    /// before the app started too ([`crate::readings`]). `None` for AAP, which
     /// is always live.
     pub last_seen: Option<SystemTime>,
 }
@@ -371,6 +386,7 @@ impl PodState {
             name: None,
             identity: None,
             current_ble_mac: None,
+            restored: false,
             last_seen: None,
         }
     }
@@ -520,6 +536,39 @@ struct Entry {
     last_seen: SystemTime,
 }
 
+impl Entry {
+    /// The entry for a reading an earlier run saved: what an advertisement
+    /// would have left, but for what was stale by the time it loaded -
+    /// in-ear, the lid, the connection state - and the address it came from.
+    fn restored(reading: &Reading) -> Self {
+        Self {
+            state: PodState {
+                source: DataSource::Ble,
+                left_battery: reading.left_battery,
+                right_battery: reading.right_battery,
+                case_battery: reading.case_battery,
+                left_charging: reading.left_charging,
+                right_charging: reading.right_charging,
+                case_charging: reading.case_charging,
+                left_in_ear: None,
+                right_in_ear: None,
+                lid_open: None,
+                connection_state: None,
+                noise_mode: None,
+                conversation_awareness: None,
+                speech_level: None,
+                name: None,
+                identity: Some(reading.identity),
+                current_ble_mac: None,
+                restored: true,
+                // Stamped from the entry in `snapshot`.
+                last_seen: None,
+            },
+            last_seen: reading.heard,
+        }
+    }
+}
+
 /// One device's AAP connection.
 struct Link {
     /// Shared with the link's read loop, which reads this client and no other.
@@ -602,8 +651,10 @@ impl Live {
 }
 
 struct Inner {
-    /// The last advertisement per device - BLE only. The connected device's entry
-    /// keeps updating underneath AAP, so it is current when the link drops.
+    /// The last advertisement per device - BLE only - or, until the pair is
+    /// heard again, the reading an earlier run saved (`crate::readings`). The
+    /// connected device's entry keeps updating underneath AAP, so it is
+    /// current when the link drops.
     ble: HashMap<Address, Entry>,
     /// One per live AAP link, keyed by real MAC.
     links: HashMap<Address, Link>,
@@ -669,6 +720,28 @@ impl Inner {
         self.ble
             .retain(|_, e| age(e.last_seen, now).is_some_and(|age| age < BLE_CACHE_TTL));
         self.ble.len() != before
+    }
+
+    /// What [`readings`] keeps of each cached advertisement, for the next run.
+    fn readings(&self) -> HashMap<Address, Reading> {
+        self.ble
+            .iter()
+            .filter_map(|(&mac, entry)| {
+                let state = &entry.state;
+                let reading = Reading {
+                    left_battery: state.left_battery,
+                    right_battery: state.right_battery,
+                    case_battery: state.case_battery,
+                    left_charging: state.left_charging,
+                    right_charging: state.right_charging,
+                    case_charging: state.case_charging,
+                    // Every advertisement cached has one.
+                    identity: state.identity?,
+                    heard: entry.last_seen,
+                };
+                Some((mac, reading))
+            })
+            .collect()
     }
 
     /// What a snapshot shows for a device on AAP: its link's reading, with
@@ -754,6 +827,63 @@ struct Persistence {
     /// memory differs from this. Judged against memory instead, a key whose save
     /// failed looked unchanged the next time it arrived, and was never written.
     saved: HashMap<Address, PairKeys>,
+}
+
+/// Where `Inner::ble`'s readings are saved for the next run, and what was
+/// last saved there - see [`Coordinator::save_readings`].
+struct SavedReadings {
+    /// `None` when they are not saved: the keystore's data directory could
+    /// not be set up, or its key file not moved out of the way.
+    store: Option<readings::Store>,
+    /// The readings as last loaded or saved successfully: a save is judged
+    /// against these, so one that failed is tried again.
+    saved: HashMap<Address, Reading>,
+    /// Whether the last save failed, so a disk that keeps refusing warns once.
+    failing: bool,
+}
+
+/// The readings an earlier run saved in `store` that are worth putting on
+/// show at `now`: of a pair with keys, heard less than [`BLE_CACHE_TTL`]
+/// ago, and not after `now` - see [`age`]. A file that does not load is set
+/// aside, and none are.
+fn load_readings(
+    store: &readings::Store,
+    keys: &HashMap<Address, PairKeys>,
+    now: SystemTime,
+) -> HashMap<Address, Reading> {
+    let mut loaded = match store.load() {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            // Left in place it would do no harm - the next save replaces it -
+            // but it would be gone without a trace.
+            match store.set_aside() {
+                Ok(aside) => tracing::warn!(
+                    "failed to load the last readings: {e:#}; moved the file to {} and \
+                     starting without them",
+                    aside.display()
+                ),
+                Err(set_aside) => tracing::warn!(
+                    "failed to load the last readings: {e:#}, nor could the file be moved \
+                     aside ({set_aside:#}); starting without them, and the next save \
+                     replaces it"
+                ),
+            }
+            return HashMap::new();
+        }
+    };
+    let read = loaded.len();
+    loaded.retain(|mac, reading| {
+        keys.contains_key(mac) && age(reading.heard, now).is_some_and(|age| age < BLE_CACHE_TTL)
+    });
+    if read > 0 {
+        tracing::info!(
+            "Loaded the last readings of {} pair(s) from disk; left out {} too old, \
+             heard after now, or of a pair with no key",
+            loaded.len(),
+            read - loaded.len()
+        );
+    }
+    loaded
 }
 
 /// A device's AAP link as [`Coordinator::open_aap`] opens it, for
@@ -868,6 +998,10 @@ pub struct Coordinator {
     /// file. Owned by the save while it runs - see
     /// `Coordinator::store_keys`.
     keystore: Arc<Mutex<Persistence>>,
+    /// Held across a save of the readings, so saves never overlap - they
+    /// share a temporary file. Owned by the save while it runs, as the
+    /// keystore's is - see `Coordinator::save_readings`.
+    readings: Arc<Mutex<SavedReadings>>,
     /// The latest snapshot, which every subscriber sees - see [`Coordinator::subscribe`].
     updates: watch::Sender<Snapshot>,
     /// Where [`Coordinator::open_aap`] opens links in place of L2CAP, under
@@ -949,7 +1083,8 @@ impl Coordinator {
         })
     }
 
-    /// Loads the keystore's keys into a coordinator that opens links over L2CAP.
+    /// Loads the keystore's keys, and the readings saved beside them, into a
+    /// coordinator that opens links over L2CAP.
     fn from_keystore(mut keystore: Option<Keystore>) -> Self {
         let mut loaded = HashMap::new();
         if let Some(ks) = &keystore {
@@ -983,12 +1118,30 @@ impl Coordinator {
             }
         }
 
+        // Beside the keys, so a test's or the fake world's keystore keeps them
+        // out of the user's data directory too.
+        let readings_store = keystore
+            .as_ref()
+            .map(|ks| readings::Store::with_dir(ks.dir().to_path_buf()));
+        let restored = readings_store
+            .as_ref()
+            .map(|store| load_readings(store, &loaded, SystemTime::now()))
+            .unwrap_or_default();
+        let saved_readings = SavedReadings {
+            store: readings_store,
+            saved: restored.clone(),
+            failing: false,
+        };
+
         let persistence = Persistence {
             keystore,
             saved: loaded.clone(),
         };
         let inner = Inner {
-            ble: HashMap::new(),
+            ble: restored
+                .iter()
+                .map(|(&mac, reading)| (mac, Entry::restored(reading)))
+                .collect(),
             links: HashMap::new(),
             keys: loaded,
             device_names: HashMap::new(),
@@ -1003,6 +1156,7 @@ impl Coordinator {
             speech: std::sync::Mutex::default(),
             ears: std::sync::Mutex::default(),
             keystore: Arc::new(Mutex::new(persistence)),
+            readings: Arc::new(Mutex::new(saved_readings)),
             updates,
             #[cfg(feature = "harness")]
             aap_socket_dir: None,
@@ -1149,6 +1303,53 @@ impl Coordinator {
         }
     }
 
+    /// Saves each cached reading for the next run (#170), if
+    /// [`readings::due`] says they are worth a write against those last
+    /// saved: `refresh` is [`readings::HEARD_REFRESH`] on the expiry clock,
+    /// so a pair in range costs a write every so often rather than each
+    /// minute, and `Duration::ZERO` as the app quits. Never called per
+    /// advertisement: a pair in range is heard several times a second.
+    ///
+    /// `inner` is held only to copy the readings out, never across the
+    /// write. The write runs on the blocking pool and owns the lock while
+    /// it does, as the keystore's save: dropped part way - its task aborted -
+    /// it runs on, and no other save starts meanwhile. A save
+    /// that fails is tried again at the next call.
+    pub async fn save_readings(&self, refresh: Duration) {
+        let mut saving = self.readings.clone().lock_owned().await;
+        let Some(store) = saving.store.clone() else {
+            return;
+        };
+        let current = self.inner.read().await.readings();
+        if !readings::due(&saving.saved, &current, refresh) {
+            return;
+        }
+        let written = tokio::task::spawn_blocking(move || match store.save(&current) {
+            Ok(()) => {
+                if saving.failing {
+                    tracing::info!("saved the last readings again");
+                }
+                tracing::debug!(
+                    "saved the last readings of {} pair(s) to {}",
+                    current.len(),
+                    store.path().display()
+                );
+                saving.saved = current;
+                saving.failing = false;
+            }
+            Err(e) => {
+                if !saving.failing {
+                    tracing::warn!(
+                        "failed to save the last readings: {e:#}; trying again each minute"
+                    );
+                }
+                saving.failing = true;
+            }
+        });
+        // Only a panic in the save fails it, and that has said so.
+        let _ = written.await;
+    }
+
     /// Works out which pair an advertisement is from, and decrypts it with
     /// that pair's ENC_KEY. Returns the pair's real MAC when identified.
     ///
@@ -1287,6 +1488,7 @@ impl Coordinator {
             name: None,
             identity: Some(identity),
             current_ble_mac: Some(ble_mac),
+            restored: false,
             // Stamped from the entry in `snapshot`.
             last_seen: None,
         };
@@ -1624,6 +1826,7 @@ impl Coordinator {
             identity: None,
             // AAP knows only the real address, and is always live.
             current_ble_mac: None,
+            restored: false,
             last_seen: None,
         };
 
@@ -2203,6 +2406,11 @@ mod tests {
                 keystore: Some(keystore_in(&dir)),
                 saved: HashMap::new(),
             })),
+            readings: Arc::new(Mutex::new(SavedReadings {
+                store: Some(readings::Store::with_dir(dir.path().to_path_buf())),
+                saved: HashMap::new(),
+                failing: false,
+            })),
             updates,
             #[cfg(feature = "harness")]
             aap_socket_dir: None,
@@ -2387,6 +2595,188 @@ mod tests {
         assert!(inner.ble.contains_key(&fresh));
         assert!(!inner.ble.contains_key(&stale));
         assert!(!inner.prune(later), "nothing left to expire");
+    }
+
+    /// A reading heard after now - the clock set back since - cannot tell
+    /// how old it is, and goes rather than staying on show for as long as
+    /// the clock was set back by.
+    #[test]
+    fn prune_drops_a_reading_heard_after_now() {
+        let mut inner = inner_with(vec![(AA, Duration::from_secs(10))]);
+        let set_back = SystemTime::now() - Duration::from_secs(60 * 60);
+        assert!(inner.prune(set_back));
+        assert!(inner.ble.is_empty());
+    }
+
+    /// An advertisement's reading of a Pro 3, heard `age` ago.
+    fn identified_entry(left: u8, age: Duration) -> Entry {
+        Entry {
+            state: PodState {
+                identity: Some(PRO_3),
+                lid_open: Some(true),
+                left_in_ear: Some(true),
+                connection_state: Some(0x05),
+                current_ble_mac: Some(BLE_MAC),
+                ..ble_state(left)
+            },
+            last_seen: SystemTime::now() - age,
+        }
+    }
+
+    /// `pairs` keyed in the keystore in `dir`.
+    fn keyed_in(dir: &tempfile::TempDir, pairs: &[Address]) {
+        let keys = pairs
+            .iter()
+            .map(|&mac| (mac, PairKeys::new(KEY, None)))
+            .collect();
+        keystore_in(dir).save(&keys).unwrap();
+    }
+
+    fn readings_store(dir: &tempfile::TempDir) -> readings::Store {
+        readings::Store::with_dir(dir.path().to_path_buf())
+    }
+
+    /// The point of #170: a pair put away before a relaunch shows its last
+    /// reading after it, with its age, rather than nothing until it is
+    /// heard again. What was stale by then stays behind.
+    #[tokio::test]
+    async fn the_last_readings_outlive_a_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        keyed_in(&dir, &[AA]);
+        let first = Coordinator::with_keystore(Some(keystore_in(&dir)));
+        let heard = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+        first.inner.write().await.ble.insert(
+            AA,
+            Entry {
+                last_seen: heard,
+                ..identified_entry(70, Duration::ZERO)
+            },
+        );
+        first.save_readings(Duration::ZERO).await;
+        drop(first);
+
+        let second = Coordinator::with_keystore(Some(keystore_in(&dir)));
+        let state = second.subscribe().borrow().states[&AA].clone();
+        assert_eq!(state.source, DataSource::Ble);
+        assert_eq!(state.left_battery, Some(70));
+        assert_eq!(state.identity, Some(PRO_3));
+        let age = age(state.last_seen.unwrap(), SystemTime::now()).unwrap();
+        assert!(
+            (2 * 60 * 60..2 * 60 * 60 + 60).contains(&age.as_secs()),
+            "heard {age:?} ago"
+        );
+        assert_eq!(state.left_in_ear, None, "stale by the time it loaded");
+        assert_eq!(state.lid_open, None);
+        assert_eq!(state.connection_state, None);
+        assert_eq!(state.current_ble_mac, None);
+        assert!(state.restored, "not heard this run");
+    }
+
+    /// Only a pair with keys - the cache holds no other - and a reading the
+    /// cache would still hold: heard less than a day ago, and not after now.
+    #[test]
+    fn loading_keeps_only_fresh_readings_of_pairs_with_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        keyed_in(&dir, &[AA, BB, CC]);
+        let now = SystemTime::now();
+        let reading = |heard: SystemTime| Reading {
+            left_battery: Some(50),
+            right_battery: Some(50),
+            case_battery: None,
+            left_charging: false,
+            right_charging: false,
+            case_charging: false,
+            identity: PRO_3,
+            heard,
+        };
+        readings_store(&dir)
+            .save(&HashMap::from([
+                (AA, reading(now - Duration::from_secs(60 * 60))),
+                (BB, reading(now - BLE_CACHE_TTL - Duration::from_secs(60))),
+                (CC, reading(now + Duration::from_secs(60 * 60))),
+                (DD, reading(now)),
+            ]))
+            .unwrap();
+
+        let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
+        let snapshot = coordinator.subscribe().borrow().clone();
+        assert_eq!(snapshot.states.keys().collect::<Vec<_>>(), [&AA]);
+    }
+
+    /// A readings file that does not parse costs the readings, never the
+    /// keys, and is kept to be looked at.
+    #[test]
+    fn a_readings_file_that_does_not_parse_is_set_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        keyed_in(&dir, &[AA]);
+        std::fs::write(readings_store(&dir).path(), b"not JSON").unwrap();
+
+        let coordinator = Coordinator::with_keystore(Some(keystore_in(&dir)));
+        let snapshot = coordinator.subscribe().borrow().clone();
+        assert!(snapshot.states.is_empty());
+        assert_eq!(snapshot.known_keys, [AA]);
+        assert!(!readings_store(&dir).path().exists());
+        let aside = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("readings.json.corrupt-"))
+            .count();
+        assert_eq!(aside, 1);
+    }
+
+    /// Saves are coalesced: nothing is written while nothing worth a write
+    /// has changed - a heard time alone moving less than `HEARD_REFRESH` -
+    /// and the quit writes the heard times as they are.
+    #[tokio::test]
+    async fn the_readings_are_saved_only_when_due() {
+        let (coordinator, dir) = coordinator_with(inner_with(vec![]));
+        let path = readings_store(&dir).path();
+        let set = |left: u8, age: Duration| {
+            let coordinator = coordinator.clone();
+            async move {
+                coordinator
+                    .inner
+                    .write()
+                    .await
+                    .ble
+                    .insert(AA, identified_entry(left, age));
+            }
+        };
+
+        coordinator.save_readings(readings::HEARD_REFRESH).await;
+        assert!(!path.exists(), "nothing to save");
+
+        set(70, Duration::from_secs(120)).await;
+        coordinator.save_readings(readings::HEARD_REFRESH).await;
+        assert!(path.exists(), "a pair come");
+
+        std::fs::remove_file(&path).unwrap();
+        set(70, Duration::from_secs(60)).await;
+        coordinator.save_readings(readings::HEARD_REFRESH).await;
+        assert!(
+            !path.exists(),
+            "heard again a minute on: not yet worth a write"
+        );
+
+        set(69, Duration::from_secs(60)).await;
+        coordinator.save_readings(readings::HEARD_REFRESH).await;
+        assert_eq!(
+            readings_store(&dir).load().unwrap()[&AA].left_battery,
+            Some(69)
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        set(69, Duration::ZERO).await;
+        coordinator.save_readings(Duration::ZERO).await;
+        assert!(path.exists(), "the quit's, with the heard time as it is");
+
+        std::fs::remove_file(&path).unwrap();
+        coordinator.inner.write().await.ble.clear();
+        coordinator.save_readings(readings::HEARD_REFRESH).await;
+        assert!(
+            readings_store(&dir).load().unwrap().is_empty(),
+            "a pair gone"
+        );
     }
 
     /// Undecryptable advertisements are not kept: keyed by a randomized MAC
