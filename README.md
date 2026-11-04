@@ -235,7 +235,9 @@ which is what identifies them over BLE: until then the app has no way to tell th
 advertisements from any other pair's, and shows nothing for them there. From then on the
 app reads exact levels even when the AirPods are connected elsewhere. Should the keys
 ever change, asking again on each connection picks up the new ones: reconnecting the
-AirPods is all it takes.
+AirPods is all it takes. Once heard, a pair's last reading stays on show for a day, with
+how long ago it was heard - a pair in its closed case says nothing - and across restarts
+too, kept in `~/.local/share/linuxpods/readings.json` beside the keys.
 
 ## How it works
 
@@ -336,6 +338,7 @@ src/
 ├── bluez.rs       # Adapters, the device watch, a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # Key storage under XDG data dir
+├── readings.rs    # Each pair's last BLE reading, kept across restarts beside the keys
 ├── media.rs       # The media paused when a pod leaves an ear, played again once it is back (MPRIS)
 ├── settings.rs    # Preferences' settings under XDG config dir
 ├── indicator.rs   # System tray (StatusNotifierItem)

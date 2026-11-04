@@ -25,6 +25,7 @@ src/
 ├── bluez.rs       # Adapters, devices, connection watch; a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
 ├── keystore.rs    # ENC_KEY and IRK per pair at ~/.local/share/linuxpods/keys.json (0600)
+├── readings.rs    # Each pair's last BLE reading across a relaunch, in readings.json beside the keys
 ├── media.rs       # The media paused when a pod leaves an ear, played again once back (MPRIS)
 ├── settings.rs    # Preferences' settings at ~/.config/linuxpods/settings.json
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
@@ -114,6 +115,31 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
   Identified readings expire after `BLE_CACHE_TTL` (a day, #169) and carry
   `last_seen` for the UI; `expiry_task` prunes on a clock, since with no device in
   range no advertisement ever triggers a prune.
+- The BLE cache's ages are on the wall clock (`SystemTime`, `podstate::age`), never
+  `Instant`: that is `CLOCK_MONOTONIC`, which stands still while the machine sleeps, so
+  a reading from before a night's suspend read "30 min ago" the next morning and
+  expired hours late, and a time kept across a relaunch has to mean something to the
+  next run. A reading heard after now - the clock set back - has no age: it goes at the
+  next prune and on load, and is never fresh for a notification. Every other `Instant`
+  (AAP, ear, noise, volume, media) stays one.
+- The cache outlives the app (#170): `readings` keeps each cached reading's levels,
+  charging flags, model and heard time - not in-ear, the lid or the connection state,
+  stale by the time anything loads them - in `readings.json` beside the keys (0600,
+  temp file and rename, as the keystore). Loaded at startup, only for a pair with keys
+  and heard less than `BLE_CACHE_TTL` ago; a file that does not parse is set aside, and
+  a level above 100 loads as unknown. A loaded reading is `PodState::restored` until the
+  pair is heard again: shown, with its age, but left out of GNOME Settings by
+  `attachment::exported_levels`, as `Battery1` would show yesterday's level as now -
+  never by a freshness window there, which would withdraw and export it again (#62).
+  Never saved per advertisement: `expiry_task` calls `Coordinator::save_readings` each
+  minute, which writes only when `readings::due` says so - a pair come or gone, a level,
+  flag or model changed, or a heard time moved `readings::HEARD_REFRESH` - and `main.rs`
+  once more at the quit, heard times as they are, waited for without a bound: a small
+  file on the local disk, as the keys are, and dropping the runtime waits for the
+  blocking pool anyway. The save copies the readings out under `inner`'s read lock and
+  writes on the blocking pool with its owned lock moved in, so an abort never leaves it
+  half done. The store sits in the keystore's directory, so a test's or the fake world's
+  keystore keeps it out of the user's.
 - Both pods advertise, so one reading never wholly replaces the lid. A worn pod whose
   partner is in the case reports no lid but sets status bit 4 (`one_in_case`), and
   `handle_advertisement` keeps the cached lid for it; with bit 4 clear the lid goes.
