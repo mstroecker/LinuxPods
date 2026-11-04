@@ -156,7 +156,7 @@ fn carry_out(app: &gio::Application, action: Action) {
 mod tests {
     use bluer::Address;
 
-    use std::time::Instant;
+    use std::time::SystemTime;
 
     use super::*;
     use crate::notify::{Alerts, notification_id};
@@ -217,7 +217,7 @@ mod tests {
     /// back with its old level when it is turned on.
     #[test]
     fn on_does_not_bring_back_a_pair_that_has_gone() {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let mut alerts = Alerts::default();
         let mut shelf = Shelf::new(true);
         let feed = |alerts: &mut Alerts, shelf: &mut Shelf, snapshot: &Snapshot| {

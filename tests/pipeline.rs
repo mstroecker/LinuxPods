@@ -35,7 +35,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bluer::Address;
 use tempfile::TempDir;
@@ -838,7 +838,7 @@ async fn a_disconnect_falls_back_to_the_cached_advertisement_at_once() {
     .await;
 
     app.stop_listening().await;
-    let disconnected = Instant::now();
+    let disconnected = SystemTime::now();
     app.detach(PAIR).await;
 
     let snapshot = app.until("the link to go", |s| !s.is_connected(PAIR)).await;

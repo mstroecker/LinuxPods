@@ -16,7 +16,7 @@
 //! `automation` presses widgets over D-Bus as a user would - from GDBus
 //! handlers on the main context, never from a background task.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use adw::prelude::*;
 use gtk::gio;
@@ -48,6 +48,13 @@ const RESOURCE_PREFIX: &str = crate::APP_PATH;
 pub fn register_resources() {
     gio::resources_register_include!("linuxpods.gresource")
         .expect("the bundled GResource is valid");
+}
+
+/// How long ago a reading heard at `seen` was heard, for the window to show.
+/// One heard after now - the clock set back since - shows as just heard: it
+/// goes at the next prune (see `podstate::age`).
+fn shown_age(seen: SystemTime) -> Duration {
+    crate::podstate::age(seen, SystemTime::now()).unwrap_or_default()
 }
 
 /// How long ago a BLE reading was heard: whole minutes under an hour, whole

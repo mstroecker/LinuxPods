@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use adw::prelude::*;
 use bluer::Address;
 
-use super::{RECENT, last_seen_text, unavailable_row};
+use super::{RECENT, last_seen_text, shown_age, unavailable_row};
 use crate::podstate::{PodState, Snapshot};
 
 /// The Preferences dialog, and its Development group for the update loop to
@@ -230,7 +230,7 @@ fn row_status(known: bool, connected: bool, state: Option<&PodState>) -> (String
         // this is a fallback.
         (false, _, _) => ("No key".to_string(), "warning"),
         // A cached reading is not an advertisement in progress.
-        (true, _, Some(s)) => match s.last_seen.map(|t| t.elapsed()) {
+        (true, _, Some(s)) => match s.last_seen.map(shown_age) {
             Some(age) if age >= RECENT => (last_seen_text(age), "dim-label"),
             _ => ("Advertising".to_string(), "dim-label"),
         },
@@ -240,7 +240,7 @@ fn row_status(known: bool, connected: bool, state: Option<&PodState>) -> (String
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, SystemTime};
 
     use super::*;
     use crate::podstate::{DataSource, Identity};
@@ -253,7 +253,7 @@ mod tests {
     /// A reading heard `age` ago.
     fn heard(age: Duration) -> PodState {
         PodState {
-            last_seen: Some(Instant::now() - age),
+            last_seen: Some(SystemTime::now() - age),
             ..PodState::empty(DataSource::Ble)
         }
     }

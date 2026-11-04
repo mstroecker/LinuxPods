@@ -7,7 +7,7 @@ use adw::prelude::*;
 use bluer::Address;
 use gtk::{gio, glib};
 
-use super::{RESOURCE_PREFIX, last_seen_text};
+use super::{RESOURCE_PREFIX, last_seen_text, shown_age};
 use crate::aap::NoiseMode;
 use crate::aap::info::FirmwareVersion;
 use crate::ble::{decode_color, decode_connection_state};
@@ -595,7 +595,7 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
 
     match state.last_seen {
         Some(seen) => {
-            w.last_seen_label.set_text(&last_seen_text(seen.elapsed()));
+            w.last_seen_label.set_text(&last_seen_text(shown_age(seen)));
             w.last_seen_label.set_visible(true);
         }
         None => w.last_seen_label.set_visible(false),

@@ -16,12 +16,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use bluer::Address;
 use tokio::sync::watch;
 
-use crate::podstate::{Coordinator, DataSource, PodState, Snapshot};
+use crate::podstate::{self, Coordinator, DataSource, PodState, Snapshot};
 
 /// At or below this a part is low: UPower's default `PercentageLow`.
 pub const LOW: u8 = 20;
@@ -50,14 +50,17 @@ pub const REARM_ABOVE: u8 = 25;
 /// lives in the link and goes with it; over BLE only while the advertisement
 /// behind it arrived less than this long ago. The coordinator keeps a pair's
 /// last advertisement for a day after the pair has gone - out of range,
-/// or in a drawer - and a reading from it says nothing about the battery now.
+/// or in a drawer - and across a relaunch, and a reading from it says nothing
+/// about the battery now.
 ///
 /// A pair in range advertises several times a second, so it is heard many
 /// times a minute, even across a discovery restart; a minute without a word
 /// means it has gone. The window draws the same line: under a minute is
 /// "Last seen just now". Each reading is judged by its age when a snapshot
 /// comes in, so a cached one that comes along with another pair's update, or
-/// with the expiry clock's, warns about nothing.
+/// with the expiry clock's, warns about nothing. Ages are on the wall clock,
+/// and a reading heard after `now` - the clock set back - is never fresh: how
+/// old it is cannot be told (see [`podstate::age`]).
 pub const FRESH: Duration = Duration::from_secs(60);
 
 /// How low a part's battery is.
@@ -182,7 +185,7 @@ impl Alerts {
     /// Takes in a snapshot, as of `now`, and returns what to show and what to
     /// withdraw: for each pair whose low parts changed, its notice, or once it
     /// has none, or no reading at all, the withdrawal of its notification.
-    pub fn update(&mut self, snapshot: &Snapshot, now: Instant) -> Vec<Action> {
+    pub fn update(&mut self, snapshot: &Snapshot, now: SystemTime) -> Vec<Action> {
         let mut actions = Vec::new();
 
         let mut gone: Vec<Address> = self
@@ -255,10 +258,10 @@ fn bands(parts: &[Option<Warned>; 3]) -> [Option<Band>; 3] {
 }
 
 /// Whether `state` tells how the battery is now - see [`FRESH`].
-pub fn fresh(state: &PodState, now: Instant) -> bool {
+pub fn fresh(state: &PodState, now: SystemTime) -> bool {
     match (state.source, state.last_seen) {
         (DataSource::Aap, _) => true,
-        (DataSource::Ble, Some(seen)) => now.saturating_duration_since(seen) < FRESH,
+        (DataSource::Ble, Some(seen)) => podstate::age(seen, now).is_some_and(|age| age < FRESH),
         // Every BLE reading the coordinator hands out has a time.
         (DataSource::Ble, None) => false,
     }
@@ -307,7 +310,7 @@ pub async fn watch_snapshots(
         // Cloned out: the borrow is a read lock every broadcast waits for, and
         // the sends below are awaited.
         let snapshot = updates.borrow_and_update().clone();
-        for action in alerts.update(&snapshot, Instant::now()) {
+        for action in alerts.update(&snapshot, SystemTime::now()) {
             match &action {
                 Action::Show(notice) => {
                     tracing::info!("battery low on {}: {}", notice.mac, notice.body);
@@ -377,7 +380,7 @@ mod tests {
     #[test]
     fn a_crossing_warns_once() {
         let mut alerts = Alerts::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         assert!(
             alerts
                 .update(&snapshot([(PAIR, aap([Some(21), Some(80), None]))]), now)
@@ -395,7 +398,7 @@ mod tests {
     #[test]
     fn critical_warns_again_and_names_every_low_part() {
         let mut alerts = Alerts::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         alerts.update(&snapshot([(PAIR, aap([Some(9), Some(80), None]))]), now);
         let actions = alerts.update(&snapshot([(PAIR, aap([Some(9), Some(12), None]))]), now);
         assert_eq!(
@@ -419,7 +422,7 @@ mod tests {
     #[test]
     fn a_drop_past_both_thresholds_warns_once_as_critical() {
         let mut alerts = Alerts::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         let actions = alerts.update(&snapshot([(PAIR, aap([Some(3), None, None]))]), now);
         assert_eq!(
             shown(&actions),
@@ -430,7 +433,7 @@ mod tests {
     #[test]
     fn charging_withdraws_and_arms_again() {
         let mut alerts = Alerts::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         alerts.update(&snapshot([(PAIR, aap([Some(15), None, None]))]), now);
         let mut charging = aap([Some(15), None, None]);
         charging.left_charging = true;
@@ -447,7 +450,7 @@ mod tests {
     #[test]
     fn rising_clear_of_the_low_threshold_arms_it_again() {
         let mut alerts = Alerts::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         let left = |level| snapshot([(PAIR, aap([Some(level), None, None]))]);
         alerts.update(&left(4), now);
         // Back above either threshold, but not clear of the low one: the
@@ -467,7 +470,7 @@ mod tests {
     /// or AAP and BLE a step apart - warn once, and never withdraw.
     #[test]
     fn a_reading_flipping_across_a_threshold_warns_once() {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let left = |level| snapshot([(PAIR, aap([Some(level), None, None]))]);
         for (levels, warning) in [
             ([20, 21], ("AirPods battery low", "Left 20%")),
@@ -503,7 +506,7 @@ mod tests {
     #[test]
     fn a_part_that_charges_leaves_the_notice() {
         let mut alerts = Alerts::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         alerts.update(&snapshot([(PAIR, aap([Some(9), Some(12), None]))]), now);
         let mut left_charging = aap([Some(9), Some(12), None]);
         left_charging.left_charging = true;
@@ -516,7 +519,7 @@ mod tests {
     #[test]
     fn the_case_is_warned_about_only_from_a_reading() {
         let mut alerts = Alerts::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         let actions = alerts.update(&snapshot([(PAIR, aap([Some(80), Some(80), None]))]), now);
         assert!(actions.is_empty());
         let actions = alerts.update(
@@ -535,7 +538,7 @@ mod tests {
     /// says nothing about its battery now.
     #[test]
     fn only_a_fresh_ble_reading_warns() {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let ble = |age: Duration| {
             let mut state = reading(DataSource::Ble, [Some(10), Some(10), None]);
             state.last_seen = Some(now - age);
@@ -546,6 +549,12 @@ mod tests {
         let stale = alerts.update(&snapshot([(PAIR, ble(FRESH))]), now);
         assert!(stale.is_empty(), "{stale:?}");
         let stale = alerts.update(&snapshot([(PAIR, ble(Duration::from_secs(25 * 60)))]), now);
+        assert!(stale.is_empty(), "{stale:?}");
+
+        // Heard after now - the clock set back since - is no telling how old.
+        let mut ahead = reading(DataSource::Ble, [Some(10), Some(10), None]);
+        ahead.last_seen = Some(now + Duration::from_secs(2));
+        let stale = alerts.update(&snapshot([(PAIR, ahead)]), now);
         assert!(stale.is_empty(), "{stale:?}");
 
         let actions = alerts.update(&snapshot([(PAIR, ble(Duration::from_secs(2)))]), now);
@@ -574,7 +583,7 @@ mod tests {
     /// from the cache - is withdrawn, once, and starts over if it comes back.
     #[test]
     fn a_pair_without_a_reading_is_withdrawn() {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let mut alerts = Alerts::default();
         alerts.update(
             &snapshot([
@@ -613,7 +622,7 @@ mod tests {
     #[test]
     fn each_pair_has_its_own_notice() {
         let mut alerts = Alerts::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         let mut snap = snapshot([
             (PAIR, aap([Some(15), Some(50), None])),
             (OTHER, aap([Some(50), Some(4), None])),
