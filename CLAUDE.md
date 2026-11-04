@@ -111,9 +111,9 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
   app's run, never pruned, and the next link's replaces it (#161). `Inner::ble` keeps
   the last advertisement per device - also the connected one's, underneath AAP - so
   disconnect falls back to it at once. AAP lives in the device's link and goes with it.
-  Identified readings expire after `BLE_CACHE_TTL` (30 min) and carry `last_seen` for
-  the UI; `expiry_task` prunes on a clock, since with no device in range no
-  advertisement ever triggers a prune.
+  Identified readings expire after `BLE_CACHE_TTL` (a day, #169) and carry
+  `last_seen` for the UI; `expiry_task` prunes on a clock, since with no device in
+  range no advertisement ever triggers a prune.
 - Both pods advertise, so one reading never wholly replaces the lid. A worn pod whose
   partner is in the case reports no lid but sets status bit 4 (`one_in_case`), and
   `handle_advertisement` keeps the cached lid for it; with bit 4 clear the lid goes.
@@ -507,7 +507,7 @@ from the main context as `GNotification`s, one per pair. They warn once per cros
 per snapshot - the worst band stands until the part charges or clears
 `notify::REARM_ABOVE`, so a reading flipping across a threshold sends nothing - and only
 from a fresh reading - AAP, or BLE heard within `notify::FRESH`: the BLE cache outlives
-a pair that has gone by half an hour (#126). The Preferences switch is the app action
+a pair that has gone by a day (#126, #169). The Preferences switch is the app action
 `app.battery-notifications`, read by the delivery loop on the main context, not the
 notifier: off withdraws what is on show and on shows it again, while `notify::Alerts` goes
 on tracking crossings. Its state is saved: `settings::open` loads the settings at startup,
