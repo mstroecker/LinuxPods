@@ -221,7 +221,7 @@ Closing the lid flips bit 3 and nothing else in bytes 0-8: in the #71 capture
 both pods went from `0x31` (the right pod from `0x11`) to `0x39` within 22 ms.
 About 4 s later the pods stop advertising, so a closed lid is only seen in the
 last advertisements before they go silent. The coordinator's cached reading
-keeps it on show until they advertise again, for up to `BLE_CACHE_TTL` (30 min).
+keeps it on show until they advertise again, for up to `BLE_CACHE_TTL` (a day).
 
 The high nibble follows the pod and the case's charging, as capture 4 of #71
 settled: `0x1` from a pod out of the case, whether the case charges or not;
