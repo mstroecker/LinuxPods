@@ -100,6 +100,12 @@ impl Keystore {
         self.data_dir.join(KEYS_FILE)
     }
 
+    /// The directory the key file is in, where the readings kept across a
+    /// relaunch go too (`crate::readings`).
+    pub fn dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// Reads all keys from disk. A missing file is not an error - nothing has been
     /// stored yet - but anything else is, down to a single entry whose MAC does
     /// not parse or whose key does not decode. A file that did not load must not
@@ -248,8 +254,9 @@ fn decode_entries(
 }
 
 /// Creates `path` as a new file, 0600 from the start - never readable by anyone
-/// else, even briefly - and writes `data` through to the disk.
-fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+/// else, even briefly - and writes `data` through to the disk. The readings
+/// file is written this way too (`crate::readings`).
+pub(crate) fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     // `mode` applies only to a file this call creates, so a leftover - from a
     // crashed process that had the same pid - goes first.
     match std::fs::remove_file(path) {
