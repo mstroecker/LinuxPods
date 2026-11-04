@@ -46,7 +46,7 @@ use std::future::Future;
 #[cfg(feature = "harness")]
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use bluer::Address;
@@ -68,8 +68,25 @@ use crate::keystore::{Keystore, PairKeys};
 /// How long the last advertisement of an identified device stays on show: a day,
 /// as a pair in a closed case says nothing, and its last levels are still a hint
 /// of how charged it was (#169). Keyed by the real MAC, these do not rotate, so
-/// the map stays bounded by the number of stored keys.
+/// the map stays bounded by the number of stored keys. Counted on the wall
+/// clock - see [`age`].
 pub const BLE_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long before `now` a reading `heard` then was heard, on the wall clock.
+///
+/// The wall clock, not [`Instant`]: on Linux that is `CLOCK_MONOTONIC`, which
+/// stands still while the machine sleeps, so a reading from before a night's
+/// suspend would read "30 min ago" the next morning and expire hours late -
+/// and a reading kept across a relaunch needs a time
+/// that means something to the next run (#170).
+///
+/// `None` for a time after `now`: the clock was set back since, and how old
+/// the reading is cannot be told. Such a reading is dropped at the next prune
+/// and on load, and warns about nothing (`notify::fresh`); until it goes, the
+/// window shows it as just heard.
+pub fn age(heard: SystemTime, now: SystemTime) -> Option<Duration> {
+    now.duration_since(heard).ok()
+}
 
 /// Set and not empty, it names a directory of Unix sockets for
 /// [`Coordinator::new`] to open AAP links to in place of L2CAP, one per pair at
@@ -325,9 +342,11 @@ pub struct PodState {
     /// from. `None` for AAP, which knows only the real one.
     pub current_ble_mac: Option<Address>,
 
-    /// When the advertisement behind a BLE reading arrived; it may be a cached
-    /// one up to [`BLE_CACHE_TTL`] old. `None` for AAP, which is always live.
-    pub last_seen: Option<Instant>,
+    /// When the advertisement behind a BLE reading arrived, on the wall clock -
+    /// see [`age`]. It may be a cached one up to [`BLE_CACHE_TTL`] old, from
+    /// before the app started too. `None` for AAP, which
+    /// is always live.
+    pub last_seen: Option<SystemTime>,
 }
 
 impl PodState {
@@ -497,7 +516,8 @@ impl Snapshot {
 
 struct Entry {
     state: PodState,
-    last_seen: Instant,
+    /// On the wall clock - see [`age`].
+    last_seen: SystemTime,
 }
 
 /// One device's AAP connection.
@@ -643,10 +663,11 @@ impl Inner {
     }
 
     /// Drops BLE readings older than [`BLE_CACHE_TTL`], returning whether any went.
-    fn prune(&mut self, now: Instant) -> bool {
+    /// One heard after `now` goes too: see [`age`].
+    fn prune(&mut self, now: SystemTime) -> bool {
         let before = self.ble.len();
         self.ble
-            .retain(|_, e| now.duration_since(e.last_seen) < BLE_CACHE_TTL);
+            .retain(|_, e| age(e.last_seen, now).is_some_and(|age| age < BLE_CACHE_TTL));
         self.ble.len() != before
     }
 
@@ -1123,7 +1144,7 @@ impl Coordinator {
     /// on show.
     pub async fn expire(&self) {
         let mut inner = self.inner.write().await;
-        if inner.prune(Instant::now()) {
+        if inner.prune(SystemTime::now()) {
             self.broadcast(&inner);
         }
     }
@@ -1283,7 +1304,7 @@ impl Coordinator {
         tracing::debug!("BLE {ble_mac} raw: {}", crate::hex(&data.raw_data));
 
         let mut inner = self.inner.write().await;
-        let now = Instant::now();
+        let now = SystemTime::now();
         // A worn pod whose partner is in the case has no lid to report, and
         // both advertise: replaced wholesale, the lid would blink between the
         // partner's reading and none several times a second. So it keeps the
@@ -1292,7 +1313,7 @@ impl Coordinator {
             state.lid_open = inner
                 .ble
                 .get(&real_mac)
-                .filter(|e| now.duration_since(e.last_seen) < BLE_CACHE_TTL)
+                .filter(|e| age(e.last_seen, now).is_some_and(|age| age < BLE_CACHE_TTL))
                 .and_then(|e| e.state.lid_open);
         }
         let shown = inner.linked_live(real_mac);
@@ -2131,7 +2152,7 @@ mod tests {
     fn entry(age: Duration) -> Entry {
         Entry {
             state: PodState::empty(DataSource::Ble),
-            last_seen: Instant::now() - age,
+            last_seen: SystemTime::now() - age,
         }
     }
 
@@ -2349,9 +2370,7 @@ mod tests {
     }
 
     /// A reading outlives hours of quiet, so it is still there long after the
-    /// AirPods go silent in their case, and goes after [`BLE_CACHE_TTL`]. The
-    /// clock moves on rather than the readings back: an `Instant` a day ago
-    /// does not exist on a machine up for less than that.
+    /// AirPods go silent in their case, and goes after [`BLE_CACHE_TTL`].
     #[test]
     fn prune_drops_only_stale_devices() {
         let (fresh, stale) = (AA, BB);
@@ -2359,10 +2378,10 @@ mod tests {
             (fresh, Duration::from_secs(10 * 60)),
             (stale, Duration::from_secs(31 * 60)),
         ]);
-        assert!(!inner.prune(Instant::now()), "half an hour is no age");
+        assert!(!inner.prune(SystemTime::now()), "half an hour is no age");
 
         // Ten minutes short of the TTL for the fresh one, eleven past for the stale.
-        let later = Instant::now() + BLE_CACHE_TTL - Duration::from_secs(20 * 60);
+        let later = SystemTime::now() + BLE_CACHE_TTL - Duration::from_secs(20 * 60);
         assert!(inner.prune(later));
 
         assert!(inner.ble.contains_key(&fresh));
@@ -2497,7 +2516,7 @@ mod tests {
             AA,
             Entry {
                 state: ble_state(70),
-                last_seen: Instant::now(),
+                last_seen: SystemTime::now(),
             },
         );
         inner.links.insert(AA, link(None));
@@ -2519,7 +2538,7 @@ mod tests {
     /// a dropped link once left the UI reporting Source: AAP forever.
     #[test]
     fn disconnect_falls_back_to_the_cached_advertisement() {
-        let seen = Instant::now() - Duration::from_secs(90);
+        let seen = SystemTime::now() - Duration::from_secs(90);
         let mut inner = inner_with(vec![]);
         inner.ble.insert(
             AA,
@@ -2961,7 +2980,7 @@ mod tests {
                 .inner
                 .write()
                 .await
-                .prune(Instant::now() + BLE_CACHE_TTL)
+                .prune(SystemTime::now() + BLE_CACHE_TTL)
         );
 
         coordinator
@@ -3023,7 +3042,7 @@ mod tests {
                 .inner
                 .write()
                 .await
-                .prune(Instant::now() + BLE_CACHE_TTL)
+                .prune(SystemTime::now() + BLE_CACHE_TTL)
         );
         let state = coordinator.inner.read().await.snapshot().states[&MAC].clone();
         assert_eq!(state.source, DataSource::Aap);
