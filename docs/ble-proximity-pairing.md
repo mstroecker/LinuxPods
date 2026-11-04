@@ -221,7 +221,9 @@ Closing the lid flips bit 3 and nothing else in bytes 0-8: in the #71 capture
 both pods went from `0x31` (the right pod from `0x11`) to `0x39` within 22 ms.
 About 4 s later the pods stop advertising, so a closed lid is only seen in the
 last advertisements before they go silent. The coordinator's cached reading
-keeps it on show until they advertise again, for up to `BLE_CACHE_TTL` (a day).
+keeps it on show until they advertise again, for up to `BLE_CACHE_TTL` (a day),
+as long as the app runs: the readings kept across a relaunch (#170) leave the lid
+behind, as it may have been opened meanwhile.
 
 The high nibble follows the pod and the case's charging, as capture 4 of #71
 settled: `0x1` from a pod out of the case, whether the case charges or not;
@@ -648,7 +650,8 @@ key that does not match - are best dropped rather than kept: their rotating MACs
 cannot be collapsed, nothing can be attributed to them, and storing them is exactly
 what a BLE spam flood (a Flipper Zero or ESP32 broadcasting proximity pairing
 messages) feeds on. LinuxPods keeps only what it identifies; the keys arrive on the
-device's first AAP connection.
+device's first AAP connection. What it keeps, it keeps for a day, and the levels,
+charging and model across a relaunch too, in `readings.json` beside the keys (#170).
 
 ## Implementation Notes
 
