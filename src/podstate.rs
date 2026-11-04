@@ -65,10 +65,11 @@ use crate::ble::rpa::{self, ResolvedAddresses};
 use crate::bluez::DeviceNames;
 use crate::keystore::{Keystore, PairKeys};
 
-/// How long the last advertisement of an identified device stays on show. Keyed
-/// by the real MAC, these do not rotate, so the map stays bounded by the number of
-/// stored keys.
-pub const BLE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+/// How long the last advertisement of an identified device stays on show: a day,
+/// as a pair in a closed case says nothing, and its last levels are still a hint
+/// of how charged it was (#169). Keyed by the real MAC, these do not rotate, so
+/// the map stays bounded by the number of stored keys.
+pub const BLE_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Set and not empty, it names a directory of Unix sockets for
 /// [`Coordinator::new`] to open AAP links to in place of L2CAP, one per pair at
@@ -2347,8 +2348,10 @@ mod tests {
         assert!(!path.exists(), "the same key again is no reason to write");
     }
 
-    /// A reading outlives a few quiet minutes, so it is still there after the
-    /// AirPods go silent in their case, and goes after [`BLE_CACHE_TTL`].
+    /// A reading outlives hours of quiet, so it is still there long after the
+    /// AirPods go silent in their case, and goes after [`BLE_CACHE_TTL`]. The
+    /// clock moves on rather than the readings back: an `Instant` a day ago
+    /// does not exist on a machine up for less than that.
     #[test]
     fn prune_drops_only_stale_devices() {
         let (fresh, stale) = (AA, BB);
@@ -2356,11 +2359,15 @@ mod tests {
             (fresh, Duration::from_secs(10 * 60)),
             (stale, Duration::from_secs(31 * 60)),
         ]);
-        assert!(inner.prune(Instant::now()));
+        assert!(!inner.prune(Instant::now()), "half an hour is no age");
+
+        // Ten minutes short of the TTL for the fresh one, eleven past for the stale.
+        let later = Instant::now() + BLE_CACHE_TTL - Duration::from_secs(20 * 60);
+        assert!(inner.prune(later));
 
         assert!(inner.ble.contains_key(&fresh));
         assert!(!inner.ble.contains_key(&stale));
-        assert!(!inner.prune(Instant::now()), "nothing left to expire");
+        assert!(!inner.prune(later), "nothing left to expire");
     }
 
     /// Undecryptable advertisements are not kept: keyed by a randomized MAC
