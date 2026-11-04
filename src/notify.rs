@@ -49,7 +49,7 @@ pub const REARM_ABOVE: u8 = 25;
 /// A reading counts only while it is fresh: over AAP always, as the reading
 /// lives in the link and goes with it; over BLE only while the advertisement
 /// behind it arrived less than this long ago. The coordinator keeps a pair's
-/// last advertisement for half an hour after the pair has gone - out of range,
+/// last advertisement for a day after the pair has gone - out of range,
 /// or in a drawer - and a reading from it says nothing about the battery now.
 ///
 /// A pair in range advertises several times a second, so it is heard many
@@ -165,7 +165,7 @@ struct Warned {
 ///
 /// A stale reading neither warns, arms nor withdraws: a pair that went quiet
 /// while low keeps its notice. Once it has no reading in the snapshot at all -
-/// its last advertisement expired from the cache, half an hour on, or its
+/// its last advertisement expired from the cache, a day on, or its
 /// link gone with no advertisement behind it - its notice is withdrawn and
 /// what was warned about forgotten: nothing is known of its battery any more.
 /// A snapshot loses a reading only that way, never while BlueZ restarts or a

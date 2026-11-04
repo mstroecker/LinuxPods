@@ -50,13 +50,19 @@ pub fn register_resources() {
         .expect("the bundled GResource is valid");
 }
 
-/// How long ago a BLE reading was heard. Whole minutes are plenty: the cache
-/// holds readings for half an hour, and the display is redrawn every 30 seconds.
+/// How long ago a BLE reading was heard: whole minutes under an hour, whole
+/// hours from then on, as the cache holds readings for a day. Nothing finer is
+/// needed: the display is redrawn every 30 seconds.
 fn last_seen_text(age: Duration) -> String {
     if age < RECENT {
         return "Last seen just now".to_string();
     }
-    format!("Last seen {} min ago", age.as_secs() / 60)
+    let minutes = age.as_secs() / 60;
+    if minutes < 60 {
+        format!("Last seen {minutes} min ago")
+    } else {
+        format!("Last seen {} h ago", minutes / 60)
+    }
 }
 
 /// A setting that is planned but not built, in Preferences. Shown so the plan
@@ -113,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn last_seen_counts_whole_minutes() {
+    fn last_seen_counts_whole_minutes_then_whole_hours() {
         assert_eq!(last_seen_text(Duration::from_secs(5)), "Last seen just now");
         assert_eq!(
             last_seen_text(Duration::from_secs(60)),
@@ -122,6 +128,18 @@ mod tests {
         assert_eq!(
             last_seen_text(Duration::from_secs(29 * 60 + 59)),
             "Last seen 29 min ago"
+        );
+        assert_eq!(
+            last_seen_text(Duration::from_secs(59 * 60 + 59)),
+            "Last seen 59 min ago"
+        );
+        assert_eq!(
+            last_seen_text(Duration::from_secs(60 * 60)),
+            "Last seen 1 h ago"
+        );
+        assert_eq!(
+            last_seen_text(Duration::from_secs(23 * 60 * 60 + 59 * 60 + 59)),
+            "Last seen 23 h ago"
         );
     }
 }
