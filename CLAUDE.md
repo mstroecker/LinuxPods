@@ -138,7 +138,8 @@ address a stored IRK resolves, decrypted by that pair's key) **per device**, key
   file on the local disk, as the keys are, and dropping the runtime waits for the
   blocking pool anyway. The save copies the readings out under `inner`'s read lock and
   writes on the blocking pool with its owned lock moved in, so an abort never leaves it
-  half done. The store sits in the keystore's directory, so a test's or the fake world's
+  half done. The readings lock, like the keystore's, is taken before `inner`, never
+  under it. The store sits in the keystore's directory, so a test's or the fake world's
   keystore keeps it out of the user's.
 - Both pods advertise, so one reading never wholly replaces the lid. A worn pod whose
   partner is in the case reports no lid but sets status bit 4 (`one_in_case`), and

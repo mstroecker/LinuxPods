@@ -45,9 +45,9 @@ lives through every arm, a `let`-bound guard lives to the end of its block. Flag
 and the keystore. The accepted shapes are a client handed in by `AapLink::run`, never
 looked up under the guard, and `broadcast(&inner)` while the write guard is live - `send_replace` never awaits, and
 sending under the guard keeps snapshots in order (#88). Flag a snapshot built under the
-guard and sent after it is dropped. The `keystore` mutex is the one exception: it is held
-across its save on purpose, to serialize writers, and taken *before* `inner`. Taking
-`inner` and then `keystore` is a deadlock waiting to happen.
+guard and sent after it is dropped. The `keystore` and `readings` mutexes are the
+exceptions: each is held across its save on purpose, to serialize writers, and taken
+*before* `inner`. Taking `inner` and then either is a deadlock waiting to happen.
 
 **Watch borrows.** `borrow()` and `borrow_and_update()` on a `watch::Receiver` return a read
 guard that blocks every broadcast - and with it the `inner` write lock the broadcast holds,
@@ -70,7 +70,10 @@ carries a GTK object toward tokio.
   and removed only past the client check in `drop_link`; and `Coordinator::resolved`
   (`rpa::ResolvedAddresses`), which maps advertising addresses to pairs: bounded,
   expiring, only addresses that resolved, each with the IRK that resolved it and
-  re-checked against the stored IRK on every hit, taken alone and never across an await.
+  re-checked against the stored IRK on every hit, taken alone and never across an await;
+  and what the keystore and the readings file last saved (`Persistence::saved`,
+  `SavedReadings::saved`), a copy of the disk that is never shown and changes only with a
+  save that succeeded.
   Flag the firmware version dropped with the link or pruned with `BLE_CACHE_TTL`, and
   anything else of AAP kept beside it;
 - a read loop or command that finds its link by MAC alone. Writes from a loop or a
