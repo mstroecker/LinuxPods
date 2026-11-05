@@ -40,10 +40,10 @@ be changed, only observed.
 | Offering to pair AirPods nearby that no key identifies | 📋 |
 
 All of this needs the pair's keys, which the app fetches over AAP the first time the
-pair connects to this machine. An advertisement comes from a random address that only
-the pair's IRK resolves, and only its encryption key decrypts it: an advertisement
-counts only when both hold, and is dropped otherwise. The advertised payload changes when something happens, and otherwise
-stays the same for minutes, so levels are not live.
+pair connects to this machine; an advertisement they do not identify is dropped. The
+pods change what they advertise when something happens and otherwise repeat it for
+minutes, so these levels are not live. See
+[`docs/app/identification.md`](docs/app/identification.md).
 
 ### Over AAP
 
@@ -65,28 +65,25 @@ own. This is the only channel that can *send* commands.
 | Loud sound reduction | 📋 |
 
 The window's switch turns Conversation Awareness on and off. With it on, the pods switch
-to Transparency while you speak, which the window shows, and the app lowers the pair's
-own volume - its A2DP volume in BlueZ, which PipeWire's sink follows - to a fifth at
-once, and fades it back over 1.5 s once you stop, as an iPhone or a Mac does on the
-levels the pods send. Only while audio plays to the pair and no call is on, and a volume
-you change meanwhile is left as you set it. The switch, the lowering and the fade were
-checked on a Pro 3 (2026-11-02); a call, a volume changed while lowered, and the setting
-changed on a phone are still to be checked (#150).
+to Transparency while you speak, and the app lowers the pair's volume while audio plays
+to it, fading it back once you stop; a volume you change meanwhile is left as you set
+it. The switch, the lowering and the fade were checked on a Pro 3 (2026-11-02); a call,
+a volume changed while lowered, and the setting changed on a phone are still to be
+checked (#150). See [`docs/app/conversation-awareness.md`](docs/app/conversation-awareness.md)
+and [`docs/app/volume.md`](docs/app/volume.md).
 
-Device rename changes the name the pods give every host, from the Name row in the
-window's Info group, up to 127 bytes. The packet is confirmed on a Pro 3 (#160); the
-window's rename is still to be checked on a pair. The pods take the name at once, and so
-does the app - the Name row, the device switcher, a low battery notification; the rest of
-this computer shows it once the pair connects again - unless you gave the pair a name in
-GNOME Settings, which GNOME, the switcher and the notifications keep showing - and Apple
-devices keep the name they have. See [`docs/app/names.md`](docs/app/names.md).
+The Name row in the window's Info group renames the pods: the name they give every
+host, up to 127 bytes. The app shows the new name at once and the rest of this computer
+once the pair connects again - unless you named the pair in GNOME Settings, which GNOME,
+the device switcher and the notifications keep showing. Apple devices keep the name they
+have. The packet is confirmed on a Pro 3 (#160); the window's rename is still to be
+checked on a pair. See [`docs/app/names.md`](docs/app/names.md).
 
 The Firmware row below Name shows the firmware version as the iPhone shows it, such as
-`9A348`, from the device information the pods send as they connect. It stays on show
-after the pair disconnects, until the app quits, and reads "Unknown" until the pair has
-connected since the app started. How the version is packed is read off one firmware
-(2026-11-02), to be confirmed at the next update, and the row is still to be checked on
-a pair (#161). See [`docs/app/firmware.md`](docs/app/firmware.md).
+`9A348`, and reads "Unknown" until the pair has connected since the app started. It
+stays on show after the pair disconnects, until the app quits. How the version is packed
+was read off one firmware (2026-11-02), to be confirmed at the next update, and the row
+is still to be checked on a pair (#161). See [`docs/app/firmware.md`](docs/app/firmware.md).
 
 ### Linux integration
 
@@ -101,15 +98,13 @@ a pair (#161). See [`docs/app/firmware.md`](docs/app/firmware.md).
 | Preferences kept across restarts, in the XDG config directory | ✅ |
 | Media paused when a pod is taken out, and played again once it is back, with a switch in Preferences | 🚧 |
 
-Taking a pod out of an ear pauses what plays, and putting it back plays it again, as on
-an iPhone: every media player that is playing (over MPRIS), and only while audio plays to
-the pair - so, assuming a call leaves the pair's audio stream idle, which is not checked
-yet, a call is left alone. With one pod worn and the other in the case, taking
-the worn one out pauses too; with both taken out, the media plays again once both are
-back. A pod put in the case forgets the pause, and a player you played or stopped
-meanwhile is left as you left it. It works from the pods' live ear reports, so only for a
-pair connected here. The switch in Preferences is on by default. Not yet tried on a pair
-(#167); see [`docs/app/media-pause.md`](docs/app/media-pause.md#pausing-the-media).
+Taking a pod out of an ear pauses every media player that is playing, and putting it
+back plays them again, as on an iPhone - for a pair connected here, while audio plays to
+it, so a call is left alone (assumed, not checked yet). With both taken out, it plays
+again once both are back; with one pod worn and the other in the case, taking the worn
+one out pauses too. A pod put in the case forgets the pause, and a player you played or
+stopped meanwhile is left as you left it. The switch in Preferences is on by default.
+Not yet tried on a pair (#167); see [`docs/app/media-pause.md`](docs/app/media-pause.md).
 
 ### Unexplored
 
@@ -241,9 +236,10 @@ too, kept in `~/.local/share/linuxpods/readings.json` beside the keys.
 
 ## How it works
 
-A central `Coordinator` merges both sources and broadcasts a snapshot whenever anything
-changes. State is keyed by the device's **real** MAC, which is what lets a rotating BLE
-address collapse onto a single device.
+A central coordinator merges both sources per pair and broadcasts a snapshot to the
+window, the tray and GNOME Settings whenever anything changes. State is keyed by the
+pair's **real** MAC, which is what lets a pod's rotating BLE address collapse onto one
+pair.
 
 ```
 Coordinator (state per device, keyed by real MAC)
@@ -256,24 +252,9 @@ Coordinator (state per device, keyed by real MAC)
         └─ Attachment ─────> GNOME Settings battery for each attached pair with a reading
 ```
 
-Every subscriber sees the same latest snapshot, on one `watch` channel: one that falls
-behind skips to the newest rather than queueing the ones it missed. It receives the
-current state immediately on subscribing, so the interface is populated before the
-first advertisement arrives.
-
-AAP runs over an L2CAP socket on PSM 4097; a BLE advertisement is decrypted with AES-128
-when its address resolves with a stored IRK, and with that pair's key alone. Both protocols are documented in full:
-
-- [`docs/protocol/ble/proximity-pairing.md`](docs/protocol/ble/proximity-pairing.md) - advertisement layout
-  and decryption
-- [`docs/protocol/ble/addresses.md`](docs/protocol/ble/addresses.md) - how a device is
-  identified behind a randomized address
-- [`docs/protocol/aap/keys.md`](docs/protocol/aap/keys.md) - retrieving the IRK and ENC_KEY
-- [`docs/protocol/aap/noise-control.md`](docs/protocol/aap/noise-control.md) - switching noise control mode,
-  and why the device's answer is no acknowledgment
-- [`docs/protocol/aap/conversation-awareness.md`](docs/protocol/aap/conversation-awareness.md) - the
-  Conversation Awareness setting, and the speech levels the pods send with it on
-- [`docs/app/volume.md`](docs/app/volume.md) - the volume lowered on the speech levels
+The design is in [`docs/app/architecture.md`](docs/app/architecture.md).
+[`docs/README.md`](docs/README.md) maps the rest of the documentation: what the AirPods
+and Linux do, in `docs/protocol/`, and what LinuxPods does about it, in `docs/app/`.
 
 ## Development
 
@@ -286,9 +267,9 @@ RUST_LOG=linuxpods=debug cargo run   # protocol tracing (make run-trace)
 GTK_DEBUG=interactive cargo run      # GTK inspector (make run-debug)
 ```
 
-Both feature sets are checked, as CI checks them. The `harness` feature adds the test
-harness: a fake BlueZ and fake AirPods, the pipeline tests that run against them, and
-`make fake-world`, which runs the app among them:
+Both feature sets are checked, as CI checks them. The `harness` feature adds a fake
+BlueZ and fake AirPods, the pipeline tests that run against them, and `make fake-world`,
+which runs the app among them:
 
 ```bash
 make fake-world SCENARIO=two-pairs   # in-range, connected, two-pairs, flood or empty
@@ -296,68 +277,27 @@ make fake-world HEADLESS=1           # the app on Broadway, in a browser
 make fake-world-stop
 ```
 
-`scripts/fake-world.sh` changes the fake world and drives the app's UI while it runs;
-[`.claude/skills/fake-world/SKILL.md`](.claude/skills/fake-world/SKILL.md) describes it.
-Both `make test` and `make fake-world` leave a harness build at `target/debug/linuxpods`,
-which behaves like a plain one unless the fake world's script started it: run
-`cargo build` before testing against real AirPods all the same.
+[`.claude/skills/fake-world/SKILL.md`](.claude/skills/fake-world/SKILL.md) describes how
+to change the fake world and drive the app's UI while it runs, and
+[`docs/development/fake-world.md`](docs/development/fake-world.md) where the fakes depart
+from the hardware. Both `make test` and `make fake-world` leave a harness build at
+`target/debug/linuxpods`: run `cargo build` before testing against real AirPods.
 
-Debug logging reports each protocol stage separately:
+Debug logging reports each protocol stage separately
+([`docs/app/logging.md`](docs/app/logging.md)):
 
 ```
-BLE parsable: 5C:4D:3F:B5:41:B6 model=0x2027 payload=25B
-BLE decryptable: 5C:4D:3F:B5:41:B6 -> AA:BB:CC:DD:EE:FF (address resolved)
-BLE 5C:4D:3F:B5:41:B6 [decrypted]: left=Some(75) right=Some(73) case=Some(61) lid_open=None one_in_case=false in_ear=true/true
+BLE parsable: 4B:11:22:33:44:55 model=0x2027 payload=25B
+BLE decryptable: 4B:11:22:33:44:55 -> AA:BB:CC:DD:EE:FF (address resolved)
+BLE 4B:11:22:33:44:55 [decrypted]: left=Some(75) right=Some(73) case=Some(61) lid_open=None one_in_case=false in_ear=true/true
 AAP connected to AA:BB:CC:DD:EE:FF (cid 2822) in 412 ms
 ```
 
 Add `linuxpods=trace` to also see Apple manufacturer data that is not proximity pairing.
 
-Examples exercise the protocol layers without the interface. `key_request <MAC>` asks a
-pair for its proximity pairing keys and lays out what comes back, key bytes redacted and
-nothing stored, to debug a request that fails; `noise_probe <MAC>` cycles
-the noise control modes and classifies every packet that comes back;
-`conversation_awareness <MAC>` logs the Conversation Awareness setting and every speech
-level and mode report with its time, optionally turning the setting on for the run, and
-with `--duck` lowers the volume on the levels as the app does; `rename_probe <MAC>
-[NAME]` reads the pods' name and, given a new one, renames them and reads what comes
-back - a second session's name and BlueZ's - printing the name alone of the packet that
-carries it, as the rest holds serial numbers, and with `--sweep` tries names beyond
-ASCII and past the 127 bytes the pods keep; `apple_sniff` logs
-Apple manufacturer data as it arrives; `decrypt_probe` decrypts captured payloads
-offline and shows the plaintext of each the app's suffix rule accepts; `irk_probe <MAC>...` asks
-pairs for their keys, keeps them in memory, and reports per advertising address whether
-it resolves with the IRK, as the app resolves it, and decrypts, without printing keys
-or addresses.
-
-```
-src/
-├── main.rs        # GTK main loop on the main thread, tokio runtime alongside it
-├── lib.rs         # Library target, so the layers can be driven from tests
-├── podstate.rs    # Coordinator: merges AAP and BLE, broadcasts snapshots
-├── aap/           # Apple Accessory Protocol: client and session, packet decoding, battery, keys, noise control, Conversation Awareness, rename, device information
-├── ble/           # Scanner, Apple Continuity parser, AES decryption
-├── bluez.rs       # Adapters, the device watch, a battery provider per adapter
-├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
-├── keystore.rs    # Key storage under XDG data dir
-├── readings.rs    # Each pair's last BLE reading, kept across restarts beside the keys
-├── media.rs       # The media paused when a pod leaves an ear, played again once it is back (MPRIS)
-├── settings.rs    # Preferences' settings under XDG config dir
-├── indicator.rs   # System tray (StatusNotifierItem)
-├── notify.rs      # Low battery notifications: what to warn about, once per crossing
-├── volume.rs      # The volume lowered while the user speaks, through BlueZ's MediaTransport1
-├── ui/            # GTK4/libadwaita: window, Control page, rename dialog, Preferences, notifications; automation.rs, harness only
-├── harness/       # harness only: fake AirPods (pods.rs), fake BlueZ (bluez.rs), a fake media player (player.rs), the world (world.rs)
-└── bin/           # harness only: fakepods.rs, the fake world make fake-world runs
-```
-
-GTK owns the main thread; tokio carries BLE, AAP and D-Bus work. The two meet over
-channels, since GTK types are `!Send`: snapshots reach the window and tray on a `watch`
-channel, the tray's window commands and the low battery notifications reach the main
-context on an `async-channel`, and a command to the AirPods - a noise control mode -
-goes on the queue of that pair's AAP link, which carries its commands out in the order
-they were sent and hands each result back to its caller. The Preferences switch for
-pausing the media reaches the task that pauses it on a `watch` channel.
+The examples in `examples/` exercise the protocol layers without the window - asking a
+pair for its keys, cycling noise control, renaming, logging Conversation Awareness:
+[`docs/development/probes.md`](docs/development/probes.md).
 
 ## Contributing
 
@@ -366,7 +306,8 @@ Contributions are welcome. Please:
 - Run `cargo fmt`, `make lint` and `make test` before submitting
 - Cover protocol parsing and decryption with tests; they need no hardware
 - Keep UI changes consistent with the GNOME HIG, and test on multiple window sizes
-- Document any protocol discoveries in `docs/`
+- Document protocol discoveries in [`docs/protocol/`](docs/protocol/), saying where each
+  fact comes from ([`docs/README.md`](docs/README.md#content), rule 2)
 
 ## Acknowledgments
 
