@@ -31,6 +31,13 @@ Read `CLAUDE.md` in full. It is the rule source; this file only says how to chec
 a diff hides. Where the two disagree, CLAUDE.md wins - report the disagreement as stale
 documentation against this file.
 
+CLAUDE.md keeps each rule as a line or two, with a link to the document that says why. For
+every rule the diff comes near, follow that link and read the `docs/app/` section behind
+it - the reasons, the bugs and the tradeoffs are there, and a change that keeps the rule's
+words can still undo its reason. `docs/app/architecture.md` maps the `app/` documents by
+area. The facts about the AirPods and the Linux stack the rules rest on are in
+`docs/protocol/`.
+
 A hunk is not enough context. For every changed function, read the whole function at the
 reviewed revision, and the callers of anything whose behavior changed.
 
@@ -195,20 +202,35 @@ message text, this file, and anything under `.claude/skills/`.
 1. List every identifier the change removes, renames or changes the behavior of:
    functions, types, fields, constants, log prefixes, Makefile targets, env vars, paths.
    `git grep -n` each one at the reviewed revision and read every hit.
-2. Read the CLAUDE.md paragraphs and `docs/` sections on the modules the diff touches.
+2. Read the CLAUDE.md rules and the `docs/app/` documents on the modules the diff touches.
    Check each claim in them against the code, not just the claims that name a changed
-   identifier.
+   identifier. A change to behavior changes its `app/` document in the same pull request:
+   flag one that does not.
 3. A comment in a touched file that explains *why* the code does something counts, if the
    reason no longer holds.
 
+**A change to `docs/`.** Check it against the rules in `docs/README.md`, and flag:
+- a fact on the wrong side of the sorting test: about the AirPods or the Linux stack in
+  `docs/app/`, or about a choice made here in `docs/protocol/`;
+- a fact written twice rather than linked, or a link that does not resolve (relative links
+  only, to a file or a heading in it);
+- a fact without its source - a run with model, date and issue, another project named, a
+  specification or upstream source with its version, or a guess called one;
+- a value repeated in `docs/app/` or `docs/development/` where a constant could be named;
+- code that copies the implementation, a "Last updated" footer, an unknown left in passing
+  rather than in Open questions or Hardware checks at the end;
+- a key, serial number, MAC or host address, or personal device name.
+
 Report only statements that are false or misleading now - not style, not wording you
-would have chosen differently. If the change fixes a class of bug future work could
+would have chosen differently. A broken `docs/README.md` rule counts, whatever the wording:
+report it under Stale documentation, naming the rule. If the change fixes a class of bug future work could
 repeat, propose a new CLAUDE.md rule, but only then.
 
 ## Before reporting
 
 Re-read the code behind each finding at the reviewed revision. Drop anything you cannot
-point to a line for or give a concrete failure for. Mark each finding CONFIRMED (traced
+point to a line for or give a concrete failure for - but for a broken `docs/README.md`
+rule, the line in the document and the rule it breaks are enough. Mark each finding CONFIRMED (traced
 through the code) or PLAUSIBLE (depends on runtime behavior you could not trace).
 
 ## Report
