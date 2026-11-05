@@ -1,0 +1,113 @@
+# Documentation
+
+Two kinds of document live here, and they are kept apart: what the AirPods and the
+Linux Bluetooth stack do, in `protocol/`, and what LinuxPods does about it, in `app/`.
+`development/` holds what is needed to work on LinuxPods rather than to understand it.
+
+## Which side a fact goes on
+
+**Would it still be true if LinuxPods did not exist?** Then it goes in `protocol/`. If
+it is true because of a choice made here, it goes in `app/`.
+
+| `protocol/` | `app/` |
+|---|---|
+| The pods drop what they are sent until they have answered the handshake. | `Client::handshake` returns only once the answer is in. |
+| A `0x0D` report can carry the mode a change replaced, 0.33 s after it. | A report of the replaced mode is held off for `STALE_REPORT_WINDOW`. |
+| The pods keep 127 bytes of a name and cut a longer one silently. | The dialog refuses a name over 127 bytes, and nothing cuts one. |
+| bluetoothd answers `StartDiscovery` with `InProgress` when the kernel refuses the start as busy. | The scanner stops its discovery and starts again. |
+| Each pod advertises from a resolvable private address of its own, a new one every 4-8 minutes. | An advertisement whose address no stored IRK resolves is dropped. |
+
+A fact and the choice made on it are two sentences in two places. Where a document
+has both today, it is split, and each half links to the other.
+
+## `protocol/`
+
+What AirPods send and take, and how the Linux stack under the app behaves. Written so
+that someone building another client can use it without reading our code.
+
+- `aap/` - the Apple Accessory Protocol over L2CAP: the session, keys, battery, ear,
+  noise control, the `0x09` settings, Conversation Awareness, device information, rename
+- `ble/` - Apple's proximity pairing advertisements, and the addresses they come from
+- `linux/` - the kernel's L2CAP, bluetoothd, zbus, and the desktop around them (MPRIS,
+  PipeWire, UPower): what they do that a client has to know
+
+Names from our code - types, constants, functions - stay out of these documents, but
+for one line at the top pointing at the parser and at the `app/` document that uses
+the fact.
+
+The runs and captures a fact rests on go in the same document, below the facts they
+support. Each document ends with **Open questions**: what is not known yet.
+
+## `app/`
+
+How LinuxPods behaves and why: what it does with each fact, the tradeoffs it accepts,
+and the bugs that shaped it, by issue number. Written for whoever changes the code
+next.
+
+Each document ends with **Hardware checks**: what has run only against the fake world,
+and how to try it on a pair.
+
+## `development/`
+
+Releases, the fake world and where it departs from the hardware, and the probes in
+`examples/` that the protocol runs were made with.
+
+## Rules for every document
+
+### Content
+
+1. **One fact, one place.** Everywhere else links to it. A copy is what goes stale: it
+   is never updated with the original.
+2. **Every fact says where it comes from:**
+   - a run here: the model, the date, and the issue or commit - "Pro 3, 2026-11-01,
+     #150"
+   - another project, named and linked - "LibrePods says" - until a run here confirms
+     it, and then the run
+   - a guess, called one
+
+   "Assumed for the Pro 2, not checked" is a fact of this kind. What one model did is
+   never written as what all of them do.
+3. **Dates go on facts, not on files.** No "Last updated" or "Tested with" footer: they
+   go stale on their own.
+4. **Describe what is true now.** A fact that changed is corrected where it stands, and
+   its history stays in the issue and the commit. The exception is a warning that keeps
+   a mistake from being made again - "do not validate with magic bytes" - which keeps
+   its reason and its issue.
+5. **Unknowns go in one list,** Open questions or Hardware checks, at the end. Not in
+   passing, where nobody looking for what is left to try will find them.
+
+### Against going stale
+
+6. **No code that copies the implementation.** Show a packet as a byte layout or a
+   table. For working code, point at `examples/`, which is compiled and tested.
+7. **Name a constant rather than repeat its value.** "Held off for
+   `STALE_REPORT_WINDOW`" stays true when the constant changes; "held off for 2 s" does
+   not. Give the value as well only where the reasoning depends on it.
+8. **A change to behavior changes its document in the same pull request.**
+9. **Links are relative**, to a file or to a heading in it, so a link checker can
+   follow them.
+
+### Privacy
+
+10. **No keys, serial numbers, real MAC addresses, host addresses or personal device
+    names.** Use placeholders, as the BLE samples do. A capture goes in as a short,
+    redacted excerpt, with the command that produced it, so that it can be run again.
+
+### Writing
+
+11. **Open with what the document covers and how sure it is,** in two or three lines.
+    Then the facts, then the evidence.
+12. **Lead with the point, one claim per sentence.** Several conditions are a table or a
+    list, not one long sentence. Many readers of these documents do not read English
+    natively.
+13. **US English** (color, behavior), plain words, and one convention for byte offsets,
+    stated once at the top of each document that uses them.
+
+## Where else
+
+- `README.md` at the root says what the app does, for users: features, installing,
+  usage. It links here for how.
+- `AGENTS.md` holds the rules for working in this repository: one line per invariant,
+  with a link to the `app/` or `protocol/` document that says why.
+- Code comments say what the code does and link here for the evidence. A comment that
+  needs a capture to justify itself points at the document that has it.
