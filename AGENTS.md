@@ -613,10 +613,14 @@ what LinuxPods does about it, and `docs/development/` what working on LinuxPods 
 `docs/protocol/linux/`:
 - [`l2cap.md`](docs/protocol/linux/l2cap.md) - a connect that returns with the channel
   still pending (#136)
-- [`bluez.md`](docs/protocol/linux/bluez.md) - discovery and device cleanup,
-  `MediaTransport1.Volume`, `Device1.Name` and `Device1.Alias`
+- [`bluez.md`](docs/protocol/linux/bluez.md) - discovery and device cleanup, adapters
+  and restarts, starting bluetoothd, battery providers, `MediaTransport1.Volume`,
+  `Device1.Name` and `Device1.Alias`
+- [`zbus.md`](docs/protocol/linux/zbus.md) - the queue that stops the connection, the
+  object server's late dispatch, unchecked well-known senders, order across
+  subscriptions
 - [`desktop.md`](docs/protocol/linux/desktop.md) - PipeWire following the transport's
-  volume, the path a press on a pod takes to a player
+  volume, MPRIS, the path a press on a pod takes to a player, UPower's warning level
 
 `docs/app/`:
 - [`identification.md`](docs/app/identification.md) - identification by IRK then
