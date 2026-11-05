@@ -50,6 +50,31 @@ jobs:
       # Full history: a secret removed in a later commit is still published.
       - run: gitleaks git --redact --no-banner --verbose .
 
+  links:
+    name: Links
+    runs-on: ubuntu-24.04
+    env:
+      LYCHEE_VERSION: 0.24.2
+      LYCHEE_SHA256: 1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install lychee
+        run: |
+          curl -fsSL -o lychee.tar.gz \
+            "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${LYCHEE_SHA256}  lychee.tar.gz" | sha256sum -c -
+          tar -xzf lychee.tar.gz -C /usr/local/bin --strip-components=1 \
+            lychee-x86_64-unknown-linux-gnu/lychee
+          rm lychee.tar.gz
+      # Links to files and headings in the repository only: --offline skips every
+      # http(s) link, so the job never fails on another site's outage. Without
+      # --root-dir a link starting with / fails too, as links are relative.
+      - run: >-
+          lychee --offline --include-fragments --no-progress --format detailed
+          README.md AGENTS.md 'docs/**/*.md' '.claude/**/*.md'
+
   zizmor:
     name: Workflow audit
     runs-on: ubuntu-24.04
