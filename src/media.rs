@@ -13,7 +13,7 @@
 //! player is forgotten. A pod going into the case, the link going, or the
 //! setting turned off forgets the pause, and a player reading anything else
 //! when the pods are back is the user's and is left alone.
-//! `docs/aap-ear-detection.md` says how and why, and what is assumed.
+//! `docs/app/media-pause.md` says how and why, and what is assumed.
 //!
 //! [`EarPause`] decides, from the pods' places, whether the transport is
 //! active, the players' statuses and the time, as `volume::Ducking` does, and

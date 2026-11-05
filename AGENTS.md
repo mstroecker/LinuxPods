@@ -330,13 +330,13 @@ level goes to the volume as an event.
 **Rename is fire and forget, and never touches BlueZ's alias.**
 `04 00 04 00 1A 00 01 [length] 00 [UTF-8 name]`, the length in bytes, renames the pods -
 the name they report to a host as it connects, in the device information packet (`0x1D`).
-Nothing answers it (a Pro 3, #160; `docs/aap-rename.md` has both runs): `Command::Rename`
+Nothing answers it (a Pro 3, #160; `docs/protocol/aap/rename.md` has both runs): `Command::Rename`
 records the name on the link (`Link::name`) once the packet is away, and it goes with the
 link. The pods keep 127 bytes and cut a longer name silently, so a name that is empty,
 has a NUL or runs over 127 bytes is refused, never sent - by the dialog, by
 `Coordinator::command` before it queues, and by `aap::name` - and never cut by bytes
 before it is sent; the entry's `max-length` stops a text at 127 characters.
-`Device1.Alias` is never set or cleared (`docs/aap-rename.md` says why). `0x1D` is read
+`Device1.Alias` is never set or cleared (`docs/app/names.md` says why). `0x1D` is read
 only with `02` at byte 6 and `04 00` at bytes 9-10, and the rest of it holds serial
 numbers: only the name and the firmware version are read or logged (`aap::info`), and
 `aap::keys::redacted_hex` cuts any `0x1D` to its preamble.
@@ -347,7 +347,7 @@ when the iPhone showed `9A348` for both. `aap::info::FirmwareVersion` reads bits
 up as the major, 16-19 as a letter (`A` = 0), 4-15 as the build in decimal, and the low
 nibble as a suffix letter (`a` = 1, none for 0) - ours, read off that one value, and
 the suffix and a major past 9 both guesses on top, all to be confirmed at the next
-update (`docs/aap-device-info.md`). Field 10's value is logged beside the reading, so
+update (`docs/protocol/aap/device-info.md`). Field 10's value is logged beside the reading, so
 a wrong one shows. Each field of `0x1D` carries its own error (`aap::info::DeviceInfo`):
 a name that is not UTF-8 leaves the version, and a version that does not read leaves
 the name; an error never carries the field's bytes, as one out of place could be a
@@ -381,7 +381,7 @@ out in a task of its own.
   before while the lowering is unanswered. Never compare with the last value set alone,
   and never take the volume before as the user's while the lowering is unanswered. The
   fake BlueZ answers late and rounded with `SetVolumeAnswer`;
-  `docs/aap-conversation-awareness.md` says why, and what it costs.
+  `docs/app/volume.md` says why, and what it costs.
 - The user's change wins: put back, or a fade stepped, only while the transport reads a
   volume that is ours; the lowering itself sets from any volume. Moved meanwhile, the
   remembered volume is forgotten.
@@ -404,7 +404,7 @@ out in a task of its own.
 state alone.** The pods only report where they are; that they pause nothing themselves is
 believed, not checked (#167). `media::EarPause` decides, pure and taking the time;
 `media::Media` carries it out in a task of its own, on the session bus for the players
-and the system bus for the transport. `docs/aap-ear-detection.md` has the table.
+and the system bus for the transport. `docs/app/media-pause.md` has the table.
 - The places reach it as events (`Coordinator::ear_events`, `podstate::EarEvent`), from
   the link's `EarState` once it has both packets, never from the advertisement or the
   snapshot: the snapshot falls back to the advertisement's in-ear and does not say so,
@@ -582,19 +582,73 @@ A `Co-Authored-By:` trailer is fine.
 
 ## Documentation
 
-- `docs/ble-proximity-pairing.md` - proximity pairing, identification by IRK then ENC_KEY,
-  decrypted layout, suffix validation
-- `docs/aap-key-retrieval.md` - retrieving IRK and ENC_KEY over AAP
-- `docs/aap-noise-control.md` - mode packet, the 0x4B levels around a mode change, the
-  0x09 family
-- `docs/aap-conversation-awareness.md` - the 0x28 setting, the speech levels (0x4B), the
-  hardware run, the pods' own switch to Transparency, the 0x4D requirement, the volume
-  lowered on the levels through `MediaTransport1`
-- `docs/aap-ear-detection.md` - the ear report (0x06) and primary pod (0x08), the role
-  switch, the media paused when a pod leaves an ear and played again once it is back
-- `docs/aap-device-info.md` - the device information packet (0x1D): its layout and
-  fields, where each name comes from, the name and the firmware version read from it,
-  the version's layout as read off one value
-- `docs/aap-rename.md` - the rename packet (0x1A), the name in the device information
-  packet (0x1D), the pods' name and BlueZ's alias, the hardware and name runs, 127 bytes
-- `docs/releasing.md` - release steps, what a release contains, verifying one
+[`docs/README.md`](docs/README.md) says what goes where, and the rules for every
+document: `docs/protocol/` holds what the AirPods and the Linux stack do, `docs/app/`
+what LinuxPods does about it, and `docs/development/` what working on LinuxPods needs.
+
+`docs/protocol/aap/`:
+- [`session.md`](docs/protocol/aap/session.md) - L2CAP PSM 4097, the handshake, the
+  0x4D features packet, the startup dump waiting for 0x0C, the packets around the keys
+- [`keys.md`](docs/protocol/aap/keys.md) - the key request and key packet, the IRK and
+  ENC_KEY, the IRK's byte order, keys kept across a re-pairing
+- [`ear.md`](docs/protocol/aap/ear.md) - the ear report (0x06) and primary pod (0x08),
+  the role switch, the captures
+- [`settings.md`](docs/protocol/aap/settings.md) - the 0x09 family of settings
+- [`noise-control.md`](docs/protocol/aap/noise-control.md) - the mode packet, 0x34
+  before Off, what answers a change, stale reports, the runs
+- [`conversation-awareness.md`](docs/protocol/aap/conversation-awareness.md) - the 0x28
+  setting, the speech levels (0x4B), the pods' own switch to Transparency, the levels
+  around a mode change, the hardware run
+- [`device-info.md`](docs/protocol/aap/device-info.md) - the device information packet
+  (0x1D): its layout and fields, the firmware version's layout as read off one value
+- [`rename.md`](docs/protocol/aap/rename.md) - the rename packet (0x1A), the pods' name,
+  the hardware and name runs, 127 bytes
+
+`docs/protocol/ble/`:
+- [`proximity-pairing.md`](docs/protocol/ble/proximity-pairing.md) - the advertisement's
+  bytes, decryption, the decrypted layout, suffix validation, update frequency
+- [`addresses.md`](docs/protocol/ble/addresses.md) - resolvable private addresses, their
+  rotation, resolving them with the IRK, its byte order
+
+`docs/protocol/linux/`:
+- [`l2cap.md`](docs/protocol/linux/l2cap.md) - a connect that returns with the channel
+  still pending (#136)
+- [`bluez.md`](docs/protocol/linux/bluez.md) - discovery and device cleanup,
+  `MediaTransport1.Volume`, `Device1.Name` and `Device1.Alias`
+- [`desktop.md`](docs/protocol/linux/desktop.md) - PipeWire following the transport's
+  volume, the path a press on a pod takes to a player
+
+`docs/app/`:
+- [`identification.md`](docs/app/identification.md) - identification by IRK then
+  ENC_KEY, why both, what is dropped
+- [`keystore.md`](docs/app/keystore.md) - keys requested on every connection, where they
+  are kept, the IRK kept as sent and reversed to resolve
+- [`aap-links.md`](docs/app/aap-links.md) - waiting for the connect and the handshake,
+  the features packet sent on every link
+- [`state.md`](docs/app/state.md) - the lid kept across the pods' advertisements
+- [`readings.md`](docs/app/readings.md) - the lid left out of the readings kept across a
+  relaunch
+- [`in-ear.md`](docs/app/in-ear.md) - in-ear from AAP, the role switch held back
+- [`noise-control.md`](docs/app/noise-control.md) - 0x34 only for Off, the mode recorded
+  optimistically, stale reports held off
+- [`conversation-awareness.md`](docs/app/conversation-awareness.md) - the setting
+  recorded optimistically, the levels as events
+- [`volume.md`](docs/app/volume.md) - the volume lowered while the user speaks: what is
+  ours, the fade, putting it back, A2DP active only
+- [`media-pause.md`](docs/app/media-pause.md) - the media paused when a pod leaves an
+  ear and played again once it is back
+- [`names.md`](docs/app/names.md) - the pods' name beside BlueZ's alias, the Name row,
+  the rename dialog
+- [`firmware.md`](docs/app/firmware.md) - the firmware version read, kept for the run,
+  and shown
+- [`logging.md`](docs/app/logging.md) - what the packet log lines show, and what is never
+  logged of the device information packet
+- [`ui.md`](docs/app/ui.md) - the pair's color on the Control page
+
+`docs/development/`:
+- [`releasing.md`](docs/development/releasing.md) - release steps, what a release
+  contains, verifying one
+- [`fake-world.md`](docs/development/fake-world.md) - what the fake pods, BlueZ and
+  player do, and where they depart from the hardware
+- [`probes.md`](docs/development/probes.md) - the key and decryption probes, what they
+  print, troubleshooting

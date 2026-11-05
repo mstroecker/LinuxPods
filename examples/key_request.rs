@@ -197,7 +197,7 @@ mod tests {
     use super::*;
 
     /// A key packet as the device sends one, an IRK then an ENC_KEY, from
-    /// synthetic keys: the shape in `docs/aap-key-retrieval.md`.
+    /// synthetic keys: the shape in `docs/protocol/aap/keys.md`.
     fn key_packet(enc_len: u8) -> Vec<u8> {
         let mut packet = vec![0x04, 0x00, 0x04, 0x00, 0x31, 0x00, 0x02];
         packet.extend_from_slice(&[0x01, 0x00, 0x10, 0x00]);

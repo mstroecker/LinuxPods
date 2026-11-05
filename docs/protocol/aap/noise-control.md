@@ -1,12 +1,16 @@
-# AAP Noise Control Protocol
+# AAP noise control
+
+The packet that sets the noise control mode, the `0x34` gate before Off, and what the pods report around a change.
 
 ## Overview
 
-AirPods noise control modes (Off, ANC, Transparency, Adaptive) can be switched via the Apple Accessory Protocol (AAP) over L2CAP PSM 4097. This document describes the verified packet format, response behavior, and integration notes.
+AirPods noise control modes (Off, ANC, Transparency, Adaptive) can be switched via the Apple Accessory Protocol (AAP) over L2CAP PSM 4097. This document describes the verified packet format and response behavior.
 
 **Status:** Verified against AirPods 4 with ANC (firmware A3055) on 2026-02-15, against AirPods Pro 3 and AirPods Pro Gen 2 on 2026-09-12, and against AirPods Pro 3 in the #71 captures. `cargo run --example noise_probe -- <MAC>` reproduces the exchange below.
 
 **Source:** Packet format originally from [LibrePods](https://github.com/librepods-org/librepods/blob/main/docs/AAP%20Definitions.md) reverse engineering, validated independently.
+
+How the app sets the mode and reads the reports: [app/noise-control.md](../../app/noise-control.md).
 
 ## Command Packet
 
@@ -48,13 +52,7 @@ Adaptive:     04 00 04 00 09 00 0D 04 00 00 00
 
 ## Prerequisites
 
-The `EnableSpecialFeatures` packet must be sent before noise control commands. This is already part of the standard AAP connection sequence:
-
-```
-Feature Enable: 04 00 04 00 4D 00 FF 00 00 00 00 00 00 00
-```
-
-Without this packet, Adaptive mode may not be available, and, LibrePods says, Conversation Awareness works only while nothing plays (`aap-conversation-awareness.md`).
+The features packet (`0x4D`) every connection sends first: [session.md](session.md#prerequisites-the-features-packet).
 
 ### Off has a prerequisite of its own
 
@@ -75,12 +73,9 @@ settings in this family.
 
 Apple gates Off because loud sound reduction does not apply while noise control
 is off, and the setting is the same switch the user sees on an iPhone: it
-persists on the device and syncs back to their other Apple devices. So
-`Coordinator::set_noise_control`, which carries out a `Command::NoiseControl`,
-sends it only when Off is the mode being asked for, immediately before the mode
-command, rather than enabling it on every connection. The two go out back to
-back with no delay, which is enough; and as a link carries out its commands one
-at a time, no other command goes out between them.
+persists on the device and syncs back to their other Apple devices.
+
+When the app sends it: [app/noise-control.md](../../app/noise-control.md#off-has-a-prerequisite-of-its-own).
 
 Identifier and values from [LibrePods' control command
 table](https://github.com/librepods-org/librepods/blob/main/docs/control_commands.md).
@@ -101,35 +96,19 @@ What answers a mode change depends on the model and on the Conversation Awarenes
 | Off | `34 01` then `0D 01`, same ms | stale `0D 02` at +0.33 s, then `0D 01` at +1.4 s | none |
 | Transparency | `0D 03` | +1.0 s | none |
 
-**Integration note:** Treat noise control commands as fire-and-forget. Update local state optimistically after sending — do not wait for a `0x0D` confirmation packet. `Coordinator::set_noise_control` does exactly that: it records the mode as soon as the packet is away and broadcasts, and the command is done - its caller, waiting on `Coordinator::command`, hears so then. A later `0x0D` report merely confirms the mode - unless it is a stale one, below.
+How the app records the mode without waiting for the echo: [app/noise-control.md](../../app/noise-control.md#command-acknowledgment).
 
-**Stale reports.** A `0x0D` report can carry the mode a change replaced. Switched from Noise Cancellation to Off, a pair reported `0D 02` 0.33 s later and `0D 01` only at 1.4 s (#71); taken as it came, the first put Noise Cancellation back on show for a second (#113). So a report of the mode the last command replaced is held off until the mode set is reported, or 2 s pass - `aap::noise::ModeState`. After that any report wins again, since the mode may have been changed on another device.
+**Stale reports.** A `0x0D` report can carry the mode a change replaced. Switched from Noise Cancellation to Off, a pair reported `0D 02` 0.33 s later and `0D 01` only at 1.4 s (#71).
 
-Only the last command's replaced mode is held off, and that is accepted. A report of a mode an earlier command set or replaced is taken, so quick successive changes can briefly replay older modes as their echoes arrive, each about a second after its change on a Pro 3. The last command's echo comes last and settles it: the mode on show always ends as the one last set.
-
-A report held off is dropped, not deferred to the end of the 2 s. In run 1 below, Transparency and Adaptive each took effect and were followed by a report of the old mode, `0x02`, with no echo of the new one after it: applied at expiry, that report would show the wrong mode just the same. If a dropped report was right after all, the next report corrects the mode.
+How the app holds these reports off: [app/noise-control.md](../../app/noise-control.md#stale-reports).
 
 ### 0x4B: Conversation Awareness levels 08 and 09
 
-After every noise control command, AirPods 4 sent an identical `0x4B` packet, and AirPods Pro 3 in #71 sent none. It was long read here as a generic settings-changed notification - a count of one, and the `0x09` family that changed. It is not: it is Conversation Awareness's speech level `09`, byte for byte (`aap-conversation-awareness.md`, #150):
+After every noise control command, AirPods 4 sent an identical `0x4B` packet, and AirPods Pro 3 in #71 sent none. It was long read here as a generic settings-changed notification - a count of one, and the `0x09` family that changed. It is not: it is Conversation Awareness's speech level `09`, byte for byte ([conversation-awareness.md](conversation-awareness.md), #150).
 
-```
-Offset:  0  1  2  3  4  5  6  7  8  9
-Hex:     04 00 04 00 4B 00 02 00 01 09
-         ~~~~~~~~~~  ~~ ~~~~~~~~~~~ ~~
-         Header      Cmd            Level
-```
+The levels around a mode change, and the run that showed them: [conversation-awareness.md](conversation-awareness.md#levels-08-and-09-around-a-mode-change).
 
-The AirPods 4's startup dump had `0x28 01`, Conversation Awareness on, and the Pro 3's in #71 `0x28 02`: the difference between the two models was this setting. With the setting on, the levels frame every mode change. Checked on the Pro 3 (2026-11-01, `examples/noise_probe.rs`, nothing playing): every change was answered level `08`, the mode report, then `09` - all five, the bare Off the pods refused included:
-
-```
-sent  04 00 04 00 09 00 0d 03 00 00 00   Transparency
-recv  04 00 04 00 4b 00 02 00 01 08      level 08
-recv  04 00 04 00 09 00 0d 03 00 00 00   mode report
-recv  04 00 04 00 4b 00 02 00 01 09      level 09
-```
-
-Ten `0x4B`s, all `08` or `09`, one pair per change, and nothing else. The AirPods 4 records below have one `09` per change, and the variant `…01 08` once (run 1, ANC test); those stay as observed.
+The AirPods 4 records below have one `09` per change, and the variant `…01 08` once (run 1, ANC test); those stay as observed.
 
 **Key properties:**
 - The packet is **identical** whichever mode was set: it names neither the sub-command nor the mode
@@ -147,49 +126,23 @@ On AAP connection, the AirPods send a burst of `0x09` settings packets during th
 
 This startup report is reliable and should be parsed to initialize the local noise control state.
 
-On AirPods Pro 3 the dump does not come with the battery: it waits until a `0x0C` packet names this host as the one in use, which came 1.5-1.7 s after the notification request in the #71 captures. Until then the mode is unknown.
+When the dump comes: [session.md](session.md#initial-state-report).
 
 ### Ear Detection Reports
 
-AirPods Pro 3 report every change of a pod's place, unasked, in an ear report (`0x06`) - see `aap-ear-detection.md` for its layout and the primary pod packet (`0x08`) it reads with. A `0x0D` report of the unchanged mode usually follows. With exactly one pod in an ear, the pods briefly report `0D 01` (Off) and go back to the mode about 50 ms later. Neither is a mode change of the user's.
+AirPods Pro 3 report every change of a pod's place, unasked, in an ear report (`0x06`) - see [ear.md](ear.md) for its layout and the primary pod packet (`0x08`) it reads with. A `0x0D` report of the unchanged mode usually follows. With exactly one pod in an ear, the pods briefly report `0D 01` (Off) and go back to the mode about 50 ms later. Neither is a mode change of the user's.
 
 ### Unsolicited Mode Changes
 
-When the noise control mode is changed from another device (e.g., iPhone, Apple Watch), the AirPods send an unsolicited `0x0D` packet with the new mode. Parse these to keep local state synchronized - except a report of the mode a command here replaced, within 2 s of it: see Stale reports.
+When the noise control mode is changed from another device (e.g., iPhone, Apple Watch), the AirPods send an unsolicited `0x0D` packet with the new mode. Parse these to keep local state synchronized.
 
-With Conversation Awareness on, the pods also switch to Transparency themselves while the user speaks, and back after, reported the same way (`aap-conversation-awareness.md`). Those are taken like any report: Transparency is the mode the pods are in.
+With Conversation Awareness on, the pods also switch to Transparency themselves while the user speaks, and back after, reported the same way ([conversation-awareness.md](conversation-awareness.md)).
+
+How the app takes these reports: [app/noise-control.md](../../app/noise-control.md#unsolicited-mode-changes).
 
 ## Settings Command Family (0x09)
 
-The `0x09` command byte is a family of settings sub-commands, not exclusive to noise control. Observed sub-commands during connection startup, with the data where it was recorded: AirPods 4's from the test runs below, and AirPods Pro 3's from #71, whose dump held 21 settings and neither `0x1A` nor `0x34`:
-
-| Sub-cmd (byte 6) | Notes (AirPods 4) | AirPods Pro 3 (#71) |
-|-------------------|-------|-------------|
-| `0x0D` | **Noise control mode** | the mode |
-| `0x17` | Unknown | seen |
-| `0x1A` | Listening mode configs - bitmask of the modes in the press-and-hold cycle | not in the dump |
-| `0x34` | **Allow Off as a listening mode** - the prerequisite for `0x0D 01` | not in the dump |
-| `0x18` | Unknown | seen |
-| `0x1B` | Unknown | seen |
-| `0x1F` | Unknown (data: `50 50`) | `50 50` |
-| `0x23` | Unknown | seen |
-| `0x24` | Unknown (data: `03`) | `00 03` |
-| `0x25` | Unknown (data: `01`) | `01` |
-| `0x26` | Unknown (data: `01`) | `02` |
-| `0x28` | **Conversation Awareness** - `01` on, `02` off; see `aap-conversation-awareness.md` (data: `01`) | `02` (`01` in the #150 run) |
-| `0x29` | Unknown | seen |
-| `0x2C` | Unknown | seen |
-| `0x2E` | Unknown (data: `32`) | `32` |
-| `0x2F` | Unknown | seen |
-| `0x30` | Unknown | seen |
-| `0x33` | Unknown | seen |
-| `0x35` | Unknown | seen |
-| `0x37` | Unknown | seen |
-| `0x38` | Unknown | `00`, then `52` in the second capture |
-| `0x3B` | Unknown | seen |
-| `0x3E` | Unknown | seen |
-
-When parsing `0x09` packets, always check byte 6 to identify the specific sub-command. Do not assume all `0x09` packets are noise control.
+The `0x09` sub-commands, of which `0x0D` is one: [settings.md](settings.md).
 
 ## Packet Detection
 
@@ -201,7 +154,7 @@ packet.len() > 7 && packet[0..4] == [04 00 04 00] && packet[4] == 0x09 && packet
 
 The mode value is at `packet[7]`. This is `aap::noise::is_noise_mode_packet`, and
 byte 6 is not optional: validating on the command byte alone accepts every other
-sub-command in the table above and reads its value as a mode. The header is the
+sub-command in the table in [settings.md](settings.md) and reads its value as a mode. The header is the
 one every packet after the handshake carries; `aap::decode` checks it once for
 every kind of packet, then picks the parser by byte 4.
 

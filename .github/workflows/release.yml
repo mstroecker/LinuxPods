@@ -1,5 +1,5 @@
 # Publishes a GitHub release for a pushed v* tag. The release process is in
-# docs/releasing.md.
+# docs/development/releasing.md.
 name: Release
 
 on:

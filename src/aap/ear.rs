@@ -9,7 +9,7 @@
 //! Both come unasked, on every change, and once each as the link comes up,
 //! 0x08 first. The ear report names no pod: it gives the primary's place
 //! first, so it reads only with the primary pod beside it - see
-//! [`EarState`]. See `docs/aap-ear-detection.md` for the capture behind the
+//! [`EarState`]. See `docs/protocol/aap/ear.md` for the capture behind the
 //! layouts.
 
 use std::time::{Duration, Instant};

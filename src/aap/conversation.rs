@@ -14,7 +14,9 @@
 //! same levels frame every change of noise mode then: a Pro 3 answered each
 //! one level 08, the mode report, level 09. The features packet,
 //! [`crate::aap::noise::ENABLE_FEATURES`], is what makes the levels come
-//! while audio plays, LibrePods says. See `docs/aap-conversation-awareness.md`.
+//! while audio plays, LibrePods says
+//! (`docs/protocol/aap/session.md#prerequisites-the-features-packet`). See
+//! `docs/protocol/aap/conversation-awareness.md`.
 //!
 //! The setting's report in the startup dump has been seen on a Pro 3 (#150),
 //! and the same packet, sent from the window, changed it on a Pro 3
@@ -46,7 +48,7 @@ const LEVEL_PREFIX: [u8; 4] = [0x00, 0x02, 0x00, 0x01];
 const LEVEL: usize = 9;
 
 /// What a speech level tells the host, as the hardware run of #150 reads it
-/// (`docs/aap-conversation-awareness.md`). A level is a target for the
+/// (`docs/protocol/aap/conversation-awareness.md`). A level is a target for the
 /// media's volume, not a step to count: the pods skip levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Speech {
@@ -240,7 +242,7 @@ mod tests {
     }
 
     /// The bytes of the #150 run, and of the 0x4B AirPods 4 sent after every
-    /// mode change (`docs/aap-noise-control.md`), which is level 09.
+    /// mode change (`docs/protocol/aap/noise-control.md`), which is level 09.
     #[test]
     fn reads_the_levels_of_the_hardware_run() {
         assert_eq!(

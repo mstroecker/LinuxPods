@@ -229,7 +229,7 @@ mod tests {
         key_packet(&keys)
     }
 
-    /// The layout of the example in `docs/aap-key-retrieval.md`: marker 0x31,
+    /// The layout of the example in `docs/protocol/aap/keys.md`: marker 0x31,
     /// count, then type, length and data per key, each header four bytes.
     #[test]
     fn builds_the_documented_layout() {

@@ -86,7 +86,7 @@ pub fn decrypt_for_device(
 /// Without the second rule, a pair with a pod out of the case - worn, on a
 /// phone or not - stays unidentified behind its random address, and an
 /// unidentified advertisement is dropped: the pair would vanish from BLE in the
-/// case `docs/ble-proximity-pairing.md` sets out to cover.
+/// case `docs/protocol/ble/proximity-pairing.md` sets out to cover.
 pub fn matches_device(decrypted: &[u8; ENCRYPTED_LEN], mac_addr: Address) -> bool {
     decrypted[MAC_SUFFIX_RANGE] == mac_addr[3..] || decrypted[MAC_SUFFIX_RANGE] == ZEROED_SUFFIX
 }
@@ -222,7 +222,7 @@ mod tests {
         assert!(matches!(err, Err(DecryptError::ValidationFailed)));
     }
 
-    /// The Pro 3 sample in `docs/ble-proximity-pairing.md`: 62% / 62% / 31%, all
+    /// The Pro 3 sample in `docs/protocol/ble/proximity-pairing.md`: 62% / 62% / 31%, all
     /// charging, with the given suffix. Deliberately fails the legacy magic check
     /// (byte 0 = 0x10, byte 4 not 0x2D).
     fn pro3_plaintext(mac_suffix: [u8; 3]) -> Plaintext {

@@ -170,7 +170,7 @@ pub const DUMP_DELAY: Duration = Duration::from_millis(200);
 
 /// What the startup dump holds, in the order a Pro 3 sent it in the #71
 /// captures. Settings of the 0x09 family carry the values captured: those
-/// `docs/aap-noise-control.md` records, and capture 4's for the rest. Several
+/// `docs/protocol/aap/settings.md` records, and capture 4's for the rest. Several
 /// are valid mode bytes - 0x25's 01 reads as Off, 0x26's 02 as Noise
 /// Cancellation - so taking a mode from any 0x09 packet without checking byte
 /// 6 reads them as one. Neither 0x34, allow-Off, nor 0x1A was ever in it.
@@ -425,7 +425,7 @@ pub enum Part {
 ///   it again about 5 s, 30 s and 60 s after an event, and once about 2 s
 ///   after discovery starts - see [`Pods::advertisement`].
 ///
-/// AirPods 4 answered a mode change otherwise (`docs/aap-noise-control.md`):
+/// AirPods 4 answered a mode change otherwise (`docs/protocol/aap/noise-control.md`):
 /// an echo on about one in four, no report of the mode an Off replaced, and
 /// with Conversation Awareness on, as theirs was, level 09 on every change.
 /// Their answers are `idle_level_only: true, echo_every: 4, stale_report:
@@ -440,7 +440,7 @@ pub struct Quirks {
     /// error chime.
     pub off_needs_allow: bool,
     /// With Conversation Awareness on, answer a mode change with level 09
-    /// alone, at once, as AirPods 4 did (`docs/aap-noise-control.md`),
+    /// alone, at once, as AirPods 4 did (`docs/protocol/aap/noise-control.md`),
     /// rather than as a Pro 3 did: level 08 at once, the echo, and level 09
     /// after it. Off by default. With the setting off, neither sends a 0x4B.
     pub idle_level_only: bool,
@@ -1009,7 +1009,7 @@ impl Pods {
     ///   it was primary there. Each pod calls itself primary, and in session
     ///   1 of #142, both pods worn and the left one primary at times, the
     ///   advertisement's primary agreed with AAP's 13 times out of 13
-    ///   (`docs/aap-ear-detection.md`): the pod advertising was the primary;
+    ///   (`docs/protocol/aap/ear.md`): the pod advertising was the primary;
     /// - a pod in the closed case stops [`LID_SILENCE`] after the lid closes,
     ///   whether the other pod is in the case too or worn, which goes on;
     /// - when the lid opens on pods gone quiet, they come back under new
@@ -1686,7 +1686,7 @@ impl Pods {
         }
         // Carries the mode this command set, even if another has replaced it
         // by the time it arrives: a stale report, like those in run 1 of
-        // docs/aap-noise-control.md.
+        // docs/protocol/aap/noise-control.md.
         if self.quirks.echo_every != 0 && self.mode_changes.is_multiple_of(self.quirks.echo_every) {
             session.send(
                 now + self.quirks.echo_delay,

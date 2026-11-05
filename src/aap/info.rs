@@ -10,7 +10,9 @@
 //! dissector's Marketing Version, and among the rest are the model number
 //! and three serial numbers. Only fields 0 and 10 leave this module; the
 //! serial numbers are never read, and the packet is never logged - see
-//! [`crate::aap::keys::redacted_hex`]. See `docs/aap-device-info.md`.
+//! [`crate::aap::keys::redacted_hex`]. See `docs/protocol/aap/device-info.md`
+//! for the packet, `docs/app/logging.md` for what is never logged, and
+//! `docs/app/firmware.md` for how the version is read.
 //!
 //! Where each comes from: the name's place was seen on a Pro 3 and a Pro 2
 //! (USB-C), and a rename's name came back in it (#160). Field 10 held
