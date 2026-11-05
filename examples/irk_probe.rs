@@ -16,8 +16,10 @@
 //! to be pasted into an issue. Pairs are numbered in the order given, addresses
 //! in the order heard. Only the cleartext status bytes 3-8 are shown, which
 //! carry no address. An error names the pair by its number, and the pair's
-//! address is cut out of its causes. That holds at the default log level;
-//! `RUST_LOG` set to debug logs the library's lines, addresses and all.
+//! address is cut out of its causes. That holds at the default log level,
+//! which leaves out the AAP client's warnings: the one it has names the
+//! address, and the error it comes with says the same. `RUST_LOG` set to
+//! debug logs the library's lines, addresses and all.
 //!
 //! A line typed while it runs is printed as a timestamped marker, to tie a
 //! phase (lid closed, disconnected) to the output. `q` prints a summary and
@@ -217,7 +219,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "linuxpods=warn".into()),
+                // The client's warning on a connect still pending names the
+                // address; `fetch_keys` reports the same failure without it.
+                .unwrap_or_else(|_| "linuxpods=warn,linuxpods::aap::client=error".into()),
         )
         .init();
 
