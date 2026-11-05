@@ -192,7 +192,8 @@ pub(super) fn read(packet: &[u8]) -> Result<BatteryInfo, BatteryParseError> {
 }
 
 /// Builds the packet [`parse_battery_packet`] reads, one entry per battery in
-/// the order given. The device lists right, left, case.
+/// the order given. The device lists the primary pod first, then the other
+/// pod, then the case (`docs/protocol/aap/battery.md`).
 ///
 /// The level goes out as given, so a test can write one above 100, or one
 /// beside [`Status::Disconnected`] that the parser reads as `None`; `None` goes
