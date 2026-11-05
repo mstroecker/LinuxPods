@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/mstroecker/LinuxPods)](https://github.com/mstroecker/LinuxPods/releases/latest)
 [![License: GPL-3.0-or-later](https://img.shields.io/github/license/mstroecker/LinuxPods)](LICENSE)
 [![MSRV 1.92](https://img.shields.io/badge/rustc-1.92+-orange?logo=rust)](Cargo.toml)
-[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](docs/releasing.md#verifying-a-release)
+[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](docs/development/releasing.md#verifying-a-release)
 
 A native GNOME desktop application for managing Apple AirPods on Linux.
 
@@ -79,14 +79,14 @@ window's rename is still to be checked on a pair. The pods take the name at once
 does the app - the Name row, the device switcher, a low battery notification; the rest of
 this computer shows it once the pair connects again - unless you gave the pair a name in
 GNOME Settings, which GNOME, the switcher and the notifications keep showing - and Apple
-devices keep the name they have. See [`docs/aap-rename.md`](docs/aap-rename.md).
+devices keep the name they have. See [`docs/app/names.md`](docs/app/names.md).
 
 The Firmware row below Name shows the firmware version as the iPhone shows it, such as
 `9A348`, from the device information the pods send as they connect. It stays on show
 after the pair disconnects, until the app quits, and reads "Unknown" until the pair has
 connected since the app started. How the version is packed is read off one firmware
 (2026-11-02), to be confirmed at the next update, and the row is still to be checked on
-a pair (#161). See [`docs/aap-device-info.md`](docs/aap-device-info.md).
+a pair (#161). See [`docs/app/firmware.md`](docs/app/firmware.md).
 
 ### Linux integration
 
@@ -109,7 +109,7 @@ the worn one out pauses too; with both taken out, the media plays again once bot
 back. A pod put in the case forgets the pause, and a player you played or stopped
 meanwhile is left as you left it. It works from the pods' live ear reports, so only for a
 pair connected here. The switch in Preferences is on by default. Not yet tried on a pair
-(#167); see [`docs/aap-ear-detection.md`](docs/aap-ear-detection.md#pausing-the-media).
+(#167); see [`docs/app/media-pause.md`](docs/app/media-pause.md#pausing-the-media).
 
 ### Unexplored
 
@@ -194,7 +194,7 @@ linuxpods-0.4.0-x86_64-linux/install.sh --uninstall
 
 The release binaries need glibc 2.39 or newer besides the runtime libraries listed under
 [Requirements](#requirements). Every release carries checksums, an SBOM and signed build
-provenance; [docs/releasing.md](docs/releasing.md#verifying-a-release) shows how to verify
+provenance; [docs/development/releasing.md](docs/development/releasing.md#verifying-a-release) shows how to verify
 a download.
 
 ### From source
@@ -264,14 +264,16 @@ first advertisement arrives.
 AAP runs over an L2CAP socket on PSM 4097; a BLE advertisement is decrypted with AES-128
 when its address resolves with a stored IRK, and with that pair's key alone. Both protocols are documented in full:
 
-- [`docs/ble-proximity-pairing.md`](docs/ble-proximity-pairing.md) - advertisement layout,
-  decryption, and how a device is identified behind a randomized address
-- [`docs/aap-key-retrieval.md`](docs/aap-key-retrieval.md) - retrieving the IRK and ENC_KEY
-- [`docs/aap-noise-control.md`](docs/aap-noise-control.md) - switching noise control mode,
+- [`docs/protocol/ble/proximity-pairing.md`](docs/protocol/ble/proximity-pairing.md) - advertisement layout
+  and decryption
+- [`docs/protocol/ble/addresses.md`](docs/protocol/ble/addresses.md) - how a device is
+  identified behind a randomized address
+- [`docs/protocol/aap/keys.md`](docs/protocol/aap/keys.md) - retrieving the IRK and ENC_KEY
+- [`docs/protocol/aap/noise-control.md`](docs/protocol/aap/noise-control.md) - switching noise control mode,
   and why the device's answer is no acknowledgment
-- [`docs/aap-conversation-awareness.md`](docs/aap-conversation-awareness.md) - the
-  Conversation Awareness setting, the speech levels the pods send with it on, and the
-  volume lowered on them
+- [`docs/protocol/aap/conversation-awareness.md`](docs/protocol/aap/conversation-awareness.md) - the
+  Conversation Awareness setting, and the speech levels the pods send with it on
+- [`docs/app/volume.md`](docs/app/volume.md) - the volume lowered on the speech levels
 
 ## Development
 

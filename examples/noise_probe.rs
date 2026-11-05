@@ -1,13 +1,13 @@
 //! Cycles the noise control modes and classifies everything that comes back.
 //!
-//! This is the tool the packet format in `docs/aap-noise-control.md` was verified
+//! This is the tool the packet format in `docs/protocol/aap/noise-control.md` was verified
 //! with, ported from the Go original. It talks to the client directly rather than
 //! through the coordinator, so the device's answers can be read unfiltered - which
 //! is the whole point: what arrives after a mode change differs by model and by
 //! setting, and none of it is a usable acknowledgment - an echo about a second
 //! later on AirPods Pro 3, one on perhaps one change in four on AirPods 4, and
 //! with Conversation Awareness on, its speech levels 08 and 09 around it, which
-//! name no mode (`docs/aap-conversation-awareness.md`).
+//! name no mode (`docs/protocol/aap/conversation-awareness.md`).
 //!
 //! Every mode should be audible on the AirPods. Listen while it runs.
 //!

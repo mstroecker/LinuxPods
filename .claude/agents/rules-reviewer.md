@@ -189,7 +189,7 @@ body. Commit subjects follow `type(scope): summary`, the scope optional.
 
 ## Part 2: stale documentation
 
-Check CLAUDE.md, `docs/*.md`, `README.md`, doc comments and comments, log and error
+Check CLAUDE.md, `docs/**/*.md`, `README.md`, doc comments and comments, log and error
 message text, this file, and anything under `.claude/skills/`.
 
 1. List every identifier the change removes, renames or changes the behavior of:

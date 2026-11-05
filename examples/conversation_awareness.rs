@@ -6,7 +6,7 @@
 //! It opens the session the app opens - the features packet included, without
 //! which, LibrePods says, the levels come only while nothing plays - and reads
 //! what arrives for a while. Speak, stop, speak again, with audio playing or
-//! not, and read the times back against `docs/aap-conversation-awareness.md`.
+//! not, and read the times back against `docs/protocol/aap/conversation-awareness.md`.
 //!
 //! With `--on`, a pair whose dump says the setting is off has it turned on for
 //! the run, and off again at its end. The packet is LibrePods', and a Pro 3
@@ -25,7 +25,7 @@
 //! volume set is logged with its time, and with what the transport read back
 //! after it and how long that took, as BlueZ changes `Volume` only once the
 //! pods answer, with the volume they report
-//! (`docs/aap-conversation-awareness.md`); waiting for that, the example
+//! (`docs/protocol/linux/bluez.md`); waiting for that, the example
 //! takes the next level later than the app would. What was lowered is put
 //! back at the end of the run; interrupted with Ctrl-C, it is not. Quit the app
 //! first, or both lower the volume.

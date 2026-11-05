@@ -7,7 +7,7 @@
 //! and `Alias`, and changes nothing there.
 //!
 //! The rename packet is LibrePods', confirmed on a Pro 3 with this probe on
-//! 2026-11-02 (#160, `docs/aap-rename.md`). Whether it took, and what it takes
+//! 2026-11-02 (#160, `docs/protocol/aap/rename.md`). Whether it took, and what it takes
 //! for it to show, is read in three places, each a step further from the
 //! rename:
 //!

@@ -4,7 +4,7 @@
 //! at once at the first `01`/`02` of a stretch, and fades back from the first
 //! level of `03` or above; only while A2DP plays, never what the user moved,
 //! put back when the link goes, at quit, and once a transport that went is
-//! back. `docs/aap-conversation-awareness.md` says how and why, and where each
+//! back. `docs/app/volume.md` says how and why, and where each
 //! reading comes from.
 //!
 //! [`Ducking`] decides, from the levels, the transport as it reads and the
@@ -115,7 +115,7 @@ fn faded(from: u16, to: u16, elapsed: Duration) -> u16 {
 /// One pair's volume through stretches of speech. Takes the levels, the
 /// transport as it reads now and the time, and says what to set the
 /// transport to; the caller sets it. What counts as ours is `is_ours`;
-/// `docs/aap-conversation-awareness.md` says why.
+/// `docs/app/volume.md` says why.
 #[derive(Debug, Clone, Default)]
 pub struct Ducking {
     state: State,

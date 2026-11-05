@@ -7,7 +7,7 @@
 //!
 //! This is the name the pods give every host, which BlueZ shows as
 //! `Device1.Name` - not the alias BlueZ keeps for this computer alone, which
-//! is never touched here. See `docs/aap-rename.md`.
+//! is never touched here. See `docs/protocol/aap/rename.md`.
 //!
 //! The rename packet is LibrePods' (`linux/airpods_packets.h`,
 //! `AACPManager.createRenamePacket`): both its apps send opcode 0x1A, while its

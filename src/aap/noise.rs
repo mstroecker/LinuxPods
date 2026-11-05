@@ -5,7 +5,7 @@
 //! The mode packet serves both directions - we send it to switch mode, and the
 //! device sends it in its startup dump and whenever the mode is changed from
 //! another device. Off additionally needs sub-command 0x34, the setting that
-//! permits it at all. See `docs/aap-noise-control.md` for the verified layout
+//! permits it at all. See `docs/protocol/aap/noise-control.md` for the verified layout
 //! and why the response cannot be used as an acknowledgment.
 
 use std::time::{Duration, Instant};
@@ -133,7 +133,7 @@ pub const STALE_REPORT_WINDOW: Duration = Duration::from_secs(2);
 /// as the one last set.
 ///
 /// A report held off is dropped, not kept to take once the window is over.
-/// Run 1 in `docs/aap-noise-control.md` has a pair report the old mode after
+/// Run 1 in `docs/protocol/aap/noise-control.md` has a pair report the old mode after
 /// changes that did take effect, with no echo of the new one after it: taken
 /// late, that report would put the wrong mode on show just the same. If one
 /// dropped was right after all, the next report the device sends corrects
@@ -322,7 +322,7 @@ pub(super) fn read(packet: &[u8]) -> Result<NoiseMode, NoiseParseError> {
 mod tests {
     use super::*;
 
-    /// The hex from `docs/aap-noise-control.md`, byte for byte.
+    /// The hex from `docs/protocol/aap/noise-control.md`, byte for byte.
     #[test]
     fn builds_the_documented_packets() {
         let hex = |mode| crate::hex(&set_packet(mode));
@@ -403,7 +403,7 @@ mod tests {
         }
     }
 
-    /// 0x1F, from the startup dump in `docs/aap-noise-control.md`: the second
+    /// 0x1F, from the startup dump in `docs/protocol/aap/settings.md`: the second
     /// value byte lands at byte 8.
     #[test]
     fn reports_a_two_byte_setting() {
