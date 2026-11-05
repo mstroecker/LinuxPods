@@ -21,7 +21,7 @@ so a probe never receives keys it did not ask for, and prints them.
 
 **No wait is bounded.** The link's read loop takes a key packet whenever it comes, for as
 long as the link lasts; one that never comes is asked for again at the next connection.
-The probes wait a window of their own: [development/probes.md](../development/probes.md#reference-implementation).
+The probes wait a window of their own: [development/probes.md](../development/probes.md#key_request).
 
 ## Which keys are taken
 

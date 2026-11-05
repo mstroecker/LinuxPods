@@ -279,7 +279,7 @@ that the key was the pair's.
 
 Both models verified here decrypt this way (2026-09-09/10, 7ba6bbc, 1a7c66d). The tools
 that decrypt captured and live payloads:
-[development/probes.md](../../development/probes.md#testing).
+[development/probes.md](../../development/probes.md#decrypt_probe).
 
 #### Decrypting BLE Advertisements
 
