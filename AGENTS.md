@@ -591,6 +591,8 @@ what LinuxPods does about it, and `docs/development/` what working on LinuxPods 
   0x4D features packet, the startup dump waiting for 0x0C, the packets around the keys
 - [`keys.md`](docs/protocol/aap/keys.md) - the key request and key packet, the IRK and
   ENC_KEY, the IRK's byte order, keys kept across a re-pairing
+- [`battery.md`](docs/protocol/aap/battery.md) - the battery packet (0x04), its codes,
+  Disconnected's placeholder levels (#108), the primary pod listed first
 - [`ear.md`](docs/protocol/aap/ear.md) - the ear report (0x06) and primary pod (0x08),
   the role switch, the captures
 - [`settings.md`](docs/protocol/aap/settings.md) - the 0x09 family of settings

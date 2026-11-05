@@ -16,6 +16,7 @@ Elsewhere - the switcher in the header bar, a low battery notification - the app
 
 The packet, and what the pods do with a name: [protocol/aap/rename.md](../protocol/aap/rename.md#rename-0x1a).
 
+- Sent by `Command::Rename`, from the Name row of the device page's Info group.
 - Fire and forget, like the noise mode: the app records the name on the link once the packet is away (`Link::name`).
 - The app refuses an empty name, a NUL and anything over 127 bytes before anything is sent: in the dialog, in `Coordinator::command` before the command is queued, and in `aap::name::rename_packet`.
 

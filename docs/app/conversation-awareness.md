@@ -11,6 +11,8 @@ So the app records the setting optimistically, as it does the noise mode: `Coord
 ## In the app
 
 - `aap::decode` reads the setting as `Message::ConversationAwareness` and a level as `Message::SpeechLevel`.
+- `aap::conversation::is_level_packet` checks bytes 5-8 of a `0x4B` (`00 02 00 01`, as in every one seen): a `0x4B` shaped otherwise is no level it knows.
+- `aap::conversation::Speech` reads a level as a target, not a step to count, as the pods skip levels ([protocol/aap/conversation-awareness.md](../protocol/aap/conversation-awareness.md#speech-levels-0x4b)).
 - The setting is kept on the link and shown in the snapshot (`PodState::conversation_awareness`); it goes with the link, as the noise mode does.
 - `Command::ConversationAwareness` sends the packet to turn it on or off (taken by a Pro 3, 2026-11-02), through `Coordinator::command` like the noise mode. The Features group's switch sends it, and is sensitive while the device shown is on AAP and has reported the setting.
 - The last level is kept on the link and in the snapshot (`PodState::speech_level`), and logged at debug. Every level also goes, as an event, to what lowers the volume: `Coordinator::speech_events` - see [volume.md](volume.md).
