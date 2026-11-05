@@ -23,7 +23,8 @@ Every `file:line` you report refers to the reviewed revision, not to whatever is
 
 **Read-only.** No edits, commits, pushes, GitHub comments or label changes. No `cargo build`
 or `cargo test` - disk is tight, a target dir is ~2 GB, and CI builds every PR. Skip what CI
-already enforces: fmt, clippy `-D warnings`, tests, cargo-deny, gitleaks, the workflow audit.
+already enforces: fmt, clippy `-D warnings`, tests, cargo-deny, gitleaks, the workflow audit,
+the links and heading anchors in `README.md`, `AGENTS.md`, `docs/` and `.claude/`.
 
 ## Read first
 
@@ -212,8 +213,8 @@ message text, this file, and anything under `.claude/skills/`.
 **A change to `docs/`.** Check it against the rules in `docs/README.md`, and flag:
 - a fact on the wrong side of the sorting test: about the AirPods or the Linux stack in
   `docs/app/`, or about a choice made here in `docs/protocol/`;
-- a fact written twice rather than linked, or a link that does not resolve (relative links
-  only, to a file or a heading in it);
+- a fact written twice rather than linked, or a link that is not relative (to a file or a
+  heading in it) - CI's Links job checks that each one resolves;
 - a fact without its source - a run with model, date and issue, another project named, a
   specification or upstream source with its version, or a guess called one;
 - a value repeated in `docs/app/` or `docs/development/` where a constant could be named;
