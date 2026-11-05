@@ -22,7 +22,7 @@ the current branch against `origin/main`.
 Every `file:line` you report refers to the reviewed revision, not to whatever is checked out.
 
 **Read-only.** No edits, commits, pushes, GitHub comments or label changes. No `cargo build`
-or `cargo test` - disk is tight, a target dir is ~4 GB, and CI builds every PR. Skip what CI
+or `cargo test` - disk is tight, a target dir is ~2 GB, and CI builds every PR. Skip what CI
 already enforces: fmt, clippy `-D warnings`, tests, cargo-deny, gitleaks, the workflow audit.
 
 ## Read first
@@ -185,7 +185,7 @@ numbers.
 
 **Commits and PR body.** Flag a `Claude-Session:` trailer or a
 `https://claude.ai/code/session_` link in any commit message in the range or in the PR
-body. Commit subjects follow `type(scope): summary`.
+body. Commit subjects follow `type(scope): summary`, the scope optional.
 
 ## Part 2: stale documentation
 

@@ -29,7 +29,7 @@ The user may be logged in with real AirPods and their own LinuxPods running.
 ## Start
 
 ```sh
-CARGO_PROFILE_DEV_DEBUG=line-tables-only make fake-world SCENARIO=connected HEADLESS=1
+make fake-world SCENARIO=connected HEADLESS=1
 ```
 
 This builds with `--features harness`, so the binaries are fresh, then returns once the
@@ -58,7 +58,7 @@ at `/org/bluez/hci1` instead, as on a machine whose only adapter is not the firs
 (#51); any scenario runs on it, and `AddPods` pairs with it:
 
 ```sh
-CARGO_PROFILE_DEV_DEBUG=line-tables-only make fake-world SCENARIO=connected ADAPTER=hci1 HEADLESS=1
+make fake-world SCENARIO=connected ADAPTER=hci1 HEADLESS=1
 ```
 
 `fakepods` starts with one adapter; plug in more, power them off and on, unplug them and
