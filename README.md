@@ -93,6 +93,7 @@ is still to be checked on a pair (#161). See [`docs/app/firmware.md`](docs/app/f
 | System tray battery and quick actions (StatusNotifierItem) | ✅ |
 | Several pairs tracked at once, with a switcher | ✅ |
 | Keys stored under the XDG data directory and reused across sessions | ✅ |
+| Last reading kept across restarts, for a day | ✅ |
 | Native libadwaita interface following the GNOME HIG | ✅ |
 | Low battery notifications, at 20% and 5% as UPower's defaults, with a switch in Preferences | ✅ |
 | Preferences kept across restarts, in the XDG config directory | ✅ |

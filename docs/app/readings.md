@@ -40,6 +40,10 @@ run. It is shown, with its age, but left out of GNOME Settings by
 out by that flag, never by a freshness window there, which would withdraw the battery and
 export it again (#62): [battery.md](battery.md#gnome-settings).
 
+Checked on a Pro 3, 2026-11-05, at `da79836`: relaunched with the pair in its closed
+case, the window showed its last levels with their age, and GNOME Settings showed no
+battery for it until it connected again.
+
 ## Saving
 
 **Never per advertisement:** a pair in range is heard several times a second.
@@ -64,5 +68,4 @@ took either lock would wait for a save that waits for `inner`: a deadlock.
 
 ## Hardware checks
 
-- Relaunch with a pair in its closed case: the window shows its last levels with their
-  age, and GNOME Settings shows no battery for it until it is heard again.
+None open.
