@@ -28,9 +28,10 @@ Probe output is meant to be pasted into issues.
   [app/logging.md](../app/logging.md#never-keys-or-serial-numbers).
 - **The pair's address, in most probes.** Every probe that takes a MAC but `irk_probe`
   prints it back, and so do their errors. The library's log lines name it at `debug`,
-  which only `noise_probe` logs at by default. `apple_sniff` prints random BLE
+  which only `noise_probe` logs at by default, and in its one warning, for a connect
+  still pending after `aap::client::CONNECT_LIMIT`. `apple_sniff` prints random BLE
   addresses, and `decrypt_probe` the stored pairs' MACs. Only `irk_probe` prints none
-  at its default log level, but for one warning ([`irk_probe`](#irk_probe)).
+  at its default log level ([`irk_probe`](#irk_probe)).
 - **Host addresses, where a probe prints packets whole.** `noise_probe` prints every
   packet but a key packet and a device information packet whole, and `rename_probe`
   does the same after a rename and in each `--sweep` step. So they print `0x2B`, the
@@ -99,10 +100,11 @@ scans.
 
 Pairs are numbered in the order given, addresses in the order heard.
 
-- **Never prints** keys, and addresses only in one case at its default log level: a
-  connect still pending after `aap::client::CONNECT_LIMIT` logs a warning that names the
-  pair's address. An error names the pair by its number, with its address cut out.
-  With `RUST_LOG` at `debug`, the library's lines print addresses.
+- **Never prints** keys, and no address at its default log level. An error names the
+  pair by its number, with its address cut out. The default level leaves out the AAP
+  client's warnings: its one warning, a connect still pending after
+  `aap::client::CONNECT_LIMIT`, names the address, and the error that follows says the
+  same without it. With `RUST_LOG` at `debug`, the library's lines print addresses.
 - **Stores nothing.**
 
 If a pair's keys seem to have changed after re-pairing: that is not a given
