@@ -589,6 +589,8 @@ impl ChannelState {
 
 /// Takes the socket's pending error (`SO_ERROR`): why its connect failed.
 /// bluer reads it within its connect, and has no call for it otherwise.
+// getsockopt is a libc call, which only an unsafe block can make
+#[allow(unsafe_code)]
 fn take_error(socket: &SeqPacket) -> io::Result<Option<io::Error>> {
     let mut err: libc::c_int = 0;
     let mut len = size_of::<libc::c_int>() as libc::socklen_t;
