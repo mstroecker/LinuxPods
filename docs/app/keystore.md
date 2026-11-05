@@ -22,6 +22,10 @@ keeps the IRK as AAP sends it, and `ble::rpa::resolves` reverses it. Its test pi
 order with the specification's sample data (Appendix D.7) - reversed, as AAP would send
 it, is what `resolves` takes.
 
+A model that sent its IRK the other way round would have none of its addresses
+resolved, and so go unidentified. `examples/irk_probe.rs` reports an address that
+resolves only with the IRK unreversed.
+
 ## Reference Implementation
 
 The app itself asks for the keys on every AAP connection: `Coordinator::open_aap`
