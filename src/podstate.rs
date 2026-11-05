@@ -1579,8 +1579,9 @@ impl Coordinator {
 
         let client = Arc::new(self.aap_client(mac_addr).open().await?);
         // Ask for the proximity keys on every connection, not only when none is
-        // stored: re-pairing regenerates them, and a stale IRK or key leaves the
-        // pair unidentified, so it would silently vanish from BLE. The reply is
+        // stored: what would change them is not known (a re-pairing kept them,
+        // `docs/protocol/aap/keys.md`), and a stale IRK or key leaves the pair
+        // unidentified, so it would silently vanish from BLE. The reply is
         // stored by `aap_read_loop` like any key packet, and waits in the socket
         // until that loop starts. Without a key only BLE suffers, so a failure
         // does not fail the connection.
@@ -2280,8 +2281,8 @@ impl Coordinator {
     /// arrives.
     ///
     /// A packet that brings no usable IRK keeps the one stored, as long as the
-    /// ENC_KEY is the one stored with it. With a new ENC_KEY - re-paired - the
-    /// old IRK goes too, as it resolves none of the new pairing's addresses:
+    /// ENC_KEY is the one stored with it. With a new ENC_KEY the old IRK goes
+    /// too, as it may resolve none of the pair's new addresses:
     /// without one, the pair is identified the old way rather than not at all.
     async fn store_keys(
         &self,

@@ -192,8 +192,9 @@ pub fn primary_packet(primary: PodSide, secondary: bool, switching: bool) -> [u8
 
 /// How long an ear report taken for the first half of a role switch waits
 /// for the primary pod packet that completes it - see [`EarState`]. The
-/// packet came 0.2-31 ms after the report on a Pro 3 in the #142 captures, and
-/// 0.5-87 ms after it on a Pro 2 (USB-C) on 2026-11-02 (#71).
+/// packet came 0.2-31 ms after the report on a Pro 3 in the #142 captures,
+/// 0-54 ms in #71's capture 4, and 0.5-87 ms on a Pro 2 (USB-C) on 2026-11-02
+/// (#71).
 pub const ROLE_SWITCH_HOLD: Duration = Duration::from_millis(250);
 
 /// Which pod is in an ear, as a link's ear reports and primary pod packets

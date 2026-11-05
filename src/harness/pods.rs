@@ -87,8 +87,8 @@ const OPCODE: usize = 4;
 
 /// How long after the ear report in the new order a role switch's first
 /// primary pod packet comes. The ear report came before it at every switch:
-/// 0.2-31 ms on a Pro 3 in the #142 captures, 0.5-87 ms on a Pro 2 (USB-C) on
-/// 2026-11-02 (#71).
+/// 0.2-31 ms on a Pro 3 in the #142 captures, 0-54 ms in #71's capture 4, and
+/// 0.5-87 ms on a Pro 2 (USB-C) on 2026-11-02 (#71).
 pub const PRIMARY_AFTER_EAR: Duration = Duration::from_millis(10);
 
 /// How long after a role switch's first primary pod packet its second one
