@@ -6,8 +6,9 @@ and alias. Read from BlueZ 5.87's source and documentation, and checked on hardw
 where a run below says so; what was only read, not run, says so.
 
 The app talks to bluetoothd in `bluez`, `ble::scanner`, `attachment` and `volume`; what
-it does with these facts: [app/volume.md](../../app/volume.md),
-[app/names.md](../../app/names.md), [app/in-ear.md](../../app/in-ear.md).
+it does with these facts: [app/bluez.md](../../app/bluez.md),
+[app/volume.md](../../app/volume.md), [app/names.md](../../app/names.md),
+[app/in-ear.md](../../app/in-ear.md).
 
 ## Discovery
 

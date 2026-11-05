@@ -6,7 +6,7 @@ status. The layout and the codes are LibrePods', and AirPods Pro 3 captures (#71
 those captures alone; of the Pro 2 (USB-C), only the order at a role switch was seen
 (#71).
 
-Read by `aap::battery`. No `app/` document covers the battery yet.
+Read by `aap::battery`; what the app does with the levels: [app/battery.md](../../app/battery.md).
 
 Byte offsets count from 0 at the first byte of the packet.
 

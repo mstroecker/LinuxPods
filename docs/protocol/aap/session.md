@@ -57,7 +57,7 @@ before they have answered, and do not answer it later.
 - A pair connected before the session opened answered well inside 500 ms (Pro 3, #109).
 - The answer took 1.23 s and 1.04 s in #71 captures 1 and 2 (Pro 3).
 
-How the app waits for the answer: [app/aap-links.md](../../app/aap-links.md#step-2-send-handshake).
+How the app waits for the answer: [app/aap-links.md](../../app/aap-links.md#the-handshake).
 
 ## Step 3: Send the requests
 

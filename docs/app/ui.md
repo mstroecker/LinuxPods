@@ -1,10 +1,102 @@
 # UI
 
-What the window shows, and how: here, the pair's color.
+How the window, Preferences and the tray get what they show, and the GTK traps they
+avoid. The window is `ui`, the tray `indicator`. What each feature shows is in its own
+document; this one covers what holds for all of them.
+
+## Updates come from snapshots
+
+**Widgets change only from the snapshot stream** ([state.md](state.md#snapshots)). The
+window's render loop runs on the main context, the only place a widget may be touched
+([architecture.md](architecture.md#two-threads)).
+
+- **One pass per `RENDER_INTERVAL` at most.** tokio's cooperative budget does not reach
+  glib's executor: under a stream of updates `changed()` would stay ready, and the loop
+  would never yield to GTK. The pause caps rendering, not delivery: the next pass picks up
+  whatever is newest.
+- **The borrow is cloned out** before anything is awaited: it is a read lock every
+  broadcast waits for.
+- **A clock redraws** the window every 30 seconds, so a BLE reading's age moves on with no
+  snapshot. Under `RECENT` it reads "Last seen just now".
+
+**The one exception is a command that fails** ([commands.md](commands.md#what-the-caller-hears)).
+Its result comes back to the main context and goes up as a toast: an event, never a
+control's state. So the noise control radios keep showing the recorded mode.
+
+## Controls that send commands
+
+Noise Control, Conversation Awareness and the Info group's Name row send commands, so
+they are insensitive unless the pair shown is on AAP. BLE is receive-only.
+
+| Control | Sensitive while the pair is on AAP and |
+|---|---|
+| Noise Control | always |
+| The Conversation Awareness switch | the setting has been reported: a switch cannot show unknown |
+| The Name row | the pods' name is known: [names.md](names.md#two-names) |
+
+**A snapshot turns the switch under `ControlView::syncing_features`,** so its
+`notify::active` does not send the setting back out. A failed command draws the last
+snapshot again, which puts the switch back.
+
+The Firmware row below Name is no command: [firmware.md](firmware.md#what-the-app-does-with-it).
+
+## Drop-downs
+
+**Read a selection before mutating the widget.** Splicing a `StringList` makes
+`GtkDropDown` emit `selected-notify`, which clobbers the user's choice.
+
+## Settings
+
+**A setting is not device state.** Its switch is bound to an app action and shows that
+action's state:
+
+| Preferences switch | Action | Setting | Document |
+|---|---|---|---|
+| Battery notifications | `app.battery-notifications` | `Settings::battery_notifications` | [notifications.md](notifications.md#the-switch) |
+| Pause when a pod is taken out | `app.pause-on-ear` | `Settings::pause_on_ear` | [media-pause.md](media-pause.md) |
+
+Both are on by default, also for a file from before the setting.
+
+**Kept in `~/.config/linuxpods/settings.json`,** a file rather than GSettings: a GSettings
+schema has to be compiled and installed wherever the app runs, and GIO aborts the process
+when it is missing, as it is for a plain `cargo run`.
+
+- **Loaded at startup** by `settings::open`, before any action is created, so a switch
+  saved off starts off and sends nothing.
+- **Saved by `settings::Saver`** on tokio's blocking pool, never the main loop: the latest
+  settings, whatever order the saves run in.
+- **A file that does not parse is set aside,** and the defaults used. A field this build
+  does not know is kept and written back.
+- **A save that fails** keeps the change in memory.
+
+A planned setting not built yet is shown insensitive, with the subtitle "Not available
+yet": it neither claims a state nor takes a click.
 
 ## Device color
 
-The color byte and its names: [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#byte-7-device-color).
+The color byte and its names:
+[protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#byte-7-device-color).
 
-The Control page shows the color after the model name, as `AirPods Pro 3 • White`.
-A code missing from the table shows as `Unknown color (0x..)`.
+The Control page shows the color after the model name, as `AirPods Pro 3 • White`. A code
+missing from the table shows as `Unknown color (0x..)`.
+
+## The tray
+
+A StatusNotifierItem (`indicator`, through ksni), run by `tray_task` from the snapshots.
+It shows the lower of the two pods ([battery.md](battery.md#where-it-goes)), and its menu
+sets the noise control mode, logging a command that fails.
+
+## Resources
+
+**Artwork and the app icon are compiled into a GResource** by `build.rs`, from
+`assets/resources.gresource.xml`. A missing resource fails silently: `gtk::Image` renders
+nothing, and the About dialog shows a placeholder. So the `bundled_resources_resolve`
+test asserts that every name the UI loads is in the bundle.
+
+**The tray points the shell at `assets/icons`** in the checkout: the shell draws the tray
+icon, and cannot read resources inside the binary.
+
+## Hardware checks
+
+None open: the UI has no hardware of its own. The features' checks are in their
+documents.

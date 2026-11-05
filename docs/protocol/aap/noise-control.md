@@ -74,7 +74,7 @@ because loud sound reduction does not apply while noise control is off; and the 
 is the same switch the user sees on an iPhone, persisting on the pods and syncing back
 to the user's other Apple devices.
 
-When the app sends it: [app/noise-control.md](../../app/noise-control.md#off-has-a-prerequisite-of-its-own).
+When the app sends it: [app/noise-control.md](../../app/noise-control.md#allowing-off).
 
 ## Response Behavior
 
@@ -91,7 +91,7 @@ setting. Nothing answers it reliably on every model:
 
 The levels around a change: [conversation-awareness.md](conversation-awareness.md#levels-08-and-09-around-a-mode-change).
 
-How the app records the mode without waiting for the echo: [app/noise-control.md](../../app/noise-control.md#command-acknowledgment).
+How the app records the mode without waiting for the echo: [app/noise-control.md](../../app/noise-control.md#recorded-not-confirmed).
 
 **Stale reports.** A `0x0D` report can carry the mode a change replaced. Switched from
 Noise Cancellation to Off, a Pro 3 reported `0D 02` 0.33 s later, and `0D 01` only at
@@ -152,7 +152,7 @@ guess.
 With Conversation Awareness on, the pods also switch to Transparency themselves while the
 user speaks, and back after, reported the same way ([conversation-awareness.md](conversation-awareness.md#the-pods-switch-the-mode-themselves)).
 
-How the app takes these reports: [app/noise-control.md](../../app/noise-control.md#unsolicited-mode-changes).
+How the app takes these reports: [app/noise-control.md](../../app/noise-control.md#reports-from-elsewhere).
 
 ## Settings Command Family (0x09)
 

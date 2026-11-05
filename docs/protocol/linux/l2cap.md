@@ -6,7 +6,7 @@ checked on hardware where a run below says so (Pro 3, 2026-10-28, #136; Pro 3 an
 (USB-C), 2026-10-29, PR #137).
 
 The AAP client's connect is in `aap::client`; how the app waits for it:
-[app/aap-links.md](../../app/aap-links.md#step-1-connect-to-airpods).
+[app/aap-links.md](../../app/aap-links.md#connecting).
 
 ## Connecting
 

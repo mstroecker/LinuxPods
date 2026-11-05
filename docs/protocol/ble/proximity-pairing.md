@@ -28,7 +28,7 @@ advertisements, which any receiver nearby can read without a connection.
   private address that only the pair's IRK resolves ([addresses.md](addresses.md)),
   and only the pair's ENC_KEY decrypts it. Both keys come over AAP. What LinuxPods
   counts, and what it drops:
-  [app/identification.md](../../app/identification.md#overview).
+  [app/identification.md](../../app/identification.md#what-counts).
 - **The payload changes seldom.** It changes when something happens, and a few times
   in the minute after; otherwise it stays the same for minutes
   ([Update Frequency](#update-frequency)).
@@ -275,7 +275,7 @@ that the key was the pair's.
 - **Where it is:** every payload seen here is exactly 25 bytes, so bytes 9-24 are also
   the last 16 bytes (7ba6bbc, 2026-09-09). Where it sits in a payload of another length
   is an [open question](#open-questions). Which range LinuxPods takes:
-  [app/identification.md](../../app/identification.md#where-it-is).
+  [app/identification.md](../../app/identification.md#where-the-ciphertext-is).
 
 Both models verified here decrypt this way (2026-09-09/10, 7ba6bbc, 1a7c66d). The tools
 that decrypt captured and live payloads:
@@ -291,7 +291,7 @@ With the pair's ENC_KEY (key type `0x04`):
 4. **Read** the batteries from bytes 1-3: the sending pod, the other pod, the case.
 
 `examples/decrypt_probe.rs` does this for captured payloads. Which keys LinuxPods
-tries: [app/identification.md](../../app/identification.md#solution-identification-by-irk-then-enc_key).
+tries: [app/identification.md](../../app/identification.md#what-counts).
 
 #### Decrypted Format
 
@@ -339,7 +339,7 @@ suffix went to zero with the first advertisement from out of the case, and came 
 about 0.1 s after bit 2 when the pods went back in (Pro 3, 2026-10-25, #71). It was
 first seen on a Pro 3 connected and out of the case, the rest of the plaintext intact
 (2026-09-11, 17f6591); the sample is under [Runs](#runs). What rejecting that form would
-do in LinuxPods: [app/identification.md](../../app/identification.md#decryption-validation).
+do in LinuxPods: [app/identification.md](../../app/identification.md#the-suffix).
 
 **Accepting both forms is safe.** The suffix only tests that the key was right, and
 zeros test that just as well: a wrong key yields pseudorandom bytes either way. The
@@ -359,7 +359,7 @@ it (2026-09-10, 1a7c66d):
 
 A magic-byte check therefore rejects *correct* decryptions, which leaves every pair
 unidentified. Do not add one beside the suffix check either. What that does in
-LinuxPods: [app/identification.md](../../app/identification.md#decryption-validation).
+LinuxPods: [app/identification.md](../../app/identification.md#the-suffix).
 
 ## Accuracy Limitations
 
@@ -425,7 +425,7 @@ also changed once about 2 s after discovery started, then stayed (Pro 3, #153).
 | Control (noise modes) | No | No |
 | Keys required | No | IRK and ENC_KEY, from AAP |
 
-What LinuxPods shows of each: [app/identification.md](../../app/identification.md#comparison-ble-vs-aap).
+What LinuxPods shows of each: [app/identification.md](../../app/identification.md#batteries-in-the-clear-and-encrypted).
 
 ### AAP (Apple Accessory Protocol)
 
