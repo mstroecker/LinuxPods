@@ -11,11 +11,11 @@ it is true because of a choice made here, it goes in `app/`.
 
 | `protocol/` | `app/` |
 |---|---|
-| The pods drop what they are sent until they have answered the handshake. | `Client::handshake` returns only once the answer is in. |
-| A `0x0D` report can carry the mode a change replaced, 0.33 s after it. | A report of the replaced mode is held off for `STALE_REPORT_WINDOW`. |
-| The pods keep 127 bytes of a name and cut a longer one silently. | The dialog refuses a name over 127 bytes, and nothing cuts one. |
-| bluetoothd answers `StartDiscovery` with `InProgress` when the kernel refuses the start as busy. | The scanner stops its discovery and starts again. |
-| Each pod advertises from a resolvable private address of its own, a new one every 4-8 minutes. | An advertisement whose address no stored IRK resolves is dropped. |
+| The pods drop what they are sent until they have answered the handshake; a pair that had just connected answered after 1.2 s (406c721). | `Client::handshake` returns only once the answer is in. |
+| A `0x0D` report can carry the mode a change replaced: a Pro 3 switched to Off reported the old mode 0.33 s later (#113). | A report of the replaced mode is held off until the mode set is reported, or for at most `STALE_REPORT_WINDOW`. |
+| The pods keep 127 bytes of a name and cut a longer one silently (Pro 3, #160). | A name over 127 bytes is refused before it is sent, never cut by bytes. |
+| bluetoothd answers `StartDiscovery` with `InProgress` to a client already discovering, and also when the kernel refuses the start as busy (BlueZ 5.87, `src/adapter.c`). | The scanner stops its discovery and starts again. |
+| Each pod advertises from a resolvable private address of its own, a new one every 4-8 minutes (Pro 3 and Pro 2 (USB-C), #71). | An advertisement counts only if a stored IRK resolves its address and that pair's key decrypts it; a pair with no IRK yet is tried by its key alone. |
 
 A fact and the choice made on it are two sentences in two places. Where a document
 has both today, it is split, and each half links to the other.
@@ -63,6 +63,8 @@ Releases, the fake world and where it departs from the hardware, and the probes 
      #150"
    - another project, named and linked - "LibrePods says" - until a run here confirms
      it, and then the run
+   - a specification or an upstream source, named with its version and file - "Core
+     spec Vol 3 Part H 2.2.2", "BlueZ 5.87, `src/adapter.c`"
    - a guess, called one
 
    "Assumed for the Pro 2, not checked" is a fact of this kind. What one model did is
@@ -79,8 +81,8 @@ Releases, the fake world and where it departs from the hardware, and the probes 
 ### Against going stale
 
 6. **No code that copies the implementation.** Show a packet as a byte layout or a
-   table. For working code, point at `examples/`, which is compiled and tested.
-7. **Name a constant rather than repeat its value.** "Held off for
+   table. For working code, point at `examples/`, which CI compiles.
+7. **In `app/` and `development/`, name a constant rather than repeat its value.** "Held off for
    `STALE_REPORT_WINDOW`" stays true when the constant changes; "held off for 2 s" does
    not. Give the value as well only where the reasoning depends on it.
 8. **A change to behavior changes its document in the same pull request.**
@@ -89,8 +91,9 @@ Releases, the fake world and where it departs from the hardware, and the probes 
 
 ### Privacy
 
-10. **No keys, serial numbers, real MAC addresses, host addresses or personal device
-    names.** Use placeholders, as the BLE samples do. A capture goes in as a short,
+10. **No keys, serial numbers, MAC addresses, host addresses or personal device
+    names** - an address captured from a device is left out even when it is a random
+    one. Use placeholders, as the BLE samples do. A capture goes in as a short,
     redacted excerpt, with the command that produced it, so that it can be run again.
 
 ### Writing
