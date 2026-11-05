@@ -6,6 +6,13 @@ What LinuxPods logs of the packets it reads, and what it never logs: here, the A
 
 The `AAP packet (N bytes):` debug line shows the first 8 bytes of a packet; at `trace`, the whole packet follows (key packets redacted).
 
+## BLE advertisements
+
+The `BLE parsable raw:` trace line prints the payload from its first byte after the
+type and length bytes, so its offsets are those of
+[protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#payload-structure),
+as are the parser's.
+
 ## Device information
 
 The packet's fields, serial numbers among them: [protocol/aap/device-info.md](../protocol/aap/device-info.md#fields).

@@ -38,9 +38,9 @@ advertisement, and a wrong key passes the suffix check one time in 2^23 (see
 That chance was paid per advertisement and per key: with about ten foreign pairs in
 range and two stored keys, one false match about every 12 hours; a spammer sending
 random payloads at 1000 a second, one every couple of hours per key. A false match
-gave one of the user's pairs random levels, cached for 30 minutes. A wrong IRK
-resolves an address by chance one time in 2^24, and an address lasts minutes, so that
-chance is paid once per address, not per advertisement - and the resolving pair's key,
+gave one of the user's pairs random levels, cached for 30 minutes. A wrong IRK's
+chance of resolving an address is paid once per address, not per advertisement
+([the odds](../protocol/ble/addresses.md#false-matches)) - and the resolving pair's key,
 the only one tried, still has to pass the suffix check. A recorded advertisement replayed from another address is dropped,
 too.
 
@@ -59,7 +59,7 @@ key alone, as before: its key is tried on every advertisement no stored IRK reso
 ## Decryption Validation
 
 With a magic-byte check, which leaves every pair unidentified
-([the warning](../protocol/ble/proximity-pairing.md#bytes-9-24-encrypted-battery-data)):
+([the warning](../protocol/ble/proximity-pairing.md#decryption-validation)):
 LinuxPods drops unidentified advertisements, so nothing would show over BLE at all.
 
 The MAC suffix is the only check of the plaintext this implementation performs; the
@@ -94,6 +94,12 @@ precision but identification. The cleartext is still decoded, as it is all an
 unidentified pair advertises - what offering such a pair for pairing would read
 (#131).
 
+The parser reads the sending pod's level from byte 4's high nibble. The one sample
+that tells the nibbles apart puts it in the low nibble
+([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#which-pod-sent-it)),
+so the cleartext levels may come out swapped; nothing shows them today. See
+[Hardware checks](#hardware-checks).
+
 ## Comparison: BLE vs AAP
 
 The rest of the comparison: [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#comparison-ble-vs-aap).
@@ -117,3 +123,9 @@ what a BLE spam flood (a Flipper Zero or ESP32 broadcasting proximity pairing
 messages) feeds on. LinuxPods keeps only what it identifies; the keys arrive on the
 device's first AAP connection. What it keeps, it keeps for a day, and the levels,
 charging and model across a relaunch too, in `readings.json` beside the keys (#170).
+
+## Hardware checks
+
+- **Which nibble of byte 4 carries the sender's level:** wear a Pro 3 with the pods
+  ~30 points apart, log `BLE parsable raw:` beside the decrypted bytes 1-2 and AAP's
+  battery, and note which nibble carries the sender's level.
