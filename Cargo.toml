@@ -85,3 +85,15 @@ unsafe_code = "deny"
 
 [lints.clippy]
 dbg_macro = "warn"
+
+# Line tables only in debug and test builds: a backtrace still names file and
+# line, but the binaries are much smaller and link faster - and the tests are
+# built twice, with and without the harness.
+[profile.dev]
+debug = "line-tables-only"
+
+# One codegen unit and thin LTO make the release binary smaller and faster,
+# for a slower release build.
+[profile.release]
+lto = "thin"
+codegen-units = 1
