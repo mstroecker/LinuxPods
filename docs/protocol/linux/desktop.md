@@ -7,7 +7,8 @@ MPRIS is from its specification, UPower also from its source, and the key path i
 as understood, not traced.
 
 The app acts on these in `volume`, `media` and `notify`:
-[app/volume.md](../../app/volume.md), [app/media-pause.md](../../app/media-pause.md).
+[app/volume.md](../../app/volume.md), [app/media-pause.md](../../app/media-pause.md),
+[app/notifications.md](../../app/notifications.md).
 
 ## The volume
 

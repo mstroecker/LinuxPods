@@ -89,8 +89,8 @@ disagreed (Pro 3 and Pro 2 (USB-C), 2026-10-28, #134; [Runs](#runs)).
   pair's IRK.
 
 Where LinuxPods keeps the IRK and reverses it:
-[app/keystore.md](../../app/keystore.md#the-irks-byte-order). Which advertisements it
-counts: [app/identification.md](../../app/identification.md#solution-identification-by-irk-then-enc_key).
+[app/keystore.md](../../app/keystore.md#the-file). Which advertisements it
+counts: [app/identification.md](../../app/identification.md#what-counts).
 
 ### Multi-Device Workflow
 
@@ -116,7 +116,7 @@ BLE advertisement received (address PP:PP:PP:HH:HH:HH)
 The decryption and the suffix check:
 [proximity-pairing.md](proximity-pairing.md#decryption-validation). How LinuxPods keys
 what it identifies, and drops the rest:
-[app/identification.md](../../app/identification.md#multi-device-workflow).
+[app/identification.md](../../app/identification.md#keyed-by-the-real-mac).
 
 ## Runs
 

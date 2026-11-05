@@ -7,8 +7,7 @@ senders in review (#50, #132); each was then read in zbus 5.19.0's source. None 
 hardware.
 
 The app's D-Bus work is in `bluez`, `attachment` and `ble::scanner`; the rules built on
-these facts are in [AGENTS.md](../../../AGENTS.md#architecture) until an `app/` document
-holds them.
+these facts are in [app/bluez.md](../../app/bluez.md).
 
 ## Queues
 

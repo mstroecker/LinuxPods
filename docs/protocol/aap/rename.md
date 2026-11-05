@@ -48,7 +48,7 @@ Hex:     04 00 04 00 1A 00 01 LL 00 [UTF-8 name, LL bytes]
   umlauts, CJK, emoji outside the BMP and in ZWJ sequences, a combining accent, Arabic
   (Pro 3, #160).
 
-What the app records, and what it refuses: [app/names.md](../../app/names.md#rename-0x1a).
+What the app records, and what it refuses: [app/names.md](../../app/names.md#rename).
 
 ## What a rename does
 
@@ -99,7 +99,7 @@ startup dump:   +0.00s device information, name "Test Pods" (242 bytes)
 
 Then the pods connected to the iPhone twice. The iPhone still showed the old name, and AAP here still reported "Test Pods" afterwards.
 
-What the rename dialog says of both: [app/names.md](../../app/names.md#hardware-run).
+What the rename dialog says of both: [app/names.md](../../app/names.md#what-the-dialog-says).
 
 ### Name run (Pro 3, 2026-11-02)
 
@@ -130,7 +130,7 @@ Nothing answered any of the renames. Renamed back at the end.
 A 127-byte ASCII name, then, through a reconnect: a second session's `0x1D` had it whole,
 and after the reconnect BlueZ's `Name` and `Alias` both held all 127 bytes.
 
-What the app allows: [app/names.md](../../app/names.md#name-run).
+What the app allows: [app/names.md](../../app/names.md#long-names).
 
 ## Open questions
 

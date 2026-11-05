@@ -1,46 +1,84 @@
 # Keystore
 
-How LinuxPods asks each pair for its keys, and where it keeps them.
+How LinuxPods asks each pair for its keys, which keys it takes, and where it keeps them.
+The request and the key packet are the pods': [protocol/aap/keys.md](../protocol/aap/keys.md).
+What the keys are used for: [identification.md](identification.md).
 
-## Key Persistence
+## Requested on every connection
 
-What the pods do with their keys: [protocol/aap/keys.md](../protocol/aap/keys.md#key-persistence).
+The keys are requested on every AAP connection, not only when none is stored.
 
-- Request them on every connection anyway: should they change, a stale IRK resolves
-  none of the pair's new addresses and a stale key fails suffix validation, both
-  without a word. Unchanged keys cost nothing: they are not written again
-- Store securely (keyring, encrypted config file). LinuxPods keeps them in
-  `~/.local/share/linuxpods/keys.json`, mode 0600: the ENC_KEY and, since format
-  version 2, the IRK, as AAP sends it
+- **What would change them is not known** ([protocol/aap/keys.md](../protocol/aap/keys.md#key-persistence)):
+  a Pro 2 (USB-C) forgotten and paired again with the same computer kept both.
+- **A stale key fails without a word.** A stale IRK resolves none of the pair's new
+  addresses, and a stale ENC_KEY fails the suffix check. Either way the pair drops off BLE
+  altogether, as an advertisement nothing identifies is dropped.
+- **Unchanged keys cost nothing:** they are not written again (below).
 
-## The IRK's byte order
+**The request is one packet,** which `Coordinator::open_aap` sends right after
+`aap::Client::open` ([aap-links.md](aap-links.md#opening-a-link)). `open` leaves it out,
+so a probe never receives keys it did not ask for, and prints them.
 
-Why the IRK is reversed before use, and the specification's sample: [protocol/ble/addresses.md](../protocol/ble/addresses.md#resolving-the-advertising-address).
+**No wait is bounded.** The link's read loop takes a key packet whenever it comes, for as
+long as the link lasts; one that never comes is asked for again at the next connection.
+The probes wait a window of their own: [development/probes.md](../development/probes.md#reference-implementation).
 
-`ble::rpa::resolves` resolves an address with the IRK as AAP sends it. The keystore
-keeps the IRK as AAP sends it, and `ble::rpa::resolves` reverses it. Its test pins the
-order with the specification's sample data (Appendix D.7) - reversed, as AAP would send
-it, is what `resolves` takes.
+## Which keys are taken
 
-A model that sent its IRK the other way round would have none of its addresses
-resolved, and so go unidentified. `examples/irk_probe.rs` reports an address that
-resolves only with the IRK unreversed.
+The read loop (`aap_read_loop`) hands each key packet to `aap::find_encryption_key` and
+`aap::find_irk`, which each take a key of 16 bytes only. The length check keeps a
+malformed key from replacing a working one.
 
-## Reference Implementation
+| The packet | What is kept |
+|---|---|
+| A 16-byte ENC_KEY and a 16-byte IRK | Both |
+| The stored ENC_KEY, no usable IRK | The stored IRK, with it |
+| A new ENC_KEY, no usable IRK | The new ENC_KEY alone: the pair falls back to its key alone ([identification.md](identification.md#pairs-with-no-irk)) rather than vanishing |
+| No usable ENC_KEY | Nothing: the packet is rejected |
 
-The app itself asks for the keys on every AAP connection: `Coordinator::open_aap`
-sends the request once the session is up, and the link's read loop hands each key
-packet to `aap::find_encryption_key` and `aap::find_irk`, which each take a 16-byte
-key. A packet without a 16-byte ENC_KEY is rejected; one without a 16-byte IRK keeps
-the IRK stored, as long as the ENC_KEY is the one stored with it. The keys go into
-use at once, and are written to the keystore whenever the keys in memory differ from
-those last saved successfully - so a save that failed is tried again when the keys
-next arrive. If a pair's keys have changed, the new ones therefore arrive with the
-next connection, and a request that went unanswered is sent again by reconnecting. Run
-the app with the AirPods connected; keys it had not saved yet are logged as they are
-written:
+The keys go into use at once, whether or not they reach the disk.
+
+## Written only when changed
+
+The keystore is written only when the keys in memory differ from those last saved
+successfully (#38). So an unchanged key costs no write, and a save that failed is tried
+again when the keys next arrive. Keys not saved before are logged as they are written:
+
 ```
 Stored the keys of <MAC>
 ```
 
-The probes that request the keys outside the app: [development/probes.md](../development/probes.md#reference-implementation).
+**Never left half done.** The save moves its owned lock into `spawn_blocking`, where no
+abort reaches it. The read loop calling it is dropped wherever it is when its pair
+detaches ([aap-links.md](aap-links.md#the-supervisor)). Aborted mid-save, the lock went
+while the write ran on, and a second save raced it on the same temporary file, the older
+keys landing last.
+
+**The keystore lock is taken before `inner`, never under it,** as the readings lock is
+([readings.md](readings.md#saving)).
+
+## The file
+
+`~/.local/share/linuxpods/keys.json` (the XDG data directory), mode 0600, written to a
+temporary file and renamed over the old one. A file that does not load is set aside, not
+overwritten.
+
+**Format version 2** keeps the IRKs in an `irks` map beside `keys`, which holds the
+ENC_KEYs:
+
+- a version 1 file loads unchanged, with no IRK for any pair; each gets one at its next AAP
+  connection, and the save that follows writes version 2;
+- a version 1 reader still finds the ENC_KEYs of a version 2 file, rather than failing on it
+  and setting the whole file aside.
+
+**The IRK is kept as AAP sends it,** least significant byte first. `ble::rpa::resolves`
+reverses it to resolve, and its test pins the order with the specification's sample
+(Core spec Vol 3 Part H, Appendix D.7):
+[protocol/ble/addresses.md](../protocol/ble/addresses.md#resolving-the-advertising-address).
+A model that sent its IRK the other way round would have none of its addresses resolved,
+and go unidentified. `examples/irk_probe.rs` reports an address that resolves only with the
+IRK unreversed.
+
+## Hardware checks
+
+None open. Keys taken and kept on a Pro 3 and a Pro 2 (USB-C) (#71, #134).

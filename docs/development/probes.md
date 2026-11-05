@@ -4,7 +4,7 @@ The examples in `examples/` that request keys and decrypt advertisements, what e
 
 ## Reference Implementation
 
-How the app itself requests and stores the keys: [app/keystore.md](../app/keystore.md#reference-implementation).
+How the app itself requests and stores the keys: [app/keystore.md](../app/keystore.md#which-keys-are-taken).
 
 To debug a request that fails - on a new model, say - the `key_request` example
 opens the same session, sends the request, and lists every packet that arrives,
