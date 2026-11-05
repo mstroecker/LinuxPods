@@ -1,6 +1,7 @@
-# CLAUDE.md
+# AGENTS.md
 
-Guidance for Claude Code (claude.ai/code) when working in this repository.
+Guidance for coding agents working in this repository. Claude Code (claude.ai/code) reads
+it as `CLAUDE.md`, a link to this file: edit `AGENTS.md`.
 
 ## Project
 
@@ -479,7 +480,27 @@ deadlocked every command sent meanwhile.
   `ble::decrypt::random_key()`, not literals (CodeQL's hard-coded key rule, #66); the
   fixed keys in podstate's and keystore's tests predate that, and the Core spec's public
   RPA sample (Vol 3 Part H Appendix D.7) is marked `gitleaks:allow`. Encrypt in the test
-  and assert the round trip.
+  and assert the round trip, beside a check of the bytes against a value from outside the
+  code: a round trip misses a mistake made the same way both ways, as the IRK's byte
+  order would be.
+- Test what a caller sees - the value returned, the packet sent, the snapshot broadcast,
+  what the fake BlueZ or player holds - never words in docs, comments or source. A check
+  of a contract something else reads stays: the GResource names the UI loads, a file's
+  format.
+- Expected values come from outside the code under test: a capture, the spec's sample, a
+  value worked out by hand. An answer computed with the function it checks proves nothing.
+- Assert the outcome, not only that a fake was called: a fake keeps the behavior apart,
+  it is not the behavior.
+- No tests of constants, derives or getters, or of behavior another test covers already.
+  An assert that keeps a test's own premise true is not one.
+- A refactor that changes no behavior breaks no test: pin private structure, call counts
+  or ordering only where they are the behavior - commands in the order of the calls
+  (#54), no write for an unchanged key (#38), no AAP attempt to a pair BlueZ calls
+  disconnected.
+- Make a slow test faster without dropping its cases. What must come is waited for on a
+  condition - a `settled`, a first event seen - never on a sleep. What must not come is
+  waited for with a `settled` where the task has one, else with a named sleep that says
+  why it is long enough, as the pipeline's `QUIET` does.
 - `Option<u8>` for unknown battery, never a sentinel. Levels above 100 mean unavailable,
   and so does an AAP part with status Disconnected (`0x04`), whatever its level byte: it
   comes as `0x00` as well as `0xFF`, and the `0x00` read as a real 0% put the case at 0%
