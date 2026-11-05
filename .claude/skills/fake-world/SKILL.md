@@ -275,45 +275,19 @@ the fake world's own config directory, never the user's -
 - **Popovers are separate surfaces.** A screenshot of `main-window` leaves an open menu
   out; take one of the popover by its path. Screenshots go to
   `$XDG_RUNTIME_DIR/linuxpods-harness/`.
-- **BLE timing.** Each pod advertises once a second from a resolvable private address of
-  its own, made from the pair's IRK, that rotates every 10 s, the left pod's half a
-  rotation off the right's; the fake BlueZ drops an address 30 s after it goes quiet.
-  Both pods advertise while one is in the case, only the primary while both are out.
-  A pod repeats its payload until something changes - an idle pair's for minutes, as on
-  hardware (#153) - and the fake BlueZ signals a repeat as `RSSI` alone, as bluetoothd
-  does. So the app reads an address's
-  first advertisement, in `InterfacesAdded`, and each change, in `PropertiesChanged`
-  with `ManufacturerData`, and no repeat: a first reading within about a second of
-  start, then one per change. A pod in the closed case stops advertising 4 s after the
-  lid closes, and the pods come back under new addresses once it opens, the right one
-  after 1 s and the left after 5.5 s. The MAC suffix in the payload is there only
-  while both pods are in the case. All of that is as in the #71 captures. Real AirPods
-  differ in the rate, about 5 advertisements a second from each pod with bursts of
-  30-35 after the lid opens or the pods go back in the case, and in the rotation,
-  every 4 to 8 minutes. The fake's rotation stays this fast on purpose, to exercise
-  it.
-- **Discovery's end takes the pods' devices.** When the last client stops discovering,
-  or leaves the bus - the app quitting, with nothing else discovering - the fake BlueZ
-  removes every device it only heard advertising, `RSSI` invalidated first, as
-  bluetoothd does with the pods' (#153). So an app started next hears each pod at once,
-  in an `InterfacesAdded` at its next advertisement. Started while another client
-  still discovers, it gets no `InterfacesAdded` for a pod the fake BlueZ kept, and
-  nothing of it until its payload or address changes: up to 5 s while both pods
-  advertise, 10 s while one does. On hardware that gap was 2.1-4.1 s, with GNOME
-  Settings' Bluetooth panel open.
-- **AAP timing.** The fake pods answer as AirPods Pro 3 do in the #71 captures, for
-  every model: the battery and where the pods are come first, and the noise mode
-  only with the startup dump, 200 ms later (1.4-1.5 s on the hardware; set
-  `dump_delay_ms` for the real wait). Noise Control is sensitive as soon as the
-  reading is on AAP, with no mode selected until the dump. A
-  mode change is confirmed by an echo 1 s later; an Off is followed by a stale report
-  of the mode it replaced at 0.33 s, which the app should ignore. With Conversation
-  Awareness off there is no 0x4B; with it on, level 08 comes at once and 09 after the
-  echo, as on a Pro 3 (#150), and 09 after the startup dump. For AirPods 4's answers:
-  `SetConversationAwareness` true, `idle_level_only` true, `echo_every` 4,
-  `stale_report_ms` 0.
-  The handshake is answered at once unless `handshake_delay_ms` says otherwise (about
-  1 s on the hardware).
+- **What the fakes do, and where they depart from the hardware,** timings included:
+  [`docs/development/fake-world.md`](../../../docs/development/fake-world.md). What to act
+  on:
+  - **A BLE change shows at the pod's next advertisement,** one a second. A pod's
+    address rotates every 10 s, far faster than on hardware, on purpose.
+  - **An app started while another client discovers** hears a pod only once its payload
+    or address changes, up to about 10 s; started with nothing else discovering, it
+    hears each pod at its next advertisement.
+  - **The noise mode comes only with the startup dump,** a moment after the battery:
+    Noise Control is sensitive before any mode is selected. Set `dump_delay_ms` (and
+    `handshake_delay_ms`) for the hardware's waits.
+  - **For AirPods 4's answers to a mode change:** `SetConversationAwareness` true, then
+    `SetQuirk` `idle_level_only` true, `echo_every` 4 and `stale_report_ms` 0.
 - **Logs** are in `$XDG_RUNTIME_DIR/linuxpods-harness/world/log/`: `linuxpods.log` at
   `RUST_LOG=linuxpods=debug`, `fakepods.log` and `broadwayd.log`. Set `RUST_LOG` before
   `make` to change the level. They stay until the next start.

@@ -116,8 +116,9 @@ pausing sets no volume.
 - **Events go first in its `select!`, the switch next,** so `MediaControl::settled` answers
   for every event told before it. Tests wait on it.
 
-How the fake world plays this through:
-[development/fake-world.md](../development/fake-world.md#ear-detection).
+How the fake world plays this through: the fake pods'
+[ear detection](../development/fake-world.md#ear-detection) and
+[the fake media player](../development/fake-world.md#the-fake-media-player).
 
 ## Hardware checks
 

@@ -419,4 +419,4 @@ A `Co-Authored-By:` trailer is fine.
 [`docs/development/`](docs/development/) - working on LinuxPods:
 - [`releasing.md`](docs/development/releasing.md) - release steps, what a release contains, verifying one
 - [`fake-world.md`](docs/development/fake-world.md) - what the fakes do, and where they depart from the hardware
-- [`probes.md`](docs/development/probes.md) - the key and decryption probes
+- [`probes.md`](docs/development/probes.md) - every probe in `examples/`: what it does, prints and never prints
