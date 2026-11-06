@@ -40,11 +40,10 @@ past it at once; and charging arms it anyway.
 it has gone, and across a relaunch ([state.md](state.md#the-ble-cache)), and that says
 nothing about the battery now.
 
-`FRESH` is a minute. Each pod advertises about 5 times a second
+`FRESH` is a minute. A pair in range is heard many times a minute
 ([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#update-frequency)),
-so a pair in range is heard many times a minute, even across a discovery restart, and a
-minute without a word means it has gone. The window draws the same line: under a minute
-is "Last seen just now". A reading is judged by its age when a snapshot comes in, so a
+even across a discovery restart, so a minute without a word means it has gone. The window
+draws the same line: under `ui::RECENT` is "Last seen just now". A reading is judged by its age when a snapshot comes in, so a
 cached one that comes along with another pair's update, or with the expiry clock's, warns
 about nothing.
 

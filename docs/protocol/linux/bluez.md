@@ -40,6 +40,22 @@ are not connectable. So:
 - **While another client discovers** - GNOME Settings' Bluetooth panel, say - the
   devices stay. A pod is then heard only once its payload or address changes (#153).
 
+**An address heard for the first time comes in `InterfacesAdded`,** as bluetoothd makes
+a device for it; **each advertisement after that sets `RSSI`** (`btd_adapter_device_found`
+in BlueZ 5.87's `src/adapter.c`). Whether that is signaled in `PropertiesChanged` depends
+on the discovery:
+
+| Discovery | `RSSI` signaled |
+|---|---|
+| A discovery filter in force | At every advertisement (`device_set_rssi_with_delta(dev, rssi, 0)`) |
+| No filter | Only for a change of 8 dBm or more (`RSSI_THRESHOLD`, `src/device.c`) |
+
+A filter is in force while a client discovering on the adapter has set one
+(`SetDiscoveryFilter`) that asks for more than the adapter's own scan type
+(`merge_discovery_filters` and `start_discovery_complete`, `src/adapter.c`). Read, not
+run on its own; an LE scan with the pods idle saw `RSSI` alone about 4.5 times a second
+per pod ([Runs](#runs)).
+
 Why few advertisements reach the app while a pair is connected:
 [app/in-ear.md](../../app/in-ear.md#why-aap-and-not-the-advertisement).
 

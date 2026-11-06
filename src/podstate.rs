@@ -2167,7 +2167,9 @@ impl Coordinator {
         // which firmware brought that is not known. Allowing Off first lets it
         // through. That the pods keep it allowed beyond this session is a guess,
         // so it is sent only when Off is what was asked for, never at every
-        // connection (`docs/app/noise-control.md#allowing-off`).
+        // connection
+        // (`docs/protocol/aap/noise-control.md#off-has-a-prerequisite-of-its-own`,
+        // `docs/app/noise-control.md#allowing-off`).
         if mode == aap::NoiseMode::Off {
             client
                 .set_allow_off_listening_mode(true)
@@ -2986,8 +2988,8 @@ mod tests {
     }
 
     /// The mode is only reported over AAP, so it may only be shown for the
-    /// device that link is up to. Attached in `snapshot` rather than carried on
-    /// every battery packet, which is what dropped it in the Go version.
+    /// device that link is up to. Attached in `snapshot` rather than carried
+    /// with the battery reading, which every battery packet replaces.
     #[test]
     fn snapshot_attaches_the_mode_to_the_connected_device_only() {
         let mut inner = inner_with(vec![(BB, Duration::from_secs(1))]);
