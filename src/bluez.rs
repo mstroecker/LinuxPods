@@ -1022,7 +1022,8 @@ impl Devices {
     ///
     /// The stream may be read at the caller's pace, with calls to BlueZ on the
     /// same connection in between: a task of its own drains the signals as they
-    /// arrive, as the rule takes in every advertisement while the app scans
+    /// arrive, as the rule takes in every advertisement after an address's
+    /// first while the app scans
     /// (#90, `docs/app/bluez.md#subscriptions-that-advertisements-reach`). The
     /// task ends with the connection, or when the stream is dropped.
     pub async fn watch_connections(&self) -> Result<impl Stream<Item = ConnectionEvent> + use<>> {

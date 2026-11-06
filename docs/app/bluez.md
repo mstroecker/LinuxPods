@@ -85,8 +85,9 @@ took no battery at all.
 So attachment's connection is a `bluez::ProviderConnection`, which only
 `bluez::connection` builds, and the fake world's come from `harness::connect_serving`.
 The ObjectManager `bluez::connection` serves, over every provider root, is there only to
-have something served. It never emits, as each root serves an ObjectManager of its own
-nearer the batteries ([protocol/linux/zbus.md](../protocol/linux/zbus.md#which-objectmanager-signals)).
+have something served. It never emits: it is served before any provider root, and each
+root serves an ObjectManager of its own nearer the batteries
+([protocol/linux/zbus.md](../protocol/linux/zbus.md#which-objectmanager-signals)).
 
 ## Subscriptions that advertisements reach
 
@@ -95,10 +96,9 @@ stopped zbus reading the connection, and a reply attachment awaited never came (
 [protocol/linux/zbus.md](../protocol/linux/zbus.md#queues)).
 
 `bluez::Devices::watch_connections` is one: its rule, every `PropertiesChanged` under
-`/org/bluez`, takes in every advertisement after an address's first while the app scans.
-The first comes in `InterfacesAdded`, which the rule does not match; every later one
-brings at least an `RSSI` change (#71;
-[protocol/linux/bluez.md](../protocol/linux/bluez.md#runs)).
+`/org/bluez`, takes in every advertisement after an address's first while the app scans,
+as the scan sets an LE discovery filter (`ble::scanner::start_discovery_on`;
+[protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery), #71).
 
 **Coalesced, never queued per signal, never dropped.** What an advertiser or a flapping
 adapter can trigger at will is coalesced per device or adapter. Queued one per signal, an

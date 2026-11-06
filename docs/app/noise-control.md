@@ -38,9 +38,9 @@ last session's mode after a reconnect, though it may have been changed from a ph
 meanwhile (1fa1632). The next link's startup dump reports it
 ([protocol/aap/noise-control.md](../protocol/aap/noise-control.md#initial-state-report)).
 
-**A report is read only by its header, byte 4 and byte 6.** The `0x09` family carries a
-dozen other sub-commands, all of them in the startup dump
-([protocol/aap/settings.md](../protocol/aap/settings.md)).
+**A report is read only by its header, byte 4 and byte 6.** The `0x09` family carries
+many other sub-commands
+([protocol/aap/settings.md](../protocol/aap/settings.md#sub-commands)).
 
 **Levels `08` and `09` confirm nothing.** With Conversation Awareness on they frame every
 mode change, and name no mode

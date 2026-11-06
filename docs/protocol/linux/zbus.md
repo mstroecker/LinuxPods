@@ -31,6 +31,10 @@ connection never got its reply, three runs out of three.
 - **A call before that is dropped.** A method call that arrives before that task has
   subscribed gets no reply and no error, and nothing is logged above trace (#125,
   52e5c5c).
+- **Signals are not.** The task subscribes to method calls alone, and the connection's
+  reader hands each message to every subscription whose rule matches it, so a signal
+  reaches its own subscriptions whenever the task starts (`start_object_server` in zbus
+  5.19.0's `src/connection/mod.rs`, `receive_msg` in `src/connection/socket_reader.rs`).
 - **Built serving, it misses nothing.** A connection built with an object served already
   (`connection::Builder::serve_at`) has the task subscribed before it reads its first
   message (52e5c5c, #125).
@@ -47,7 +51,13 @@ serving. What bluetoothd does while it waits: [bluez.md](bluez.md#battery-provid
   path that serves `org.freedesktop.DBus.ObjectManager`, and from no other
   (`Node::get_child_mut` in zbus 5.19.0's `src/object_server/node.rs`, used by
   `ObjectServer::add_arc_interface` and `remove_named` in `src/object_server/mod.rs`).
-- **One further up stays silent** for every object that has a nearer one.
+- **One further up stays silent** for every object that has a nearer one, with one
+  exception:
+- **An ObjectManager added at a path signals every object below it.** It sends one
+  `InterfacesAdded` for each, at once, from its own path, past any nearer ObjectManager
+  (`ObjectServer::add_arc_interface` in `src/object_server/mod.rs`, which walks them with
+  `Node::get_managed_objects` in `src/object_server/node.rs`). With no object below, it
+  sends nothing.
 
 Read in the source, not tested on its own.
 
