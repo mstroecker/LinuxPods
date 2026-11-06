@@ -209,6 +209,14 @@ message text, this file, and anything under `.claude/skills/`.
    flag one that does not.
 3. A comment in a touched file that explains *why* the code does something counts, if the
    reason no longer holds.
+4. A comment the diff adds or changes is checked against the rules in
+   `docs/README.md#code-comments`, and so is a test doc whose asserts the diff changes.
+
+**A change to `docs/protocol/` that weakens a claim** - now a guess, an open question,
+another project's word, true of one model only, or gone. Comments copy protocol claims,
+and the copies are not updated with the document. `git grep -n` the claim across `src/`,
+`examples/` and `docs/app/`, by its words and by its byte values and opcodes, and flag
+every comment, log line or probe output that still states it as fact.
 
 **A change to `docs/`.** Check it against the rules in `docs/README.md`, and flag:
 - a fact on the wrong side of the sorting test: about the AirPods or the Linux stack in
