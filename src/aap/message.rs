@@ -330,9 +330,11 @@ mod tests {
     }
 
     /// The header is checked for every kind, whatever bytes 4 and 6 carry: a
-    /// mode report and a battery packet, each with another first byte, and
-    /// packets too short for the header decode as unknown, with no opcode, and
-    /// [`noise::is_noise_mode_packet`] refuses the mode report's lookalike too.
+    /// mode report and a battery packet, each with another first byte, decode
+    /// as unknown with no opcode, and [`noise::is_noise_mode_packet`] refuses
+    /// the mode report's lookalike too. So do packets with no opcode to read:
+    /// none, one byte, the [`HEADER`] alone, and five bytes under another
+    /// header.
     #[test]
     fn a_packet_without_the_header_is_unknown() {
         let mut lookalike = noise::set_packet(NoiseMode::Off);
