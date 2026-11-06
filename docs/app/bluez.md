@@ -43,6 +43,17 @@ the app restarted.
 The scanner's discovery filter sets only `Transport`, which leaves BlueZ to drop
 duplicates: [in-ear.md](in-ear.md#why-aap-and-not-the-advertisement).
 
+**Discovery that never ends keeps some devices from connecting** (#189). While it runs,
+the kernel's background scan is off, and a device that reconnects by directed
+advertising - a bonded mouse, say - stays unconnected until discovery stops
+([protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising)).
+The scanner holds discovery for as long as the app runs, so the app keeps such a device
+unconnected for as long as it runs. An advertisement monitor delivers the pods' payload
+and leaves such a device free to connect
+([protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising));
+whether it can take discovery's place waits on its
+[open questions](../protocol/linux/bluez.md#open-questions).
+
 ## Battery providers
 
 How GNOME Settings shows a pair's battery: [battery.md](battery.md#gnome-settings).

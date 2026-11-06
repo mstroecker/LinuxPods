@@ -1,9 +1,10 @@
 # BlueZ
 
-What bluetoothd does that a client has to know: discovery, adapters and restarts,
-starting bluetoothd, battery providers, the A2DP transport's volume, and a device's name
-and alias. Read from BlueZ 5.87's source and documentation, and checked on hardware
-where a run below says so; what was only read, not run, says so.
+What bluetoothd does that a client has to know: discovery and what it blocks,
+advertisement monitors, adapters and restarts, starting bluetoothd, battery providers,
+the A2DP transport's volume, and a device's name and alias. Read from BlueZ 5.87's
+source and documentation, and from the kernel's where a section says so; checked on
+hardware where a run below says so, and what was only read, not run, says so.
 
 The app talks to bluetoothd in `bluez`, `ble::scanner`, `attachment` and `volume`; what
 it does with these facts: [app/bluez.md](../../app/bluez.md),
@@ -58,6 +59,60 @@ per pod ([Runs](#runs)).
 
 Why few advertisements reach the app while a pair is connected:
 [app/in-ear.md](../../app/in-ear.md#why-aap-and-not-the-advertisement).
+
+## Discovery and directed advertising
+
+**While any client discovers, a device that reconnects by directed advertising does not
+connect.** A bonded mouse stayed unconnected for 45 s of discovery, and connected 37 ms
+after discovery stopped (MX Anywhere 3S, Intel AX211, 2026-11-06, #189, [Runs](#runs)).
+Two things in the kernel combine (Linux master `net/bluetooth/hci_sync.c`, read
+2026-11-06):
+
+| While discovery runs | Where |
+|---|---|
+| The scan is active, under a private address: a resolvable one with privacy on, a non-resolvable one otherwise, so that scan requests do not reveal the identity. | `hci_active_scan_sync` |
+| The background scan, which connects bonded LE devices, does not run: "If discovery is active don't interfere with it". | `hci_update_passive_scan_sync` |
+
+The mouse reconnects with `ADV_DIRECT_IND` addressed to the adapter's public address.
+Under discovery's private address, none of these reached the host, and the kernel tried
+no connection. Once discovery stopped, the first report of the background scan was that
+`ADV_DIRECT_IND`, and the connect followed at once (#189).
+
+**An advertisement monitor is bluetoothd's passive way to hear advertisements**
+(`org.bluez.AdvertisementMonitorManager1`, BlueZ 5.87,
+`doc/org.bluez.AdvertisementMonitorManager.rst`, marked experimental). A client
+registers an `or_patterns` monitor per adapter. bluetoothd reports matches to it "no
+matter if there is an ongoing discovery session". The kernel folds the monitors into its
+background scan, which is passive and runs under no private address: "no SCAN_REQ are
+send during passive scanning" (`hci_passive_scan_sync`). The Intel AX211 offers
+`SupportedFeatures = ["controller-patterns"]`: bluetoothd hands it the patterns to match
+in the controller (2026-11-06, #189).
+
+**Through a monitor, with nobody discovering, the pods' payload arrives and the mouse
+reconnects** (Pro 3, Intel AX211, 2026-11-06, #189, [Runs](#runs)):
+
+- Each pod's proximity pairing payload came whole, 27 bytes of Apple data, first in the
+  `InterfacesAdded` that announced its device, then as `ManufacturerData` changes.
+- `DeviceFound` came with each pod's first advertisement. `DeviceLost` came about 10 s
+  after the lid closed, and bluetoothd removed a lost pod's device 25 s later.
+- A pair idle in the open case when the monitor was registered was heard 145 ms and
+  177 ms after `Activate`. A discovery start in the same conditions heard it after 89 ms
+  and 111 ms.
+- A pair whose lid opened while the monitor was registered was heard about as soon as
+  under discovery, within the seconds a typed marker resolves.
+- While the lid was open, the same number of payloads was signaled as under discovery.
+  `RSSI` alone was signaled far less often: idle in the open case, 2 or 3 times in 62 s
+  against 2.6 times a second under discovery. No `DeviceLost` came meanwhile. This fits
+  the 8 dBm rule for `RSSI` with no discovery filter in force ([Discovery](#discovery));
+  that it is the cause is not checked.
+- The bonded mouse, switched off and on, reconnected while the monitor was registered.
+  With discovery on as well, it was still unconnected 4 s after it was switched on.
+- While discovery ran beside it, the monitor went on reporting: `DeviceFound`,
+  `DeviceLost` and every payload (runs B and C2). That discovery was the monitoring
+  client's own. BlueZ's documentation says a monitor is told "no matter if there is an
+  ongoing discovery session", whoever started it.
+
+What is still open: [Open questions](#open-questions).
 
 ## Adapters and restarts
 
@@ -159,6 +214,36 @@ The pods' own name, which BlueZ reads as `Device1.Name`:
 
 ## Runs
 
+**Discovery and a mouse's directed advertising: Intel AX211, kernel 7.2.11, BlueZ 5.87,
+a bonded MX Anywhere 3S, 2026-11-06, `sudo btmon -w` (#189).** Discovery by LinuxPods
+(`Transport` `le`). The mouse was switched off and on, then LinuxPods quit:
+
+| Time | What the controller did |
+|---|---|
+| Throughout discovery | `LE Set Random Address`, then `LE Set Extended Scan Parameters`: active, own address random, filter policy "Accept all". Discovery started again about every 10.7 s. |
+| Mouse on, 45 s | No advertising report from the mouse, and no `LE Create Connection`. |
+| Discovery stopped, +2 ms | Address resolution on; scan parameters passive, own address public, filter policy "Ignore not in accept list". |
+| +8 ms | First report: the mouse's `ADV_DIRECT_IND`, directed to the adapter's public address. |
+| +10 ms | `LE Extended Create Connection`; `LE Enhanced Connection Complete` after 27 ms. |
+
+**An advertisement monitor instead of discovery: Intel AX211, BlueZ 5.87, a Pro 3 and the
+same mouse, 2026-11-06, `examples/adv_monitor_probe.rs` (#189).** LinuxPods quit. One
+`or_patterns` monitor on `4C 00 07`, `RSSISamplingPeriod` 0, no RSSI thresholds;
+`--discover` added discovery as the app starts it. Registration was accepted every
+time, with `Activate` within 1 ms. Markers were typed after each action, so they trail it
+by a few seconds.
+
+| Run | Steps | Seen |
+|---|---|---|
+| 1: monitor, 161 s, unmarked | Pods and mouse handled | 19 and 23 payloads. A pod lost, its device removed 25 s later. Mouse `Connected` false, then true 13.4 s later. |
+| A: monitor, 48 s | Lid closed, opened, closed; mouse off and on | Pods heard 2.8 s before the `lid open` marker and 3.2 s apart; 15 and 10 payloads. Lost 9.6 s and 10.0 s after the `lid closed` marker. Mouse connected before the `mouse on` marker. |
+| B: `--discover`, 41 s | The same | Pods heard 2.0 s before the marker and 3.5 s apart; 15 and 13 payloads. Lost 7.8 s and 9.5 s after the marker. Mouse unconnected 4.3 s after the marker, at the end. |
+| C: monitor, 65 s | Lid open and pods idle for 60 s or more before the start | Pods heard 145 ms and 177 ms after `Activate`. 3 and 2 payloads, all in the first 2.8 s; 2 and 3 `RSSI` signals; no `DeviceLost`. |
+| C2: `--discover`, 66 s | The same | Pods heard 89 ms and 111 ms after discovery started. 1 payload each; `RSSI` 2.6 a second throughout; no `DeviceLost`. |
+
+In every run, one other address matching `4C 00 07` without a proximity pairing payload
+was found and lost every few seconds.
+
 **Discovery start: Pro 3 in the open case, not connected, 2026-11-02, ce9ed40 (#153).**
 
 - With nothing else discovering, the app restarted several times. Each time the battery
@@ -204,3 +289,6 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
   (#125).
 - Does GNOME's rename send the name as typed, so that typing the old name back sets an
   alias? A guess, not tried.
+- An advertisement monitor on the pods' proximity pairing data (#189): only the Intel
+  AX211, with the patterns in the controller, has run. Does an adapter without
+  `controller-patterns` behave the same? `examples/adv_monitor_probe.rs` shows it.
