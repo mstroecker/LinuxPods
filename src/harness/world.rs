@@ -243,8 +243,8 @@ impl World {
     }
 
     /// The models' time: what [`Pods`] takes as `now`, counted from the
-    /// world's start. The world reads it with the pairs locked, so that no
-    /// model sees time run backwards.
+    /// world's start. The world reads it for a pair's model with the pairs
+    /// locked, so that no model sees time run backwards.
     pub fn now(&self) -> Duration {
         self.0.epoch.elapsed()
     }
@@ -433,8 +433,7 @@ impl World {
     /// [`Pods::speak`]. With Conversation Awareness off the pods do nothing.
     /// Fails with no AAP connection open, and while a stretch is under way.
     pub async fn speak(&self, mac: Address, length: Duration) -> Result<()> {
-        let now = self.now();
-        self.with_pods(mac, |pods| pods.speak(now, length))
+        self.with_pods_at(mac, |pods, now| pods.speak(now, length))
             .await?
             .map_err(|e| anyhow::anyhow!("{mac}: {e}"))?;
         tracing::info!("fake world: {mac} hears speech for {length:?}");
@@ -514,10 +513,21 @@ impl World {
         mac: Address,
         change: impl FnOnce(&mut Pods) -> R,
     ) -> Result<R> {
+        self.with_pods_at(mac, |pods, _| change(pods)).await
+    }
+
+    /// [`World::with_pods`], with `change` handed the time it is made at,
+    /// read with the pairs locked.
+    async fn with_pods_at<R>(
+        &self,
+        mac: Address,
+        change: impl FnOnce(&mut Pods, Duration) -> R,
+    ) -> Result<R> {
         let mut pairs = self.0.pairs.lock().await;
         let pair = pairs.get_mut(&mac).ok_or_else(|| no_pair(mac))?;
-        let result = change(&mut pair.pods);
-        self.flush(mac, pair, self.now()).await;
+        let now = self.now();
+        let result = change(&mut pair.pods, now);
+        self.flush(mac, pair, now).await;
         self.0.due.notify_one();
         Ok(result)
     }
