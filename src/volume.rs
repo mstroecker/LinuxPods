@@ -865,7 +865,8 @@ impl Volume {
         }
     }
 
-    /// Drops the pair's entry once nothing is lowered.
+    /// Drops the pair's entry once nothing is lowered and the user has not
+    /// taken the volume over this stretch.
     fn forget_idle(&mut self, mac: Address) {
         if self
             .pairs

@@ -5,10 +5,10 @@
 //! test harness a fake BlueZ on a private one (#72).
 //!
 //! zbus ships `fdo::ObjectManager` and derives properties, so serving the
-//! provider root needs none of the usual ObjectManager boilerplate - no
-//! GetManagedObjects of our own, no introspection XML, no manual
-//! InterfacesAdded / InterfacesRemoved / PropertiesChanged: registering the
-//! interface at a child path emits InterfacesAdded on its own.
+//! provider root needs no GetManagedObjects or introspection XML of our own,
+//! and no InterfacesAdded / InterfacesRemoved: the object server emits them as
+//! a battery object is added and removed. A new percentage's
+//! PropertiesChanged is emitted by `BatteryProvider::update_percentage`.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -56,8 +56,9 @@ trait Device1 {
     fn uuids(&self) -> zbus::Result<Vec<String>>;
 }
 
-/// One battery exposed to BlueZ. Properties are read-only; zbus emits
-/// PropertiesChanged when they are mutated through the object server.
+/// One battery exposed to BlueZ. Its properties are read-only to BlueZ;
+/// `BatteryProvider::update_percentage` changes the percentage and emits
+/// PropertiesChanged for it.
 pub struct BatteryProvider1 {
     percentage: u8,
     device: OwnedObjectPath,
@@ -120,23 +121,10 @@ impl std::ops::Deref for ProviderConnection {
 /// The connection [`BatteryProvider`]s are served on, from `builder`: the
 /// system bus's, or under the test harness a private bus's.
 ///
-/// bluetoothd reads a provider's root with `GetManagedObjects` as it takes
-/// the registration, and a call the object server misses is never answered.
-/// On a connection built plain, zbus starts dispatching method calls in a
-/// task that the first `object_server()` spawns, and drops a method call
-/// that comes before that task has subscribed - no reply, no error, nothing
-/// in any log. Signals still reach their own subscriptions. The provider's
-/// own registration made that first call, and under load the task
-/// subscribed only after the read had come (#125). bluetoothd waits 25 s for
-/// its reply and takes the provider's `InterfacesAdded` meanwhile, so it
-/// would miss only a battery the root held already - and there is none, as
-/// attachment registers a provider before it exports to it. The fake BlueZ,
-/// which takes no signal before the reply, took no battery at all.
-///
-/// Built with something to serve, a connection has the task subscribed
-/// before it reads its first message. The ObjectManager over every provider
-/// root served here is there for that alone: it never emits, as zbus emits
-/// from the ObjectManager closest to an object, each root's own.
+/// Built with something to serve, so that zbus answers bluetoothd's read of
+/// a provider root that comes before anything else is served (#125,
+/// `docs/app/bluez.md#connections-that-serve-objects`). The ObjectManager
+/// served here, over every provider root, is there for that alone.
 pub async fn connection(builder: zbus::connection::Builder<'_>) -> Result<ProviderConnection> {
     let conn = builder
         .serve_at(provider_path(), zbus::fdo::ObjectManager)?
@@ -1023,29 +1011,20 @@ pub struct ConnectionEvent {
 
 impl Devices {
     /// Stream of Connected changes on org.bluez.Device1, and of UUIDs changes
-    /// that mark a device as AirPods. `Connected` changes come in the order
-    /// they came; services changes after them, one per device - see
+    /// that mark a device as AirPods, so that a pair connecting after startup
+    /// is seen, not only one connected already. `Connected` changes come in
+    /// the order they came; services changes after them, one per device - see
     /// [`Pending`].
     ///
     /// The rule names no sender, so an event may come from anyone on the bus,
     /// or from a bluetoothd that has since left it: whoever acts on one asks
     /// BlueZ first, as attachment does (#132).
     ///
-    /// Port of the Go WatchForAirPods signal loop. Without this the app only ever
-    /// saw devices that were already connected at startup, so plugging the
-    /// AirPods in later did nothing.
-    ///
     /// The stream may be read at the caller's pace, with calls to BlueZ on the
     /// same connection in between: a task of its own drains the signals as they
-    /// arrive. The rule takes in every advertisement after an address's first
-    /// while the app scans - the first comes in `InterfacesAdded`, which it does
-    /// not match, and every later one brings at least an `RSSI` change (#71);
-    /// left queued in zbus for the caller, 64 of them - a second's worth in a crowd -
-    /// stopped zbus reading the connection until there was room, so a reply the
-    /// caller was waiting for never arrived, and attachment hung for good. The
-    /// task ends with the connection, or when the stream is dropped. The
-    /// services changes it keeps for the caller do not pile up either - see
-    /// [`Pending`].
+    /// arrive, as the rule takes in every advertisement while the app scans
+    /// (#90, `docs/app/bluez.md#subscriptions-that-advertisements-reach`). The
+    /// task ends with the connection, or when the stream is dropped.
     pub async fn watch_connections(&self) -> Result<impl Stream<Item = ConnectionEvent> + use<>> {
         let rule = MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
@@ -1210,9 +1189,10 @@ fn lock<Q>(pending: &Mutex<Q>) -> MutexGuard<'_, Q> {
 
 /// Whether a Device1 property map lists the AirPods service, [`AIRPODS_UUID`].
 ///
-/// The Go version went by an alias containing "AirPods", but the alias is the
-/// user's to change: a renamed pair silently stayed on BLE, and any device with
-/// "AirPods" in its name got an L2CAP connect. The alias is for display only.
+/// Never by the alias, which is the user's to change and for display only:
+/// gone by an alias containing "AirPods", a renamed pair would silently stay
+/// on BLE, and any device with "AirPods" in its name would get an L2CAP
+/// connect.
 pub fn is_airpods(props: &HashMap<String, OwnedValue>) -> bool {
     props
         .get("UUIDs")

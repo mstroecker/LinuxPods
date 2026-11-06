@@ -52,6 +52,8 @@ consumer sees.
   notifier each see the same latest one.
 - **A slow consumer skips** the snapshots it missed instead of queueing them. Queues per
   consumer, unbounded, grew without limit under an advertisement flood.
+- **Sending never waits for a consumer** to take the snapshot, so a slow one stalls no
+  read loop. Only an open `borrow()` holds a send up (below).
 - **Marked changed** as it is handed out, so the current state arrives at once. Otherwise
   the window came up blank until the first advertisement.
 

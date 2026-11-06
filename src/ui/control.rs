@@ -87,7 +87,7 @@ pub struct ControlView {
     pub content: gtk::Stack,
     pub battery: BatteryWidgets,
     /// The device switcher, in the header bar in place of the title; hidden
-    /// unless more than one device is identified.
+    /// unless `Snapshot::devices` has more than one.
     pub device_dropdown: gtk::DropDown,
     pub device_list: gtk::StringList,
     /// MAC per row in `device_list`, kept parallel so the display string can differ.
@@ -141,8 +141,8 @@ pub(super) fn create_control_view() -> ControlView {
     page.add(&status_group);
 
     // Device switcher, placed in the header bar by `setup_ui`. Only shown when
-    // more than one device is identified, so the common single-device case keeps
-    // the plain title. It scopes the whole page, and the header is where GNOME
+    // `Snapshot::devices` has more than one, so the common single-device case
+    // keeps the plain title. It scopes the whole page, and the header is where GNOME
     // apps put that kind of selector. What it selects is evident from where it
     // sits, so the explanation lives in a tooltip.
     let device_list = gtk::StringList::new(&[]);
@@ -797,7 +797,7 @@ mod tests {
     /// The switcher names a pair by the pods' own name, where the link has
     /// it, before BlueZ's alias: after a rename the alias keeps the old name
     /// until the pair connects again, and the switcher showed it that long
-    /// (#160). Without the pods' name it is the alias, as before.
+    /// (#160). Without the pods' name it is the alias.
     #[test]
     fn labels_take_the_pods_name_before_the_alias() {
         let macs = [MAC_1, MAC_2];

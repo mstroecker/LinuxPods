@@ -284,8 +284,8 @@ fn main() -> glib::ExitCode {
     });
 
     // A logout's SIGTERM, a kill or Ctrl-C quits as the menu does, so what
-    // follows `run` - the volume put back - runs for them too. SIGKILL
-    // cannot be caught.
+    // follows `run` - the volume put back, the readings saved - runs for them
+    // too. SIGKILL cannot be caught.
     let (quit_tx, quit_rx) = async_channel::bounded(1);
     runtime.spawn(quit_on_signals(quit_tx));
     let quitting = app.clone();
@@ -367,7 +367,12 @@ async fn quit_on_signals(quit: async_channel::Sender<()>) {
     // Each on its own: one registered and left unread would be swallowed.
     let listen = |kind: SignalKind, name: &str| {
         signal(kind)
-            .inspect_err(|e| tracing::warn!("{name} will not put back a lowered volume: {e}"))
+            .inspect_err(|e| {
+                tracing::warn!(
+                    "{name} will end the app without putting back a lowered volume or \
+                     saving the readings: {e}"
+                )
+            })
             .ok()
     };
     let mut term = listen(SignalKind::terminate(), "SIGTERM");
@@ -449,9 +454,9 @@ mod tests {
         shows.get().expect("the command line reached the handler")
     }
 
-    /// The flag used to be filtered out of argv by hand. Registered with
-    /// GApplication instead, it has to come back out of the options dict under
-    /// the name `shows_window` looks up.
+    /// `--minimized`, registered with GApplication, comes back out of the
+    /// options dict under the name `shows_window` looks up: without it the
+    /// window shows, with it it stays hidden.
     #[test]
     fn minimized_keeps_the_window_hidden() {
         assert!(shows_window_for(&["linuxpods"]));

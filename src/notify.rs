@@ -1,18 +1,10 @@
-//! Low battery notifications (#126).
+//! Low battery notifications (#126): GNOME never warns about a Bluetooth
+//! battery, so LinuxPods warns itself.
 //!
-//! GNOME never warns about a Bluetooth battery, so LinuxPods warns itself.
-//!
-//! What to warn about is worked out here, on the tokio side, from the snapshot
-//! stream as the tray reads it: [`Alerts`] takes a snapshot and the time, and
-//! returns what to show and what to withdraw - pure, and tested without GTK.
-//! [`run`] hands that to the GTK main context, where `ui::notifications` sends
-//! it as a `GNotification`.
-//!
-//! A pair gets one notification, with an ID of its own ([`notification_id`]),
-//! naming its low parts: "Left 9%, Right 12%". It is shown again, replacing
-//! itself, as the parts warned about change, and withdrawn once none is left:
-//! each charging, or clear of the low threshold again ([`REARM_ABOVE`]) - or
-//! once the pair has no reading left at all.
+//! [`Alerts`] works out what to show and what to withdraw from a snapshot and
+//! the time - pure, and tested without GTK; [`run`] hands that to the GTK main
+//! context, where `ui::notifications` sends it as a `GNotification`. What is
+//! warned about, and when: `docs/app/notifications.md`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,36 +23,15 @@ pub const LOW: u8 = 20;
 pub const CRITICAL: u8 = 5;
 
 /// Above this a part warned about is armed again without charging: [`LOW`]
-/// and a margin.
-///
-/// Armed again as soon as it was above [`LOW`], a part read at 20% and 21% by
-/// turns would be warned about, withdrawn and warned about again several
-/// times a second. Its readings do come from more than one source: both pods
-/// advertise, and the one in the case reports the worn one's level as last
-/// heard, so the two can lag each other by a step; and a reading over AAP and
-/// the BLE one it falls back to when the link goes can differ by a step too.
-/// Five points clear that jitter many times over, while a part that has
-/// really been charged - by more than a few minutes in the case - is past it
-/// at once, and charging arms it anyway.
+/// and a margin that clears the step its sources can differ by, so a reading
+/// flipping across [`LOW`] sends nothing
+/// (`docs/app/notifications.md#what-is-warned-about`).
 pub const REARM_ABOVE: u8 = 25;
 
-/// How old a BLE reading may be and still warn.
-///
-/// A reading counts only while it is fresh: over AAP always, as the reading
-/// lives in the link and goes with it; over BLE only while the advertisement
-/// behind it arrived less than this long ago. The coordinator keeps a pair's
-/// last advertisement for a day after the pair has gone - out of range,
-/// or in a drawer - and across a relaunch, and a reading from it says nothing
-/// about the battery now.
-///
-/// A pair in range advertises several times a second, so it is heard many
-/// times a minute, even across a discovery restart; a minute without a word
-/// means it has gone. The window draws the same line: under a minute is
-/// "Last seen just now". Each reading is judged by its age when a snapshot
-/// comes in, so a cached one that comes along with another pair's update, or
-/// with the expiry clock's, warns about nothing. Ages are on the wall clock,
-/// and a reading heard after `now` - the clock set back - is never fresh: how
-/// old it is cannot be told (see [`podstate::age`]).
+/// How old a BLE reading may be and still warn: a pair in range is heard
+/// many times a minute, so a minute without a word means it has gone. A
+/// reading over AAP is always fresh - see [`fresh`] and
+/// `docs/app/notifications.md#what-is-warned-about`.
 pub const FRESH: Duration = Duration::from_secs(60);
 
 /// How low a part's battery is.
@@ -153,26 +124,11 @@ struct Warned {
 }
 
 /// Which low bands have been warned about, per part of each pair, so that a
-/// pair is warned once per crossing rather than once per snapshot:
-/// advertisements come several times a second.
-///
-/// A part is warned about when a fresh reading ([`FRESH`]) of it, not
-/// charging, first crosses [`LOW`], and again when it crosses [`CRITICAL`].
-/// The worst band warned about stands until the part is armed again, by
-/// charging or by rising above [`REARM_ABOVE`]: a part back at 6% after 5% is
-/// still warned about as critical, and one back at 21% after 20% still as
-/// low, so a reading that flips across a threshold sends nothing. A reading
-/// without a level - the case's, while the lid is shut with no pod in it -
-/// neither warns nor arms: the case is warned about only when a reading comes
-/// in.
-///
-/// A stale reading neither warns, arms nor withdraws: a pair that went quiet
-/// while low keeps its notice. Once it has no reading in the snapshot at all -
-/// its last advertisement expired from the cache, a day on, or its
-/// link gone with no advertisement behind it - its notice is withdrawn and
-/// what was warned about forgotten: nothing is known of its battery any more.
-/// A snapshot loses a reading only that way, never while BlueZ restarts or a
-/// pair is renamed: the cache is the coordinator's, and keyed by real MAC.
+/// pair is warned once per crossing rather than once per snapshot. The worst
+/// band warned about stands until the part charges or rises above
+/// [`REARM_ABOVE`]; a stale reading changes nothing, and a pair with no
+/// reading left is withdrawn and forgotten
+/// (`docs/app/notifications.md#what-is-warned-about`).
 ///
 /// Pure: the time comes in with each snapshot.
 #[derive(Debug, Default)]

@@ -31,12 +31,22 @@ So a reading flipping across a threshold sends nothing. Armed again as soon as i
 above `LOW`, a part read at 20% and 21% by turns would be warned about, withdrawn and
 warned about again several times a second. Its readings come from more than one source,
 which can lag each other by a step: both pods advertise, and AAP and the BLE reading it
-falls back to can differ.
+falls back to can differ. `REARM_ABOVE` is `LOW` and five points, which clears that step
+many times over, while a part really charged - more than a few minutes in the case - is
+past it at once; and charging arms it anyway.
 
 **Only from a fresh reading:** over AAP always, over BLE only when heard within
 `notify::FRESH` (#126, #169). The BLE cache keeps a pair's last reading for `BLE_CACHE_TTL` after
 it has gone, and across a relaunch ([state.md](state.md#the-ble-cache)), and that says
 nothing about the battery now.
+
+`FRESH` is a minute. Each pod advertises about 5 times a second
+([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#update-frequency)),
+so a pair in range is heard many times a minute, even across a discovery restart, and a
+minute without a word means it has gone. The window draws the same line: under a minute
+is "Last seen just now". A reading is judged by its age when a snapshot comes in, so a
+cached one that comes along with another pair's update, or with the expiry clock's, warns
+about nothing.
 
 | A reading | |
 |---|---|
@@ -44,6 +54,10 @@ nothing about the battery now.
 | Stale | Does none of these: a pair that went quiet while low keeps its notice |
 | Heard after now, the clock set back | Never fresh: [state.md](state.md#the-wall-clock) |
 | Gone from the snapshot | Its notice is withdrawn, and what was warned about forgotten |
+
+A pair's reading leaves the snapshot only when its last advertisement expires from the
+cache, or its link goes with no advertisement behind it. Never while BlueZ restarts or the
+pair is renamed: the cache is the coordinator's, keyed by the real MAC.
 
 The pair is named by `Snapshot::display_name`: [names.md](names.md#two-names).
 

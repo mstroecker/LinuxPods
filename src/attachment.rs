@@ -41,9 +41,8 @@
 //!
 //! What attachment knows about a pair is one [`Attached`] entry, by real MAC: its
 //! BlueZ object, its adapter, the level its battery shows and its supervisor.
-//! Kept in two maps - the attached pairs by object path, and the exported
-//! levels by MAC inside the battery provider - the two had to be kept in step
-//! by hand.
+//! One record, so there is nothing to keep in step: no second map, by object
+//! path or inside the battery provider, holds any of it.
 //!
 //! The coordinator's AAP links are not a copy of it. A link can fail to come up,
 //! or die while BlueZ keeps the pair connected, so attached and linked are two

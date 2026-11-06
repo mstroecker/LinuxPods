@@ -263,10 +263,10 @@ struct Ui {
 impl Ui {
     /// Takes in a snapshot from the coordinator.
     fn apply(&self, snapshot: Snapshot) {
-        // The switcher lists the snapshot's devices, as the tray and Preferences
-        // do: every pair we hold a key for or are on AAP to. Neither depends on an
-        // advertisement having arrived, so the list holds still instead of
-        // flickering, and neither takes in strangers.
+        // The switcher lists `Snapshot::devices`: every pair we hold a key for
+        // or are on AAP to. Neither depends on an advertisement having arrived,
+        // so the list holds still instead of flickering, and neither takes in
+        // strangers.
         let macs = snapshot.devices();
 
         // Read the selection BEFORE touching the widget. Splicing the model makes

@@ -383,8 +383,8 @@ mod tests {
         assert!(Settings::default().pause_on_ear);
     }
 
-    /// A file from before the setting existed - every file so far - turns
-    /// it on, and one that turned it off keeps it off.
+    /// A file without the setting turns it on, and one that turned it off
+    /// keeps it off, with the settings it leaves out at their defaults.
     #[test]
     fn pausing_on_the_ears_loads_as_saved() {
         let (store, _dir) = store_with(r#"{"version":1,"battery_notifications":false}"#);

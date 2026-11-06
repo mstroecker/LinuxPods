@@ -90,7 +90,8 @@ impl Keystore {
         Ok(Self { data_dir })
     }
 
-    /// Test hook: use an explicit directory instead of the XDG one.
+    /// Uses `data_dir` instead of the XDG directory, creating it if missing
+    /// and leaving its mode as it is.
     pub fn with_dir(data_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&data_dir)?;
         Ok(Self { data_dir })
@@ -119,8 +120,9 @@ impl Keystore {
     ///
     /// An IRK that is not 16 bytes, or whose pair has no ENC_KEY, is left out
     /// with a warning, and the next save drops it. Its pair's ENC_KEY still
-    /// loads: without an IRK, the pair is identified as before version 2, and
-    /// its next connection brings the IRK again.
+    /// loads: without an IRK, the pair is identified by its ENC_KEY alone
+    /// (`docs/app/identification.md#pairs-with-no-irk`), and its next
+    /// connection brings the IRK again.
     pub fn load(&self) -> Result<HashMap<Address, PairKeys>> {
         let path = self.path();
         let raw = match std::fs::read(&path) {
@@ -417,8 +419,7 @@ mod tests {
     }
 
     /// An IRK that cannot be one, or that has no ENC_KEY beside it, is left
-    /// out, and costs no other key: the pair is identified as before until
-    /// its next connection.
+    /// out, and costs no other key: the pair's ENC_KEY loads without it.
     #[test]
     fn an_unusable_irk_is_left_out_and_its_enc_key_kept() {
         let (ks, dir) = store();
