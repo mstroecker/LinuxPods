@@ -11,8 +11,9 @@ Why Off needs `0x34` first, and why that setting is not one to turn on lightly:
 
 `Coordinator::set_noise_control`, which carries out a `Command::NoiseControl`, sends
 `0x34 01` only when Off is the mode asked for, immediately before the mode, rather than on
-every connection. The setting persists on the pods and is believed to sync to the user's
-Apple devices.
+every connection: that the setting persists on the pods and syncs to the user's other
+Apple devices is a guess, checked nowhere
+([protocol/aap/noise-control.md](../protocol/aap/noise-control.md#off-has-a-prerequisite-of-its-own)).
 
 - **Back to back, with no delay,** which is enough. A link carries out its commands one at
   a time ([commands.md](commands.md#one-path)), so no other command goes out between the

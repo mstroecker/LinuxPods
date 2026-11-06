@@ -1,8 +1,8 @@
 # zbus
 
 What zbus 5 does that a D-Bus client built on it has to know: its message queues, when
-its object server starts answering, what a match rule's sender checks, and order across
-subscriptions. Most turned up as bugs in the pipeline tests against the fake BlueZ, the
+its object server starts answering, which ObjectManager signals for an object, what a
+match rule's sender checks, and order across subscriptions. Most turned up as bugs in the pipeline tests against the fake BlueZ, the
 senders in review (#50, #132); each was then read in zbus 5.19.0's source. None needed
 hardware.
 
@@ -39,6 +39,17 @@ Seen in the pipeline tests under load (#125): the fake BlueZ's `GetManagedObject
 new battery provider's root - the call bluetoothd makes as it takes a registration - went
 unanswered in 5 of 120 runs on a connection built plain, and never on one built
 serving. What bluetoothd does while it waits: [bluez.md](bluez.md#battery-providers).
+
+## Which ObjectManager signals
+
+- **The nearest one above the object.** An interface added at a path or removed from it
+  is signaled (`InterfacesAdded`, `InterfacesRemoved`) from the closest object above that
+  path that serves `org.freedesktop.DBus.ObjectManager`, and from no other
+  (`Node::get_child_mut` in zbus 5.19.0's `src/object_server/node.rs`, used by
+  `ObjectServer::add_arc_interface` and `remove_named` in `src/object_server/mod.rs`).
+- **One further up stays silent** for every object that has a nearer one.
+
+Read in the source, not tested on its own.
 
 ## Senders
 
