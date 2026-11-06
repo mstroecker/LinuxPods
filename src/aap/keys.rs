@@ -77,7 +77,7 @@ pub enum KeyParseError {
     BadIrkLen(usize),
 }
 
-/// The key packet's opcode, the key marker.
+/// The key packet's opcode.
 pub const OPCODE: u8 = 0x31;
 const KEY_MARKER: u8 = OPCODE;
 const MAX_KEYS: usize = 10;

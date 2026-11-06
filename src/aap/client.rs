@@ -412,7 +412,7 @@ impl Client {
 
     /// Sends a rename packet for `new_name` as given, unchecked: for a probe
     /// to reach past the 127 bytes the pods keep, as the name run did. The
-    /// app renames with [`Client::rename`]. Only the probe's `--sweep` uses it.
+    /// app renames with [`Client::rename`].
     #[doc(hidden)]
     pub async fn rename_unchecked(&self, new_name: &[u8]) -> Result<()> {
         let packet = name::rename_packet_unchecked(new_name);

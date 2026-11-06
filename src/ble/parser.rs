@@ -616,9 +616,10 @@ mod tests {
     /// right worn, both advertise. The worn pod's `0x13` reads no lid, but its
     /// status bit 4 says a pod is in the case - the left pod, whose `0x73` reads
     /// the lid. Bit 4 is clear in `0x0b`, both worn, and `0x01`, both on the
-    /// desk, with no pod in the case; and in `0x29`, the left pod in hand while
-    /// the right was already in the case, which the rule for bit 4 does not
-    /// explain (`docs/protocol/ble/proximity-pairing.md#open-questions`).
+    /// desk, with no pod in the case; and in `0x29`, from the second #71
+    /// capture, the left pod in hand while the right was already in the case,
+    /// which the rule for bit 4 does not explain
+    /// (`docs/protocol/ble/proximity-pairing.md#open-questions`).
     #[test]
     fn a_worn_pod_says_when_its_partner_is_in_the_case() {
         let parse = |cleartext: [u8; 9]| {
@@ -748,8 +749,8 @@ mod tests {
         }
     }
 
-    /// Byte 6's high nibble is no gate: `0x5` comes from a pod in a charging
-    /// case (`docs/protocol/ble/proximity-pairing.md#byte-6-lid-state`), but
+    /// Byte 6's high nibble is no gate: on a Pro 3, `0x5` came from a pod in a
+    /// charging case (`docs/protocol/ble/proximity-pairing.md#byte-6-lid-state`), but
     /// the status byte alone decides whether the lid is read. With status
     /// `0x0b`, both pods worn, a `0x51` or `0x59` lid byte reports no lid.
     #[test]

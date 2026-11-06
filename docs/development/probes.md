@@ -176,7 +176,9 @@ arrives in a window after it, each with what it is: a mode report, a speech leve
 Every mode should be audible: listen while it runs.
 
 - **Never prints** keys or serial numbers.
-- **Leaves the pair** in Off, with Off allowed. Allowing Off is a persistent setting.
+- **Leaves the pair** in Off, with Off allowed. That allowing Off persists on the pods
+  is a guess
+  ([protocol/aap/noise-control.md](../protocol/aap/noise-control.md#off-has-a-prerequisite-of-its-own)).
 
 ## `conversation_awareness`
 

@@ -494,7 +494,7 @@ mod tests {
             Report::Unchanged
         );
 
-        // Changed from a phone, straight after.
+        // Changed elsewhere, straight after.
         assert_eq!(
             state.report(NoiseMode::NoiseCancellation, sent + ms(1500)),
             Report::Changed
