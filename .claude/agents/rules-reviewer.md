@@ -201,7 +201,8 @@ Check CLAUDE.md, `docs/**/*.md`, `README.md`, doc comments and comments, log and
 message text, this file, and anything under `.claude/skills/`.
 
 1. List every identifier the change removes, renames or changes the behavior of:
-   functions, types, fields, constants, log prefixes, Makefile targets, env vars, paths.
+   functions, types, fields, constants, log prefixes, Makefile targets, env vars, paths,
+   and `docs/` files and headings - CI checks no link from `src/` or `examples/`.
    `git grep -n` each one at the reviewed revision and read every hit.
 2. Read the CLAUDE.md rules and the `docs/app/` documents on the modules the diff touches.
    Check each claim in them against the code, not just the claims that name a changed
@@ -215,8 +216,9 @@ message text, this file, and anything under `.claude/skills/`.
 **A change to `docs/protocol/` that weakens a claim** - now a guess, an open question,
 another project's word, true of one model only, or gone. Comments copy protocol claims,
 and the copies are not updated with the document. `git grep -n` the claim across `src/`,
-`examples/` and `docs/app/`, by its words and by its byte values and opcodes, and flag
-every comment, log line or probe output that still states it as fact.
+`examples/`, `docs/`, `README.md`, `AGENTS.md` and `.claude/`, by its words and by its
+byte values and opcodes, and flag every comment, doc line, log line or probe output that
+still states it as fact.
 
 **A change to `docs/`.** Check it against the rules in `docs/README.md`, and flag:
 - a fact on the wrong side of the sorting test: about the AirPods or the Linux stack in

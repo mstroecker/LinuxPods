@@ -109,15 +109,19 @@ Releases, the fake world and where it departs from the hardware, and the probes 
 ## Code comments
 
 A comment says what the code beside it does and why, and links to a document here for
-the evidence. The rules for every document hold for comments too. The rules below are
-the ways comments went wrong anyway.
+the evidence. Content rules 1-4 and 6-8, the privacy rule and plain US English hold for
+comments too. The rules below are the ways comments went wrong anyway: a review found
+about 45 such comments in `src/` and `examples/` (#185) after #58 and #133 had brought
+them in line once, among them two guesses about noise control that stood as fact in
+four files after their document called them guesses.
 
 1. **A protocol fact is linked, not restated.** A comment that needs a fact about the
    AirPods or the Linux stack points at the `protocol/` section that has it. A comment
    that states the fact all the same carries the status the document gives it -
    "LibrePods says", "a guess", "open" - and changes when the document does. Where
-   the code and a document disagree, the comment says the question is open, and
-   takes neither side.
+   the code and a document disagree, the comment takes neither side: it says the
+   question is open and points at the document's Open questions or Hardware checks
+   entry on it, and the document gets one if it has none.
 2. **No history.** A comment says what the code does, not what it replaced: no "the Go
    version", "used to", "as before", "the old way". History stays in the issue and
    the commit. A comment that names the bug a line guards against, with its issue
@@ -127,8 +131,10 @@ the ways comments went wrong anyway.
    code changes. Name the item, so that a search for it finds the comment, or leave the
    claim out. A guarantee a comment states - a lock held, an order kept - holds only
    if the code under it enforces it.
-4. **The long explanation goes in `app/`.** A comment is a line or two and a link. A
-   module doc that retells its `app/` document drifts from it.
+4. **The long explanation goes in `app/`.** A comment on a choice `app/` explains is a
+   line or two and a link: a module doc that retells its `app/` document drifts from
+   it. The doc comments of the probes and the fakes are the reference `development/`
+   points at, and stay whole.
 5. **A test's doc says what the test asserts.** A change to the asserts rewrites the doc
    in the same edit.
 
@@ -137,6 +143,7 @@ the ways comments went wrong anyway.
 - `README.md` at the root says what the app does, for users: features, installing,
   usage. It links here for how.
 - `AGENTS.md` holds the rules for working in this repository: one line per invariant,
-  with a link to the `app/` or `protocol/` document that says why.
+  with a link to the `app/` or `protocol/` document that says why, or to the rule here
+  it follows.
 - Code comments say what the code does and link here for the evidence: see
   [Code comments](#code-comments).
