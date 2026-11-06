@@ -16,6 +16,9 @@ as [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md) cou
   `conversation_awareness --duck`, so the probe's AAP session is the only one, or the
   only thing lowering the volume, and for `adv_monitor_probe`, so that nothing
   discovers. The other probes say nothing either way.
+- **bluetoothd with its experimental interfaces on** (`Experimental = true` in
+  `main.conf`) for `adv_monitor_probe`: the monitor interface is one of them
+  ([protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising)).
 - **The session is the app's** (`aap::Client::open`), the features packet included and
   the key request left out. Only `key_request` and `irk_probe` ask for keys. How the app
   opens a link: [app/aap-links.md](../app/aap-links.md#opening-a-link).
