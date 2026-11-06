@@ -1156,6 +1156,7 @@ mod tests {
             "Click",
             "SetActive",
             "Select",
+            "SetText",
             "Screenshot",
             "Settle",
             "Notifications",
