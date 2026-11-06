@@ -171,7 +171,7 @@
 //!   `profiles/audio/avrcp.c`). The fake then changes it after a delay,
 //!   signaled then, and may round it to an even volume, as a pair might. How
 //!   long real pods take, and whether they round, is untried (#150). Every
-//!   set a client makes is also signaled as it returns, with the volume the
+//!   set that succeeds is also signaled as it returns, with the volume the
 //!   transport holds by then, as zbus's generated setter signals each set
 //!   that succeeds: one the transport already held, or one not answered yet,
 //!   brings a `PropertiesChanged` that changes nothing, where bluetoothd

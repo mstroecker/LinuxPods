@@ -76,6 +76,17 @@ Seen in the pipeline tests (4ec4144, #49): the fake BlueZ read a provider's
 `InterfacesAdded`, `InterfacesRemoved` and `PropertiesChanged` from a stream each. A
 battery withdrawn and offered again within a moment was taken the other way round.
 
+## Property setters
+
+A property setter written with `#[zbus(property)]` in an `#[interface]` impl signals
+every set it answers with `Ok`. The code `#[interface]` generates calls the property's
+`<name>_changed` right after the setter returns `Ok`, and `<name>_changed` reads the
+property's getter again and sends `PropertiesChanged` with what it returns (zbus_macros
+5.19.0, `src/iface.rs`). So a set that leaves the value as it was is signaled all the
+same, with the value unchanged. A setter that returns an error sends nothing. This holds
+for a property that emits `PropertiesChanged` with its value, the default
+(`emits_changed_signal`).
+
 ## Open questions
 
 - The stall of #90 has not been seen on hardware: it needs a crowd or a BLE spam flood,
