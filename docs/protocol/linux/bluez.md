@@ -95,15 +95,17 @@ advertising with our address will be correctly reported by the controller"
 **The monitor interface is experimental.** BlueZ 5.87 offers `RegisterMonitor`,
 `UnregisterMonitor` and the manager's properties only while bluetoothd runs with its
 experimental interfaces on: `Experimental = true` in `main.conf`, or `-E`. The default
-is off (`src/adv_monitor.c`, where they are flagged experimental, and `gdbus/object.c`,
-which hides what is so flagged). Read, not run with them off: every run here had them on.
+is off ("Defaults to false", `src/main.conf`). `src/adv_monitor.c` flags them
+experimental, and `gdbus/object.c` hides what is so flagged. Read, not run with them
+off: every run here had them on.
 The battery provider interface is not flagged so (`src/battery.c`).
 
 One setting of the monitor and one of the manager (BlueZ 5.87; read, not seen in a
 capture):
 
 - `RSSISamplingPeriod` 0 asks for every advertisement from a device in range; the
-  document says "propagated to the client". In the source, bluetoothd passes the period
+  document says all advertisement packets from in-range devices "would be propagated".
+  In the source, bluetoothd passes the period
   to the kernel with the pattern and applies none itself ("Sampling period is not
   implemented yet in userspace", `src/adv_monitor.c`). What it then signals to its
   clients is another matter: see the `RSSI` below.
@@ -117,8 +119,9 @@ AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
 - Each pod's proximity pairing payload came whole, 27 bytes of Apple data, first in the
   `InterfacesAdded` that announced its device, then as `ManufacturerData` changes.
 - `DeviceFound` came with each pod's first advertisement. `DeviceLost` came about 10 s
-  after the marker typed once the lid had closed (runs A and B). In run 1, bluetoothd
-  removed a lost pod's device 25 s after its `DeviceLost`.
+  after the marker typed once the lid had closed (run A; 7.8 s and 9.5 s with discovery
+  on as well, run B). In run 1, bluetoothd removed a lost pod's device 25 s after its
+  `DeviceLost`.
 - A pair idle in the open case when the monitor was registered was heard 145 ms and
   177 ms after `Activate`. A discovery start in the same conditions heard it after 89 ms
   and 111 ms.
@@ -133,8 +136,8 @@ AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
 
 With discovery running beside it, the monitor went on reporting: `DeviceFound` and
 `DeviceLost` with the monitoring client's own discovery (runs B and C2), and
-`DeviceFound` with another client's (run D). Under another client's discovery, bluetoothd keeps the pods'
-devices, so a monitor registered then hears of a pod in `DeviceFound` alone, with no
+`DeviceFound` with another client's (run D). Under another client's discovery,
+bluetoothd keeps the pods' devices, so a monitor registered then hears of a pod in `DeviceFound` alone, with no
 `InterfacesAdded`; the payload is in the device's properties (run D).
 
 What is still open: [Open questions](#open-questions).
@@ -261,14 +264,15 @@ by a few seconds.
 
 | Run | Steps | Seen |
 |---|---|---|
-| 1: monitor, 161 s, unmarked | Pods and mouse handled | 19 and 23 payloads. A pod lost, its device removed 25 s later. Mouse `Connected` false, then true 13.4 s later. |
+| 1: monitor, 161 s, unmarked | Pods and mouse handled | `Discovering` false at the start, and a change to false at 38 s with no change to true before it: something touched discovery. 19 and 23 payloads, all after 46 s. A pod lost, its device removed 25 s later. Mouse `Connected` false, then true 13.4 s later. |
 | A: monitor, 48 s | Lid closed, opened, closed; mouse off and on | Pods heard 2.8 s before the `lid open` marker and 3.2 s apart; 15 and 10 payloads. Lost 9.6 s and 10.0 s after the `lid closed` marker. Mouse connected before the `mouse on` marker. |
 | B: `--discover`, 41 s | The same | Pods heard 2.0 s before the marker and 3.5 s apart; 15 and 13 payloads. Lost 7.8 s and 9.5 s after the marker. Mouse unconnected 4.3 s after the marker, at the end. |
-| C: monitor, 65 s | Lid open and pods idle for 60 s or more before the start | Pods heard 145 ms and 177 ms after `Activate`. 3 and 2 payloads, all in the first 2.8 s; 2 and 3 `RSSI` signals; no `DeviceLost`. |
-| C2: `--discover`, 66 s | The same | Pods heard 89 ms and 111 ms after discovery started. 1 payload each; `RSSI` 2.6 a second throughout; no `DeviceLost`. |
+| C: monitor, 65 s | Lid open and pods idle for 60 s or more before the start | Pods heard 145 ms and 177 ms after `Activate`. 3 and 2 payloads, all in the first 2.8 s; 2 and 3 `RSSI` signals; no `DeviceLost` for the pods. |
+| C2: `--discover`, 66 s | The same | Pods heard 89 ms and 111 ms after discovery started. 1 payload each; `RSSI` 2.6 a second throughout; no `DeviceLost` for the pods. |
 
 In every run, one other address matching `4C 00 07` without a proximity pairing payload
-was found and lost every few seconds.
+was found. In runs 1, A, C and C2 it was found and lost every few seconds; in run B it
+was found once and not lost.
 
 **A monitor beside another client's discovery: the same machine and day (#189).** The
 probe ran beside LinuxPods, which discovered throughout (`Discovering` true at the

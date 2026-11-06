@@ -13,7 +13,8 @@
 //! - each adapter's `Discovering` at the start and every change of it: a run
 //!   says something about passive scanning only while it reads false;
 //! - the monitor's `Activate` and `Release`, and each `DeviceFound`, with the
-//!   device's proximity payload as BlueZ holds it then, and `DeviceLost`;
+//!   model, the status byte and the length of the device's proximity payload as
+//!   BlueZ holds it then, and `DeviceLost`;
 //! - each proximity pairing advertisement BlueZ signals: in the
 //!   `InterfacesAdded` that announces a device, or a `ManufacturerData`
 //!   change, with the model, the status byte and the payload's length;
@@ -36,8 +37,10 @@
 //! compare the two.
 //!
 //! bluetoothd offers the monitor only with its experimental interfaces on
-//! (`Experimental = true` in `/etc/bluetooth/main.conf`): without them every
-//! registration fails, and the probe stops. Quit LinuxPods first, and close
+//! (`Experimental = true` in `/etc/bluetooth/main.conf`;
+//! [protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery-and-directed-advertising)).
+//! With them off, every registration should fail (read, not run), and the
+//! probe stops when no adapter takes the monitor. Quit LinuxPods first, and close
 //! GNOME Settings' Bluetooth panel: both discover. Decrypts nothing and prints no payload bytes. Prints the random
 //! address of every device in range that advertises proximity pairing data,
 //! other people's AirPods among them, or that the monitor reports found or
@@ -86,7 +89,7 @@ trait Adapter1 {
     fn discovering(&self) -> zbus::Result<bool>;
 }
 
-/// What BlueZ tells the monitor, each with the time it came.
+/// What BlueZ tells the monitor.
 enum MonitorEvent {
     Activated,
     Released,
@@ -102,6 +105,7 @@ struct Monitor {
 }
 
 impl Monitor {
+    /// Passes `event` on with the time it came.
     fn tell(&self, event: MonitorEvent) {
         let _ = self.events.send((Instant::now(), event));
     }
