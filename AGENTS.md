@@ -313,7 +313,8 @@ notification was Conversation Awareness's speech level `09` (#150).
   of a key packet or a device information packet (`0x1D`). No log, probe or example
   prints key bytes or serial numbers: their output gets pasted into issues.
 - A comment links a protocol fact rather than restating it, keeps the status its document
-  gives it, tells no history, and claims only what the code beside it makes true.
+  gives it, tells no history, and claims only what the code beside it makes true; a
+  test's doc says what the test asserts.
   [Why](docs/README.md#code-comments)
 - Log text describing control flow goes stale like comments, and is more visible.
 - Tasks on the system bus (`ble_task`, `attachment::run`) never return for good: they set
