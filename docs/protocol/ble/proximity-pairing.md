@@ -569,7 +569,9 @@ AirPods Pro 3 on one adapter (#71):
 - Byte 4: which nibble carries the sender's level rests on one sample (Pro 3,
   2026-09-11, 17f6591).
 - Why each pod's payload changed once about 2 s after discovery started (Pro 3,
-  2026-11-02, #153).
+  2026-11-02, #153). Under an advertisement monitor, with no active scan, the payloads
+  changed within 2.8 s as well; under discovery right after, they did not
+  ([linux/bluez.md](../linux/bluez.md#runs), runs C and C2, #189).
 - Models other than the Pro 3 and the Pro 2 (USB-C): untested. The MAC-suffix rule and
   the byte-reversed IRK hold on both; older hardware is unknown.
   `examples/irk_probe.rs` checks a new model's addresses

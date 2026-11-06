@@ -65,8 +65,7 @@ Why few advertisements reach the app while a pair is connected:
 **While any client discovers, a device that reconnects by directed advertising does not
 connect.** A bonded mouse stayed unconnected for 45 s of discovery, and connected 37 ms
 after discovery stopped (MX Anywhere 3S, Intel AX211, 2026-11-06, #189, [Runs](#runs)).
-Two things in the kernel combine (Linux master `net/bluetooth/hci_sync.c`, read
-2026-11-06):
+Two things in the kernel combine (Linux 7.2, `net/bluetooth/hci_sync.c`):
 
 | While discovery runs | Where |
 |---|---|
@@ -83,34 +82,45 @@ no connection. Once discovery stopped, the first report of the background scan w
 `doc/org.bluez.AdvertisementMonitorManager.rst`, marked experimental). A client
 registers an `or_patterns` monitor per adapter. bluetoothd reports matches to it "no
 matter if there is an ongoing discovery session". The kernel folds the monitors into its
-background scan, which is passive and runs under no private address: "no SCAN_REQ are
-send during passive scanning" (`hci_passive_scan_sync`). The Intel AX211 offers
-`SupportedFeatures = ["controller-patterns"]`: bluetoothd hands it the patterns to match
-in the controller (2026-11-06, #189).
+background scan (Linux 7.2, `hci_update_passive_scan_sync`). That scan is passive, and
+never runs under a non-resolvable address: the public address with privacy off, a
+resolvable one with it on, "so that peer devices using direct advertising with our
+address will be correctly reported by the controller" (`hci_passive_scan_sync`).
 
-**Through a monitor, with nobody discovering, the pods' payload arrives and the mouse
-reconnects** (Pro 3, Intel AX211, 2026-11-06, #189, [Runs](#runs)):
+Two of the monitor's settings, from BlueZ 5.87's
+`doc/org.bluez.AdvertisementMonitor.rst` (read, not seen in a capture):
+
+- `RSSISamplingPeriod` 0 propagates every advertisement from a device in range to
+  bluetoothd. What bluetoothd then signals to its clients is another matter: see the
+  `RSSI` below.
+- With `SupportedFeatures` `controller-patterns`, bluetoothd hands the patterns to a
+  controller that can match them. The Intel AX211 offers it (2026-11-06, #189).
+
+**Through a monitor, the pods' payload arrives and the mouse reconnects** (Pro 3, Intel
+AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
 
 - Each pod's proximity pairing payload came whole, 27 bytes of Apple data, first in the
   `InterfacesAdded` that announced its device, then as `ManufacturerData` changes.
 - `DeviceFound` came with each pod's first advertisement. `DeviceLost` came about 10 s
-  after the lid closed, and bluetoothd removed a lost pod's device 25 s later.
+  after the marker typed once the lid had closed (runs A and B). In run 1, bluetoothd
+  removed a lost pod's device 25 s after its `DeviceLost`.
 - A pair idle in the open case when the monitor was registered was heard 145 ms and
   177 ms after `Activate`. A discovery start in the same conditions heard it after 89 ms
   and 111 ms.
 - A pair whose lid opened while the monitor was registered was heard about as soon as
   under discovery, within the seconds a typed marker resolves.
-- While the lid was open, the same number of payloads was signaled as under discovery.
-  `RSSI` alone was signaled far less often: idle in the open case, 2 or 3 times in 62 s
-  against 2.6 times a second under discovery. No `DeviceLost` came meanwhile. This fits
-  the 8 dBm rule for `RSSI` with no discovery filter in force ([Discovery](#discovery));
-  that it is the cause is not checked.
+- While the lid was open, about as many payloads were signaled as under discovery (runs
+  A and B); idle in the open case, more (runs C and C2).
+- `RSSI` alone was signaled far less often: idle in the open case, 2 or 3 times in 62 s,
+  against 2.6 times a second under discovery. No `DeviceLost` came meanwhile.
 - The bonded mouse, switched off and on, reconnected while the monitor was registered.
   With discovery on as well, it was still unconnected 4 s after it was switched on.
-- While discovery ran beside it, the monitor went on reporting: `DeviceFound`,
-  `DeviceLost` and every payload (runs B and C2). That discovery was the monitoring
-  client's own. BlueZ's documentation says a monitor is told "no matter if there is an
-  ongoing discovery session", whoever started it.
+
+With discovery running beside it, the monitor went on reporting `DeviceFound` and
+`DeviceLost`: with the monitoring client's own discovery (runs B and C2), and with
+another client's (run D). Under another client's discovery, bluetoothd keeps the pods'
+devices, so a monitor registered then hears of a pod in `DeviceFound` alone, with no
+`InterfacesAdded`; the payload is in the device's properties (run D).
 
 What is still open: [Open questions](#open-questions).
 
@@ -244,6 +254,16 @@ by a few seconds.
 In every run, one other address matching `4C 00 07` without a proximity pairing payload
 was found and lost every few seconds.
 
+**A monitor beside another client's discovery: the same machine and day (#189).** The
+probe ran beside LinuxPods, which discovered throughout (`Discovering` true at the
+start). Run D, twice:
+
+- 12 s, no pods advertising: `Activate` at once, and `DeviceFound` 5.5 s in for the
+  other Apple address above.
+- 8 s, the pair advertising: `DeviceFound` for both pods 147 ms and 162 ms in, each
+  device's proximity pairing payload in its properties, and no `InterfacesAdded`.
+  `RSSI` alone 3 to 4 times a second.
+
 **Discovery start: Pro 3 in the open case, not connected, 2026-11-02, ce9ed40 (#153).**
 
 - With nothing else discovering, the app restarted several times. Each time the battery
@@ -289,6 +309,15 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
   (#125).
 - Does GNOME's rename send the name as typed, so that typing the old name back sets an
   alias? A guess, not tried.
-- An advertisement monitor on the pods' proximity pairing data (#189): only the Intel
-  AX211, with the patterns in the controller, has run. Does an adapter without
-  `controller-patterns` behave the same? `examples/adv_monitor_probe.rs` shows it.
+- An advertisement monitor on the pods' proximity pairing data (#189), each shown by
+  `examples/adv_monitor_probe.rs`:
+  - When another client stops discovering, bluetoothd removes the pods' devices
+    ([Discovery](#discovery)). Does a monitor registered meanwhile report them found
+    again at once? Run D did not stop the other client.
+  - Is the 8 dBm rule ([Discovery](#discovery)) why `RSSI` alone is signaled so rarely
+    through a monitor? It fits, with no discovery filter in force; not checked.
+  - With privacy on (`Privacy` in `main.conf`), the background scan runs under a
+    resolvable private address. Does a device that directs its advertising at the public
+    address still connect then? Not run: the runs here had privacy off.
+  - Only the Intel AX211, with the patterns in the controller, has run. Does an adapter
+    without `controller-patterns` behave the same?

@@ -28,8 +28,8 @@ that someone building another client can use it without reading our code.
 - `aap/` - the Apple Accessory Protocol over L2CAP: the session, keys, battery, ear,
   noise control, the `0x09` settings, Conversation Awareness, device information, rename
 - `ble/` - Apple's proximity pairing advertisements, and the addresses they come from
-- `linux/` - the kernel's L2CAP, bluetoothd, zbus, and the desktop around them (MPRIS,
-  PipeWire, UPower): what they do that a client has to know
+- `linux/` - the kernel's L2CAP and LE scanning, bluetoothd, zbus, and the desktop around
+  them (MPRIS, PipeWire, UPower): what they do that a client has to know
 
 Names from our code - types, constants, functions - stay out of these documents, but
 for one line at the top pointing at the parser and at the `app/` document that uses
