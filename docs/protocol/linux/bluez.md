@@ -79,22 +79,37 @@ no connection. Once discovery stopped, the first report of the background scan w
 
 **An advertisement monitor is bluetoothd's passive way to hear advertisements**
 (`org.bluez.AdvertisementMonitorManager1`, BlueZ 5.87,
-`doc/org.bluez.AdvertisementMonitorManager.rst`, marked experimental). A client
-registers an `or_patterns` monitor per adapter. bluetoothd reports matches to it "no
-matter if there is an ongoing discovery session". The kernel folds the monitors into its
-background scan (Linux 7.2, `hci_update_passive_scan_sync`). That scan is passive, and
-never runs under a non-resolvable address: the public address with privacy off, a
-resolvable one with it on, "so that peer devices using direct advertising with our
-address will be correctly reported by the controller" (`hci_passive_scan_sync`).
+`doc/org.bluez.AdvertisementMonitorManager.rst`). A client registers an `or_patterns`
+monitor per adapter, and is told of matches "no matter if there is an ongoing discovery
+session" (`doc/org.bluez.AdvertisementMonitor.rst`). The kernel folds the monitors into
+its background scan (Linux 7.2, `hci_update_passive_scan_sync`). That scan is passive,
+and never runs under a non-resolvable address, "so that peer devices using direct
+advertising with our address will be correctly reported by the controller"
+(`hci_passive_scan_sync`):
 
-Two of the monitor's settings, from BlueZ 5.87's
-`doc/org.bluez.AdvertisementMonitor.rst` (read, not seen in a capture):
+| Privacy | The background scan's own address (`hci_update_random_address_sync`) |
+|---|---|
+| Off | The public address; the static random one where a static address is forced, the controller has no public address, or BR/EDR is off and a static address is set |
+| On | A resolvable private address |
 
-- `RSSISamplingPeriod` 0 propagates every advertisement from a device in range to
-  bluetoothd. What bluetoothd then signals to its clients is another matter: see the
-  `RSSI` below.
-- With `SupportedFeatures` `controller-patterns`, bluetoothd hands the patterns to a
-  controller that can match them. The Intel AX211 offers it (2026-11-06, #189).
+**The monitor interface is experimental.** BlueZ 5.87 offers `RegisterMonitor`,
+`UnregisterMonitor` and the manager's properties only while bluetoothd runs with its
+experimental interfaces on: `Experimental = true` in `main.conf`, or `-E`. The default
+is off (`src/adv_monitor.c`, where they are flagged experimental, and `gdbus/object.c`,
+which hides what is so flagged). Read, not run with them off: every run here had them on.
+The battery provider interface is not flagged so (`src/battery.c`).
+
+One setting of the monitor and one of the manager (BlueZ 5.87; read, not seen in a
+capture):
+
+- `RSSISamplingPeriod` 0 asks for every advertisement from a device in range; the
+  document says "propagated to the client". In the source, bluetoothd passes the period
+  to the kernel with the pattern and applies none itself ("Sampling period is not
+  implemented yet in userspace", `src/adv_monitor.c`). What it then signals to its
+  clients is another matter: see the `RSSI` below.
+- The manager's `SupportedFeatures` `controller-patterns`
+  (`doc/org.bluez.AdvertisementMonitorManager.rst`): the patterns go to a controller
+  that can match them. The Intel AX211 offers it (2026-11-06, #189).
 
 **Through a monitor, the pods' payload arrives and the mouse reconnects** (Pro 3, Intel
 AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
@@ -116,9 +131,9 @@ AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
 - The bonded mouse, switched off and on, reconnected while the monitor was registered.
   With discovery on as well, it was still unconnected 4 s after it was switched on.
 
-With discovery running beside it, the monitor went on reporting `DeviceFound` and
-`DeviceLost`: with the monitoring client's own discovery (runs B and C2), and with
-another client's (run D). Under another client's discovery, bluetoothd keeps the pods'
+With discovery running beside it, the monitor went on reporting: `DeviceFound` and
+`DeviceLost` with the monitoring client's own discovery (runs B and C2), and
+`DeviceFound` with another client's (run D). Under another client's discovery, bluetoothd keeps the pods'
 devices, so a monitor registered then hears of a pod in `DeviceFound` alone, with no
 `InterfacesAdded`; the payload is in the device's properties (run D).
 
@@ -236,11 +251,12 @@ a bonded MX Anywhere 3S, 2026-11-06, `sudo btmon -w` (#189).** Discovery by Linu
 | +8 ms | First report: the mouse's `ADV_DIRECT_IND`, directed to the adapter's public address. |
 | +10 ms | `LE Extended Create Connection`; `LE Enhanced Connection Complete` after 27 ms. |
 
-**An advertisement monitor instead of discovery: Intel AX211, BlueZ 5.87, a Pro 3 and the
-same mouse, 2026-11-06, `examples/adv_monitor_probe.rs` (#189).** LinuxPods quit. One
-`or_patterns` monitor on `4C 00 07`, `RSSISamplingPeriod` 0, no RSSI thresholds;
-`--discover` added discovery as the app starts it. Registration was accepted every
-time, with `Activate` within 1 ms. Markers were typed after each action, so they trail it
+**An advertisement monitor instead of discovery: Intel AX211, BlueZ 5.87 with
+`Experimental = true`, a Pro 3 and the same mouse, 2026-11-06,
+`examples/adv_monitor_probe.rs` (#189).** LinuxPods quit. One `or_patterns` monitor on
+`4C 00 07`, `RSSISamplingPeriod` 0, no RSSI thresholds; `--discover` added discovery
+with the app's discovery filter. Registration was accepted every time; `Activate` came
+1 ms after it in run 1. Markers were typed after each action, so they trail it
 by a few seconds.
 
 | Run | Steps | Seen |
@@ -311,6 +327,8 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
   alias? A guess, not tried.
 - An advertisement monitor on the pods' proximity pairing data (#189), each shown by
   `examples/adv_monitor_probe.rs`:
+  - Which distributions run bluetoothd with its experimental interfaces on, which the
+    monitor needs? And does a registration fail as read, with them off? Not run.
   - When another client stops discovering, bluetoothd removes the pods' devices
     ([Discovery](#discovery)). Does a monitor registered meanwhile report them found
     again at once? Run D did not stop the other client.
