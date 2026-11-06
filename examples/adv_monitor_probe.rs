@@ -1,6 +1,6 @@
 //! Listens for the pods through a BlueZ advertisement monitor instead of
-//! discovery, to answer the open questions of #189 before the scanner changes:
-//! why discovery blocks some devices, and what a monitor is, in
+//! discovery, to answer whether a monitor can take discovery's place (#189).
+//! Why discovery blocks some devices, and what a monitor is:
 //! [protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery-and-directed-advertising).
 //!
 //! It registers one `or_patterns` monitor on every adapter, matching
@@ -35,8 +35,10 @@
 //! monitor still registered: the same output with the active scan on, to
 //! compare the two.
 //!
-//! Quit LinuxPods first, and close GNOME Settings' Bluetooth panel: both
-//! discover. Decrypts nothing and prints no payload bytes. Prints the random
+//! bluetoothd offers the monitor only with its experimental interfaces on
+//! (`Experimental = true` in `/etc/bluetooth/main.conf`): without them every
+//! registration fails, and the probe stops. Quit LinuxPods first, and close
+//! GNOME Settings' Bluetooth panel: both discover. Decrypts nothing and prints no payload bytes. Prints the random
 //! address of every device in range that advertises proximity pairing data,
 //! other people's AirPods among them, or that the monitor reports found or
 //! lost, and the address of every device whose `Connected` changes or that is
@@ -84,7 +86,7 @@ trait Adapter1 {
     fn discovering(&self) -> zbus::Result<bool>;
 }
 
-/// What BlueZ tells the monitor.
+/// What BlueZ tells the monitor, each with the time it came.
 enum MonitorEvent {
     Activated,
     Released,
@@ -96,25 +98,31 @@ enum MonitorEvent {
 /// BlueZ 5.87's `doc/org.bluez.AdvertisementMonitor.rst`). No RSSI threshold
 /// is set, so none filters.
 struct Monitor {
-    events: mpsc::UnboundedSender<MonitorEvent>,
+    events: mpsc::UnboundedSender<(Instant, MonitorEvent)>,
+}
+
+impl Monitor {
+    fn tell(&self, event: MonitorEvent) {
+        let _ = self.events.send((Instant::now(), event));
+    }
 }
 
 #[interface(name = "org.bluez.AdvertisementMonitor1")]
 impl Monitor {
     fn release(&self) {
-        let _ = self.events.send(MonitorEvent::Released);
+        self.tell(MonitorEvent::Released);
     }
 
     fn activate(&self) {
-        let _ = self.events.send(MonitorEvent::Activated);
+        self.tell(MonitorEvent::Activated);
     }
 
     fn device_found(&self, device: OwnedObjectPath) {
-        let _ = self.events.send(MonitorEvent::Found(device));
+        self.tell(MonitorEvent::Found(device));
     }
 
     fn device_lost(&self, device: OwnedObjectPath) {
-        let _ = self.events.send(MonitorEvent::Lost(device));
+        self.tell(MonitorEvent::Lost(device));
     }
 
     #[zbus(property, name = "Type")]
@@ -230,8 +238,9 @@ async fn main() -> Result<()> {
         bail!("no adapter took the monitor");
     }
     if discover {
-        // After the subscription in `signals`, so the first advertisement
-        // from each address, in its InterfacesAdded, is heard.
+        // After the subscription in `signals`: an address's first
+        // advertisement comes in the InterfacesAdded that announces it
+        // ([protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery)).
         let scanning = linuxpods::ble::scanner::Scanner::with_connection(conn.clone())
             .start_discovery()
             .await?;
@@ -264,8 +273,8 @@ async fn main() -> Result<()> {
             },
             _ = tokio::signal::ctrl_c() => break,
             event = events.recv() => {
-                let Some(event) = event else { break };
-                let now = start.elapsed();
+                let Some((at, event)) = event else { break };
+                let now = at.duration_since(start);
                 match event {
                     MonitorEvent::Activated => println!("{} monitor activated", secs(now)),
                     MonitorEvent::Released => println!("{} monitor released", secs(now)),
@@ -301,8 +310,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// The device's properties as BlueZ holds them now: a device BlueZ kept
-/// from before is not announced again.
+/// The device's properties as BlueZ holds them now, for a device found with no
+/// InterfacesAdded
+/// ([protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery-and-directed-advertising)).
 async fn device_properties(
     conn: &Connection,
     path: &OwnedObjectPath,
@@ -396,8 +406,7 @@ fn handle(signal: Signal, now: Duration, heard: &mut HashMap<String, Heard>) {
                 println!("{} {addr}: added, {line}", secs(now));
                 entry(heard, &addr, now).payloads += 1;
             }
-            // Every device is announced with `Connected`; only one that comes
-            // connected says anything.
+            // Only a device announced connected is printed.
             if props
                 .get("Connected")
                 .and_then(|v| bool::try_from(v.clone()).ok())
@@ -421,7 +430,7 @@ fn handle(signal: Signal, now: Duration, heard: &mut HashMap<String, Heard>) {
                 && let Some(h) = heard.get_mut(&addr)
             {
                 h.rssi += 1;
-                h.last = now;
+                h.last = h.last.max(now);
             }
             connected(&addr, &props, now);
         }
@@ -453,11 +462,15 @@ fn connected(addr: &str, props: &HashMap<String, OwnedValue>, now: Duration) {
 }
 
 fn entry<'a>(heard: &'a mut HashMap<String, Heard>, addr: &str, now: Duration) -> &'a mut Heard {
+    // Monitor events and signals come on two channels, so one address's
+    // times may arrive out of order.
     let h = heard.entry(addr.to_string()).or_insert_with(|| Heard {
         first: now,
+        last: now,
         ..Heard::default()
     });
-    h.last = now;
+    h.first = h.first.min(now);
+    h.last = h.last.max(now);
     h
 }
 
