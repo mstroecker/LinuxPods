@@ -5,8 +5,8 @@
 //!
 //! It registers one `or_patterns` monitor on every adapter, matching
 //! manufacturer data that starts `4C 00 07` (Apple, proximity pairing), with
-//! `RSSISamplingPeriod` 0 so that every matching advertisement is passed on,
-//! and starts no discovery itself.
+//! `RSSISamplingPeriod` 0 and no RSSI threshold, and starts no discovery
+//! itself.
 //!
 //! It prints, with seconds since the start:
 //!
@@ -30,14 +30,17 @@
 //! summary per address: when first and last heard, payloads, `RSSI` signals
 //! and their rate, removals, and `DeviceFound` and `DeviceLost`.
 //!
-//! `--discover` also starts discovery on this connection, as the app's scanner
-//! does (`Scanner::start_discovery`), with the monitor still registered: the
-//! same output with the active scan on, to compare the two.
+//! `--discover` also starts discovery on this connection with
+//! `Scanner::start_discovery`, which sets the app's discovery filter, with the
+//! monitor still registered: the same output with the active scan on, to
+//! compare the two.
 //!
 //! Quit LinuxPods first, and close GNOME Settings' Bluetooth panel: both
 //! discover. Decrypts nothing and prints no payload bytes. Prints the random
-//! addresses the pods advertise from, and the address of every device whose
-//! `Connected` changes.
+//! address of every device in range that advertises proximity pairing data,
+//! other people's AirPods among them, or that the monitor reports found or
+//! lost, and the address of every device whose `Connected` changes or that is
+//! announced connected.
 //!
 //! Usage: cargo run --example adv_monitor_probe [-- --discover]
 
@@ -119,7 +122,8 @@ impl Monitor {
         "or_patterns".into()
     }
 
-    /// 0: every advertisement from a device in range is passed on.
+    /// 0, and what it asks of bluetoothd:
+    /// [protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery-and-directed-advertising).
     #[zbus(property, name = "RSSISamplingPeriod")]
     fn rssi_sampling_period(&self) -> u16 {
         0
@@ -169,8 +173,8 @@ async fn main() -> Result<()> {
     let root = format!("{}/probe_monitor", linuxpods::APP_PATH);
     let root_path = ObjectPath::try_from(root.as_str())?;
     let (events_tx, mut events) = mpsc::unbounded_channel();
-    // Served from the start: bluetoothd reads the monitors under the root
-    // through its ObjectManager as soon as it is registered.
+    // Both objects served at build, before `RegisterMonitor`:
+    // [app/bluez.md](../docs/app/bluez.md#connections-that-serve-objects).
     let conn = zbus::connection::Builder::system()?
         .serve_at(root.as_str(), zbus::fdo::ObjectManager)?
         .serve_at(format!("{root}/m0"), Monitor { events: events_tx })?
@@ -179,7 +183,7 @@ async fn main() -> Result<()> {
         .context("failed to connect to the system bus")?;
 
     let start = Instant::now();
-    let mut stream = signals(&conn).await?;
+    let mut signals = signals(&conn).await?;
 
     let adapters = bluez::adapters(&conn).await?;
     if adapters.is_empty() {
@@ -281,11 +285,9 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            msg = stream.next() => {
-                let Some(msg) = msg else { break };
-                let Ok(msg) = msg else { continue };
-                let Some(signal) = read_signal(&msg) else { continue };
-                handle(signal, start.elapsed(), &mut heard);
+            signal = signals.recv() => {
+                let Some((at, signal)) = signal else { break };
+                handle(signal, at.duration_since(start), &mut heard);
             }
         }
     }
@@ -314,15 +316,31 @@ async fn device_properties(
     Ok(props.get_all(iface).await?)
 }
 
-/// Every signal bluetoothd sends, in one stream so their order holds.
-async fn signals(conn: &Connection) -> Result<MessageStream> {
+/// Every signal bluetoothd sends, in one stream so their order holds, each with
+/// the time it was read. A task of its own drains the subscription as the
+/// signals arrive, so the calls to BlueZ in `main` never wait on an unread
+/// queue: [app/bluez.md](../docs/app/bluez.md#subscriptions-that-advertisements-reach).
+async fn signals(conn: &Connection) -> Result<mpsc::UnboundedReceiver<(Instant, Signal)>> {
     let rule = MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .sender(BLUEZ_SERVICE)?
         .build();
-    MessageStream::for_match_rule(rule, conn, Some(1024))
+    let mut stream = MessageStream::for_match_rule(rule, conn, None)
         .await
-        .context("failed to subscribe to BlueZ's signals")
+        .context("failed to subscribe to BlueZ's signals")?;
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = stream.next().await {
+            let Ok(msg) = msg else { continue };
+            let Some(signal) = read_signal(&msg) else {
+                continue;
+            };
+            if tx.send((Instant::now(), signal)).is_err() {
+                break;
+            }
+        }
+    });
+    Ok(rx)
 }
 
 fn read_signal(msg: &Message) -> Option<Signal> {

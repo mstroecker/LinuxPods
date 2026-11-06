@@ -38,9 +38,11 @@ Probe output is meant to be pasted into issues.
   does the same after a rename and in each `--sweep` step. So they print `0x2B`, the
   hosts the pair knows (a phone among them), and `0x0C`, `0x0E` and `0x2E`, which name
   this host or a pod ([protocol/aap/session.md](../protocol/aap/session.md#opcodes)).
-- **Device addresses, in `adv_monitor_probe`:** the random addresses the pods
-  advertise from, and the address of every device whose `Connected` changes - a mouse
-  or a keyboard among them.
+- **Device addresses, in `adv_monitor_probe`:** the random address of every device in
+  range that advertises proximity pairing data - other people's AirPods among them - or
+  that the monitor reports found or lost, and the address of every device whose
+  `Connected` changes or that is announced connected - a mouse or a keyboard among
+  them.
 - **Names,** where a probe reads them: the pods' name from the device information
   packet in `key_request`, `noise_probe` and `rename_probe`, and BlueZ's `Alias` in
   `rename_probe`. Either can be a personal name.
