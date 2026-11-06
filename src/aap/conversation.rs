@@ -32,9 +32,9 @@ pub const SETTING_OPCODE: u8 = noise::OPCODE;
 /// The speech level's opcode.
 pub const LEVEL_OPCODE: u8 = 0x4B;
 
-/// Conversation Awareness within the settings family. The family carries a
-/// dozen other sub-commands, so this has to be checked too - see
-/// [`is_setting_packet`].
+/// Conversation Awareness within the settings family. The family carries many
+/// other settings (`docs/protocol/aap/settings.md#sub-commands`), so this has
+/// to be checked too - see [`is_setting_packet`].
 const SUB_CONVERSATION_AWARENESS: u8 = 0x28;
 /// Where the settings family carries its sub-command, and the value.
 const SUB_CMD: usize = 6;
@@ -104,9 +104,9 @@ pub enum ConversationParseError {
 }
 
 /// The packet that turns Conversation Awareness on or off, as LibrePods has
-/// it, and as a Pro 3 took it (2026-11-02, #150). A persistent setting of the
-/// pods', most likely synced to the user's Apple devices as the allow-Off
-/// setting (`0x34`) is.
+/// it, and as a Pro 3 took it (2026-11-02, #150). A setting that persists on
+/// the pods; that it syncs to the user's Apple devices is a guess
+/// (`docs/protocol/aap/conversation-awareness.md#the-setting-0x09-sub-command-0x28`).
 pub fn set_packet(enabled: bool) -> [u8; 11] {
     let value = if enabled {
         noise::ENABLED

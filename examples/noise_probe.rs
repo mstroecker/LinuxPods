@@ -1,8 +1,8 @@
 //! Cycles the noise control modes and classifies everything that comes back.
 //!
-//! This is the tool the packet format in `docs/protocol/aap/noise-control.md` was verified
-//! with, ported from the Go original. It talks to the client directly rather than
-//! through the coordinator, so the device's answers can be read unfiltered - which
+//! It reproduces the exchanges `docs/protocol/aap/noise-control.md` records. It
+//! talks to the client directly rather than through the coordinator, so the
+//! device's answers can be read unfiltered - which
 //! is the whole point: what arrives after a mode change differs by model and by
 //! setting, and none of it is a usable acknowledgment - an echo about a second
 //! later on AirPods Pro 3, one on perhaps one change in four on AirPods 4, and
@@ -112,8 +112,8 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("not a MAC address: {arg}"))?;
 
     println!("connecting AAP to {mac}...");
-    // The session the app opens, the features included - without them,
-    // Adaptive is unavailable - but not the key request the app makes after.
+    // The session the app opens, the features packet included - LibrePods says
+    // Adaptive needs it - but not the key request the app makes after.
     let client = Client::new(mac).open().await?;
     println!("connected");
 
@@ -137,10 +137,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Off is the one mode recent firmware gates behind a setting of its own: the
-    // bare command above should have produced an error chime and no change. Ask
-    // again with that setting enabled, back to back and with no delay, exactly
-    // as the coordinator does it.
+    // Off is the one mode a Pro 3 and a Pro 2 (USB-C) gate behind a setting of
+    // their own: on them, the bare command above should have produced an error
+    // chime and no change (AirPods 4 took it). Ask again with that setting
+    // enabled, back to back and with no delay, as
+    // `Coordinator::set_noise_control` does it.
     println!("\n--- Off, with allow-off enabled ---");
     client.set_allow_off_listening_mode(true).await?;
     println!(

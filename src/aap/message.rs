@@ -8,7 +8,7 @@
 //! Awareness (0x28) are read - the proximity keys (0x31) and the speech
 //! level (0x4B), and the pods' name and firmware version in the device
 //! information packet (0x1D). Each parser checks what is its own beyond
-//! that, as it always has.
+//! that.
 
 use crate::aap::battery::{self, BatteryInfo, BatteryParseError};
 use crate::aap::conversation::{self, ConversationParseError};
@@ -35,8 +35,9 @@ pub fn opcode(packet: &[u8]) -> Option<u8> {
 /// A packet from the device, as far as the app reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
-    /// A battery report: at the start of a session, and whenever a level or
-    /// a charging state changes.
+    /// A battery report: at the start of a session, at a role switch and at
+    /// a lid change. When else one comes is an open question:
+    /// `docs/protocol/aap/battery.md#open-questions`.
     Battery(BatteryInfo),
     /// Where each pod is, the primary pod's place first: once as the link
     /// comes up, and whenever a pod goes into or out of an ear or the case.
@@ -45,7 +46,8 @@ pub enum Message {
     /// comes up, before the first [`Message::Ear`], and at a role switch.
     Primary(Option<PodSide>),
     /// A noise control mode report: in the startup dump, now and then as the
-    /// echo of a mode set here, and when the mode is changed elsewhere.
+    /// echo of a mode set here, and unasked when the mode changes - which
+    /// changes, `docs/protocol/aap/noise-control.md#unsolicited-mode-changes`.
     NoiseMode(NoiseMode),
     /// Whether Conversation Awareness is on: in the startup dump. Whether
     /// the pods report it when it changes is not known.
@@ -63,9 +65,8 @@ pub enum Message {
     /// own error: the packet as a whole does not fail.
     DeviceInfo(DeviceInfo),
     /// Anything else: another opcode, another setting of the 0x09 family, or
-    /// one of the opcodes above too short to be what it names, as the parsers
-    /// have always passed those over. `None` for a packet without the
-    /// [`HEADER`].
+    /// one of the opcodes above too short to be what it names. `None` for a
+    /// packet without the [`HEADER`].
     Unknown { opcode: Option<u8> },
 }
 
@@ -300,8 +301,8 @@ mod tests {
         }
     }
 
-    /// Too short to be what their opcode names, as the parsers have always
-    /// passed them over: no battery count, no key count, no mode byte, no
+    /// Too short to be what their opcode names, these decode as unknown: no
+    /// battery count, no key count, no mode byte, no
     /// setting's value, no second place, no primary, no level, no name. A
     /// battery packet needs byte 5 to be zero as well.
     #[test]
@@ -328,11 +329,10 @@ mod tests {
         }
     }
 
-    /// The header is checked once, for every kind. A noise control report
-    /// used to be recognized by bytes 4 and 6 alone, whatever came before
-    /// them, while battery and key packets needed the header: a packet of
-    /// another kind - shaped as the handshake's answer, say - that carried
-    /// 0x09 and 0x0D there would have read as a mode.
+    /// The header is checked for every kind, whatever bytes 4 and 6 carry: a
+    /// mode report and a battery packet, each with another first byte, and
+    /// packets too short for the header decode as unknown, with no opcode, and
+    /// [`noise::is_noise_mode_packet`] refuses the mode report's lookalike too.
     #[test]
     fn a_packet_without_the_header_is_unknown() {
         let mut lookalike = noise::set_packet(NoiseMode::Off);

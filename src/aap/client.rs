@@ -264,8 +264,8 @@ impl Client {
 
         let sa = SocketAddr {
             addr: self.addr,
-            // AirPods use a classic (BR/EDR) address for AAP, matching the Go
-            // version's bdaddr_type = 0.
+            // AAP runs over BR/EDR, so the pair's classic address: bdaddr_type
+            // 0 (`docs/protocol/aap/session.md#step-1-connect-to-airpods`).
             addr_type: AddressType::BrEdr,
             psm: AAP_PSM,
             cid: 0,
@@ -367,8 +367,9 @@ impl Client {
     /// on, its levels 08 and 09 come around the change, naming no mode.
     /// There is nothing here to wait for - the caller updates its own state
     /// optimistically.
-    /// `enable_special_features` must have been sent first, or Adaptive is
-    /// unavailable.
+    /// LibrePods says Adaptive needs `enable_special_features` sent first;
+    /// not checked here
+    /// (`docs/protocol/aap/session.md#prerequisites-the-features-packet`).
     pub async fn set_noise_mode(&self, mode: noise::NoiseMode) -> Result<()> {
         self.send_packet(&noise::set_packet(mode), "noise control")
             .await
@@ -376,9 +377,11 @@ impl Client {
 
     /// Permits, or forbids, Off as a listening mode.
     ///
-    /// Recent firmware refuses a bare Off command with an error chime; this is
-    /// the setting that gates it. Persistent on the device and idempotent, so it
-    /// is worth sending only when Off is actually wanted.
+    /// A Pro 3 and a Pro 2 (USB-C) refuse a bare Off command with an error
+    /// chime; this is the setting that gates it. That it persists on the pods
+    /// is a guess
+    /// (`docs/protocol/aap/noise-control.md#off-has-a-prerequisite-of-its-own`),
+    /// so it is worth sending only when Off is actually wanted.
     pub async fn set_allow_off_listening_mode(&self, allowed: bool) -> Result<()> {
         self.send_packet(
             &noise::allow_off_packet(allowed),
