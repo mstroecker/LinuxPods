@@ -52,16 +52,16 @@ that resolved, each with the IRK that resolved it (`rpa::ResolvedAddresses`):
 - **Checked again on every hit** against the IRK stored now.
 - **Only addresses that resolved.** An address no IRK resolves is never remembered, so a
   spammer rotating addresses grows nothing. It is resolved again with each advertisement,
-  which costs what trying every key on it used to.
+  at one AES block per stored IRK.
 - **A std mutex beside `inner`,** taken alone and never held across an await.
 
 ## Pairs with no IRK
 
-The keystore kept only the ENC_KEY until format version 2
-([keystore.md](keystore.md#the-file)). A pair keyed then has no IRK until its next AAP
+A keystore file of format version 1 holds ENC_KEYs and no IRKs
+([keystore.md](keystore.md#the-file)). A pair keyed in one has no IRK until its next AAP
 connection brings one, as the keys are requested on every connection. Until then it is
-identified by its ENC_KEY alone, as before: its key is tried on every advertisement no
-stored IRK resolves. The same holds for a pair whose key packet brought a new ENC_KEY and
+identified by its ENC_KEY alone: its key is tried on every advertisement no stored IRK
+resolves. The same holds for a pair whose key packet brought a new ENC_KEY and
 no usable IRK ([keystore.md](keystore.md#which-keys-are-taken)).
 
 ## The suffix

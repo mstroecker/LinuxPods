@@ -85,9 +85,8 @@ took no battery at all.
 So attachment's connection is a `bluez::ProviderConnection`, which only
 `bluez::connection` builds, and the fake world's come from `harness::connect_serving`.
 The ObjectManager `bluez::connection` serves, over every provider root, is there only to
-have something served. It never emits: zbus signals from the nearest ObjectManager above
-an object, each root's own (`Node::get_child_mut` in zbus 5.19.0's
-`src/object_server/node.rs`).
+have something served. It never emits, as each root serves an ObjectManager of its own
+nearer the batteries ([protocol/linux/zbus.md](../protocol/linux/zbus.md#which-objectmanager-signals)).
 
 ## Subscriptions that advertisements reach
 
