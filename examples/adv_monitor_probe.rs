@@ -295,7 +295,15 @@ async fn main() -> Result<()> {
                     MonitorEvent::Lost(path) => {
                         let addr = address(path.as_str());
                         println!("{} {addr}: DeviceLost", secs(now));
-                        entry(&mut heard, &addr, now).lost += 1;
+                        // Nothing is heard in a loss: it moves neither time.
+                        heard
+                            .entry(addr)
+                            .or_insert_with(|| Heard {
+                                first: now,
+                                last: now,
+                                ..Heard::default()
+                            })
+                            .lost += 1;
                     }
                 }
             }
