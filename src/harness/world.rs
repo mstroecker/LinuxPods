@@ -116,7 +116,8 @@ pub const DEFAULT_ADAPTER: &str = "hci0";
 /// still gives an address ten advertisements before it rotates.
 pub const ADVERTISING_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Room for any AAP packet the app sends; the longest is 16 bytes.
+/// Room for any AAP packet the app sends, a rename (`aap::name`) among
+/// them.
 const READ_BUF_LEN: usize = 1024;
 
 /// The fake world. Clones share it.
@@ -1181,7 +1182,7 @@ mod tests {
         let (bus, world, dir) = world().await;
         let client = aap(&dir, MAC).await;
 
-        // Back once the pair has answered it, and told where its pods are.
+        // Back once the pair has answered it, and sent the hosts it knows.
         handshake(&client).await;
         client.request_battery_status().await.unwrap();
         let info = parse_battery_packet(&next_packet(&client).await.unwrap()).unwrap();

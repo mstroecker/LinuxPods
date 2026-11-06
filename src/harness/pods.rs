@@ -1104,12 +1104,12 @@ impl Pods {
     /// #71 captures and the hardware checks since, with the pods worn and
     /// connected to this host or to nothing, it changed again about 5 s, 30 s
     /// and 60 s after such a change with nothing else changing, and then
-    /// stayed - 163 s in the longest stretch. Those gaps of 25 and 30 s are
-    /// most likely the 20-30 s refresh once recorded here. On 2026-11-02 a
-    /// pair idle in the open case, connected to a phone, sent the same
-    /// payload for minutes (#153). The fake leaves out the three changes
-    /// after an event, which carry nothing new to read: the app reads the
-    /// state, and the state is the same.
+    /// stayed - 163 s in the longest stretch. The gaps of 25 and 30 s may be
+    /// a periodic refresh, a guess (`docs/protocol/ble/proximity-pairing.md`,
+    /// Update Frequency). On 2026-11-02 a pair idle in the open case,
+    /// connected to a phone, sent the same payload for minutes (#153). The
+    /// fake leaves out the three changes after an event, which carry nothing
+    /// new to read: the app reads the state, and the state is the same.
     ///
     /// A pod out of the case while the other is in the closed case cannot
     /// reach the case, and sends its level as unknown, as the worn pod did in
@@ -1713,7 +1713,9 @@ mod tests {
 
     const MAC: Address = Address::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
-    // What `aap::client` sends, spelled out so a change on the wire shows here.
+    // What a link sends as it comes up - `aap::Client::open`'s requests, and
+    // the key request `Coordinator::open_aap` adds - spelled out so a change
+    // on the wire shows here.
     const HANDSHAKE: [u8; 16] = [
         0x00, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00,
@@ -3055,8 +3057,9 @@ mod tests {
         assert_eq!(pods.quirks.refuse_aap, 0);
     }
 
-    /// The battery and the startup dump wait for the report delay, and come
-    /// together once it is over.
+    /// The battery waits for the report delay, and comes with the rest of
+    /// the answer to the notification request once it is over; the startup
+    /// dump waits [`DUMP_DELAY`] longer.
     #[test]
     fn the_report_waits_for_its_delay() {
         let mut pods = Pods::new(PRO_3, MAC);
