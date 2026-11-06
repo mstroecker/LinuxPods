@@ -163,8 +163,8 @@ pub fn parse_proximity_data(data: &[u8]) -> Result<ProximityData, ParseError> {
 
     let mut pd = ProximityData {
         // Little-endian, which makes it the product ID BlueZ's `Modalias` carries
-        // (`p2027` for AirPods Pro 3). Read big-endian, as it once was, the same
-        // model came out as 0x2720 - a second number for one device.
+        // (`p2027` for AirPods Pro 3). Read big-endian, the same model would be
+        // 0x2720 - a second number for one device.
         product_id: u16::from_le_bytes([payload[1], payload[2]]),
         status,
         is_flipped,
@@ -292,7 +292,10 @@ impl Cleartext {
             | u8::from(self.both_in_case) << 2
             | u8::from(bit1_in_ear) << 1;
 
-        // The primary pod takes the high battery nibble and charging bit 4.
+        // The sending pod, the "primary" of status bit 5, takes charging bit 4
+        // and, as `parse_proximity_data` reads it, the high battery nibble.
+        // Which nibble is the sender's is open: see
+        // `docs/app/identification.md#hardware-checks`.
         let (high, low) = if is_flipped {
             (self.right_battery, self.left_battery)
         } else {
@@ -612,8 +615,10 @@ mod tests {
     /// From the first #71 capture: with the left pod in the open case and the
     /// right worn, both advertise. The worn pod's `0x13` reads no lid, but its
     /// status bit 4 says a pod is in the case - the left pod, whose `0x73` reads
-    /// the lid. With no pod in the case bit 4 is clear: both worn, both on the
-    /// desk, one in hand.
+    /// the lid. Bit 4 is clear in `0x0b`, both worn, and `0x01`, both on the
+    /// desk, with no pod in the case; and in `0x29`, the left pod in hand while
+    /// the right was already in the case, which the rule for bit 4 does not
+    /// explain (`docs/protocol/ble/proximity-pairing.md#open-questions`).
     #[test]
     fn a_worn_pod_says_when_its_partner_is_in_the_case() {
         let parse = |cleartext: [u8; 9]| {
@@ -743,10 +748,10 @@ mod tests {
         }
     }
 
-    /// Byte 6's high nibble is no gate: 0x5 appears only in the September
-    /// captures, all with the case charging, so it may follow the case's
-    /// charging rather than the pods. Out of the case by the status byte, a 0x5
-    /// lid byte says nothing.
+    /// Byte 6's high nibble is no gate: `0x5` comes from a pod in a charging
+    /// case (`docs/protocol/ble/proximity-pairing.md#byte-6-lid-state`), but
+    /// the status byte alone decides whether the lid is read. With status
+    /// `0x0b`, both pods worn, a `0x51` or `0x59` lid byte reports no lid.
     #[test]
     fn a_0x5_lid_byte_alone_reports_no_lid() {
         for lid in [0x51, 0x59] {

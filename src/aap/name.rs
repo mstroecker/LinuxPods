@@ -64,8 +64,8 @@ pub fn rename_packet(name: &str) -> Result<Vec<u8>, NameError> {
 }
 
 /// The rename packet for `name` as given, of any length the length byte can
-/// hold: for a probe to reach past what the pods keep, as the name run did.
-/// The app sends [`rename_packet`]'s. Only the probe's `--sweep` uses it.
+/// hold: for a probe, or a test of the fake pods, to reach past what the pods
+/// keep, as the name run did. The app sends [`rename_packet`]'s.
 ///
 /// # Panics
 ///

@@ -1,8 +1,8 @@
 //! AAP proximity keys: the request for them, and the packet that carries them.
 //!
-//! Packet layout:
-//!   0-1: header (04 00)   2-3: command (04 00)
-//!   4:   key marker 0x31  5: unknown   6: key count
+//! Packet layout (`docs/protocol/aap/keys.md#key-packet-format`):
+//!   0-3: header (04 00 04 00, [`HEADER`])
+//!   4:   opcode 0x31   5: unknown   6: key count
 //! Then per key: [type] [unknown] [len] [unknown] [data...]
 
 use crate::KEY_LEN;

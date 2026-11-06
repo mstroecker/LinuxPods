@@ -3,10 +3,12 @@
 //! Format: 04 00 04 00 09 00 [sub-command] [value] 00 00 00
 //!
 //! The mode packet serves both directions - we send it to switch mode, and the
-//! device sends it in its startup dump and whenever the mode is changed from
-//! another device. Off additionally needs sub-command 0x34, the setting that
-//! permits it at all. See `docs/protocol/aap/noise-control.md` for the verified layout
-//! and why the response cannot be used as an acknowledgment.
+//! device sends it in its startup dump, as the echo of a mode set (on some
+//! models, not after every change), and unasked when the mode changes: which
+//! changes, `docs/protocol/aap/noise-control.md#unsolicited-mode-changes`. On
+//! a Pro 3 and a Pro 2 (USB-C), Off also needs sub-command 0x34 first, the
+//! setting that permits it. See `docs/protocol/aap/noise-control.md` for the
+//! verified layout and why the response cannot be used as an acknowledgment.
 
 use std::time::{Duration, Instant};
 
@@ -21,21 +23,22 @@ const MODE: usize = 7;
 pub const OPCODE: u8 = CMD_SETTINGS;
 const CMD_SETTINGS: u8 = 0x09;
 
-/// Enables Conversation Awareness and adaptive transparency. Without it,
-/// Adaptive is unavailable - see [`set_packet`] - and, LibrePods says,
-/// Conversation Awareness works only while nothing plays - see
-/// [`crate::aap::conversation`].
+/// The features packet. LibrePods says it enables Adaptive and lets
+/// Conversation Awareness work while audio plays - see [`set_packet`] and
+/// [`crate::aap::conversation`]. What fails without it is an open question:
+/// `docs/protocol/aap/session.md#prerequisites-the-features-packet`.
 pub const ENABLE_FEATURES: [u8; 14] = [
     HEADER[0], HEADER[1], HEADER[2], HEADER[3], 0x4D, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00,
 ];
-/// Noise control within that family. The family carries a dozen other
-/// sub-commands, so this has to be checked too - see [`is_noise_mode_packet`].
+/// Noise control within that family. The family carries many other settings
+/// (`docs/protocol/aap/settings.md#sub-commands`), so this has to be checked
+/// too - see [`is_noise_mode_packet`].
 const SUB_NOISE_CONTROL: u8 = 0x0D;
 
-/// Whether Off is allowed as a listening mode at all. Recent firmware refuses
-/// [`NoiseMode::Off`] with an error chime unless this is enabled - see
-/// [`allow_off_packet`].
+/// Whether Off is allowed as a listening mode at all. A Pro 3 and a Pro 2
+/// (USB-C) refuse [`NoiseMode::Off`] with an error chime unless this is
+/// enabled - see [`allow_off_packet`].
 const SUB_ALLOW_OFF: u8 = 0x34;
 
 /// The enable/disable values shared by the boolean settings in this family.
@@ -118,7 +121,7 @@ pub const STALE_REPORT_WINDOW: Duration = Duration::from_secs(2);
 ///
 /// A command's mode is taken at once: the device's answer cannot confirm it -
 /// see the module docs. Its reports are taken as they come, the startup dump
-/// and a mode changed from a phone among them, with one exception. After Off
+/// and a mode changed elsewhere among them, with one exception. After Off
 /// was set from Noise Cancellation, a pair reported Noise Cancellation 0.33 s
 /// later and Off only at 1.4 s, and taken as it came, that report put the
 /// previous mode back on show for a second (#113). So a report of the mode
@@ -242,11 +245,13 @@ pub fn set_packet(mode: NoiseMode) -> [u8; 11] {
 
 /// The packet that permits, or forbids, Off as a listening mode.
 ///
-/// Recent firmware treats Off as opt-in: without this the AirPods answer
+/// Without this, a Pro 3 and a Pro 2 (USB-C) answer
 /// `set_packet(NoiseMode::Off)` with an error chime and stay in the mode they
-/// were in. Apple gates it because loud sound reduction does not apply with
-/// noise control off. It is a persistent device setting - the same switch the
-/// user sees in iOS - so enabling it is not something to do unasked.
+/// were in. AirPods 4 took a bare Off; which firmware brought the gate is not
+/// known. Why Apple gates Off, and that this is the switch the user sees on an
+/// iPhone, persisting on the pods, are guesses:
+/// `docs/protocol/aap/noise-control.md#off-has-a-prerequisite-of-its-own`.
+/// Should it persist, it is not a setting to send unasked.
 pub fn allow_off_packet(allowed: bool) -> [u8; 11] {
     settings_packet(SUB_ALLOW_OFF, if allowed { ENABLED } else { DISABLED })
 }
@@ -295,7 +300,8 @@ pub fn parse_allow_off_packet(packet: &[u8]) -> Option<bool> {
 /// byte 6.
 ///
 /// Byte 6 matters as much as byte 4: the 0x09 family also carries 0x17, 0x1B,
-/// 0x24 and a dozen more sub-commands, all of which arrive in the startup dump.
+/// 0x24 and the rest of the settings in the startup dump
+/// (`docs/protocol/aap/settings.md#sub-commands`).
 /// Treating any 0x09 packet as noise control reads an unrelated setting's value
 /// as a mode.
 pub fn is_noise_mode_packet(packet: &[u8]) -> bool {

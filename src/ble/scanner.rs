@@ -185,8 +185,7 @@ impl Scanner {
         Ok(())
     }
 
-    /// Yields advertisements as they arrive. Replaces the Go version's
-    /// ScanForAirPods(timeout) polling call with a stream the coordinator drives.
+    /// Yields advertisements as they arrive, as a stream.
     ///
     /// The stream may be read at the caller's pace, with calls to BlueZ on the
     /// scanner's connection in between - [`Scanning`] makes them whenever
