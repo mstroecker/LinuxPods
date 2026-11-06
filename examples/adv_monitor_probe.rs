@@ -5,8 +5,8 @@
 //!
 //! It registers one `or_patterns` monitor on every adapter, matching
 //! manufacturer data that starts `4C 00 07` (Apple, proximity pairing), with
-//! `RSSISamplingPeriod` 0 and no RSSI threshold, and starts no discovery
-//! itself.
+//! `RSSISamplingPeriod` 0 and no RSSI threshold of its own, and starts no
+//! discovery itself.
 //!
 //! It prints, with seconds since the start:
 //!
@@ -99,7 +99,8 @@ enum MonitorEvent {
 
 /// The monitor BlueZ reads and calls (`org.bluez.AdvertisementMonitor1`,
 /// BlueZ 5.87's `doc/org.bluez.AdvertisementMonitor.rst`). No RSSI threshold
-/// is set, so none filters.
+/// is set; bluetoothd puts its defaults in their place:
+/// [protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery-and-directed-advertising).
 struct Monitor {
     events: mpsc::UnboundedSender<(Instant, MonitorEvent)>,
 }
