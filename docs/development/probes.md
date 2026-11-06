@@ -14,7 +14,8 @@ as [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md) cou
   The probe opens AAP to it, as the app does.
 - **Quit LinuxPods first** for `irk_probe`, `rename_probe` and
   `conversation_awareness --duck`, so the probe's AAP session is the only one, or the
-  only thing lowering the volume. The other probes say nothing either way.
+  only thing lowering the volume, and for `adv_monitor_probe`, so that nothing
+  discovers. The other probes say nothing either way.
 - **The session is the app's** (`aap::Client::open`), the features packet included and
   the key request left out. Only `key_request` and `irk_probe` ask for keys. How the app
   opens a link: [app/aap-links.md](../app/aap-links.md#opening-a-link).
@@ -37,6 +38,9 @@ Probe output is meant to be pasted into issues.
   does the same after a rename and in each `--sweep` step. So they print `0x2B`, the
   hosts the pair knows (a phone among them), and `0x0C`, `0x0E` and `0x2E`, which name
   this host or a pod ([protocol/aap/session.md](../protocol/aap/session.md#opcodes)).
+- **Device addresses, in `adv_monitor_probe`:** the random addresses the pods
+  advertise from, and the address of every device whose `Connected` changes - a mouse
+  or a keyboard among them.
 - **Names,** where a probe reads them: the pods' name from the device information
   packet in `key_request`, `noise_probe` and `rename_probe`, and BlueZ's `Alias` in
   `rename_probe`. Either can be a personal name.
@@ -240,3 +244,30 @@ refuse - empty, with a NUL, over 127 bytes - is refused before connecting.
   devices keep the name they have.
 
 - **Never prints** serial numbers: of the device information packet, only the name.
+
+## `adv_monitor_probe`
+
+Listens for the pods through a BlueZ advertisement monitor instead of discovery, to
+answer whether a monitor can take discovery's place (#189). Why discovery blocks some
+devices, and what a monitor is:
+[protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising).
+
+```bash
+cargo run --example adv_monitor_probe [-- --discover]
+```
+
+It registers one monitor on every adapter, matching Apple's proximity pairing data, and
+starts no discovery. It prints each adapter's `Discovering` and every change of it, the
+monitor's `Activate`, `Release`, `DeviceFound` and `DeviceLost`, each proximity pairing
+payload BlueZ signals, each such device's removal, and every device's `Connected`
+change. `RSSI` signals are counted. A typed line is printed as a timestamped marker; `q`
+or ctrl-c unregisters the monitor and prints a summary per address.
+
+- **`--discover`** also starts discovery, as the app does, with the monitor still
+  registered: the same output with the active scan on, to compare the two.
+- **Close GNOME Settings' Bluetooth panel** as well: it discovers too. A run says
+  something about the passive scan only while every adapter reads `discovering=false`.
+- **To check a device that reconnects by directed advertising,** switch it off and on
+  during the run and look for its `Connected=true`.
+- **Never prints** payload bytes: only the model, the status byte and the length.
+- **Prints** device addresses: [What the output shows](#what-the-output-shows).
