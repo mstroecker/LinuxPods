@@ -106,11 +106,37 @@ Releases, the fake world and where it departs from the hardware, and the probes 
 13. **US English** (color, behavior), plain words, and one convention for byte offsets,
     stated once at the top of each document that uses them.
 
+## Code comments
+
+A comment says what the code beside it does and why, and links to a document here for
+the evidence. The rules for every document hold for comments too. The rules below are
+the ways comments went wrong anyway.
+
+1. **A protocol fact is linked, not restated.** A comment that needs a fact about the
+   AirPods or the Linux stack points at the `protocol/` section that has it. A comment
+   that states the fact all the same carries the status the document gives it -
+   "LibrePods says", "a guess", "open" - and changes when the document does. Where
+   the code and a document disagree, the comment says the question is open, and
+   takes neither side.
+2. **No history.** A comment says what the code does, not what it replaced: no "the Go
+   version", "used to", "as before", "the old way". History stays in the issue and
+   the commit. A comment that names the bug a line guards against, with its issue
+   number, gives a reason, not history.
+3. **Only what the code beside it makes true.** A claim about other code - what another
+   module sends, who calls a function, what a library emits - goes unseen when that
+   code changes. Name the item, so that a search for it finds the comment, or leave the
+   claim out. A guarantee a comment states - a lock held, an order kept - holds only
+   if the code under it enforces it.
+4. **The long explanation goes in `app/`.** A comment is a line or two and a link. A
+   module doc that retells its `app/` document drifts from it.
+5. **A test's doc says what the test asserts.** A change to the asserts rewrites the doc
+   in the same edit.
+
 ## Where else
 
 - `README.md` at the root says what the app does, for users: features, installing,
   usage. It links here for how.
 - `AGENTS.md` holds the rules for working in this repository: one line per invariant,
   with a link to the `app/` or `protocol/` document that says why.
-- Code comments say what the code does and link here for the evidence. A comment that
-  needs a capture to justify itself points at the document that has it.
+- Code comments say what the code does and link here for the evidence: see
+  [Code comments](#code-comments).
