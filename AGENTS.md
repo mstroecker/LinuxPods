@@ -395,7 +395,7 @@ A `Co-Authored-By:` trailer is fine.
 
 [`docs/protocol/linux/`](docs/protocol/linux/) - the stack under the app:
 - [`l2cap.md`](docs/protocol/linux/l2cap.md) - a connect that returns with the channel still pending (#136)
-- [`bluez.md`](docs/protocol/linux/bluez.md) - discovery, adapters and restarts, providers, `MediaTransport1.Volume`, names
+- [`bluez.md`](docs/protocol/linux/bluez.md) - discovery and what it blocks, advertisement monitors, adapters and restarts, providers, `MediaTransport1.Volume`, names
 - [`zbus.md`](docs/protocol/linux/zbus.md) - queues, the object server's dispatch, senders, order across subscriptions
 - [`desktop.md`](docs/protocol/linux/desktop.md) - PipeWire, MPRIS, a press on a pod, UPower
 
