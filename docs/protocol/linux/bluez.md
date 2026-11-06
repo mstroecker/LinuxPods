@@ -100,15 +100,20 @@ experimental, and `gdbus/object.c` hides what is so flagged. Read, not run with 
 off: every run here had them on.
 The battery provider interface is not flagged so (`src/battery.c`).
 
-One setting of the monitor and one of the manager (BlueZ 5.87; read, not seen in a
-capture):
+Settings of the monitor and of the manager (BlueZ 5.87; read, not seen in a capture):
 
 - `RSSISamplingPeriod` 0 asks for every advertisement from a device in range; the
   document says all advertisement packets from in-range devices "would be propagated".
-  In the source, bluetoothd passes the period
-  to the kernel with the pattern and applies none itself ("Sampling period is not
-  implemented yet in userspace", `src/adv_monitor.c`). What it then signals to its
+  In the source, bluetoothd passes the period to the kernel with the pattern and applies
+  none itself ("Sampling period is not implemented yet in userspace",
+  `src/adv_monitor.c`). What it then signals to its
   clients is another matter: see the `RSSI` below.
+- A `RSSISamplingPeriod` that is set makes bluetoothd fill in the thresholds the monitor
+  leaves unset: -127 dBm low and high, a 5 s low timeout and a 10 s high one. The kernel
+  gets the low threshold and its 5 s timeout, and a high timeout of 0, as it supports
+  none (`src/adv_monitor.c`). So such a monitor reports a device lost 5 s after its last
+  advertisement: read, not timed for the pods. Another Apple device, heard only
+  briefly, was lost 5.0 s after it was found, several times (runs A, C and C2).
 - The manager's `SupportedFeatures` `controller-patterns`
   (`doc/org.bluez.AdvertisementMonitorManager.rst`): the patterns go to a controller
   that can match them. The Intel AX211 offers it (2026-11-06, #189).
@@ -122,15 +127,17 @@ AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
   after the marker typed once the lid had closed (run A; 7.8 s and 9.5 s with discovery
   on as well, run B). In run 1, bluetoothd removed a lost pod's device 25 s after its
   `DeviceLost`.
-- A pair idle in the open case when the monitor was registered was heard 145 ms and
-  177 ms after `Activate`. A discovery start in the same conditions heard it after 89 ms
-  and 111 ms.
+- A pair idle in the open case when the monitor was registered was heard 119 ms and
+  151 ms after `Activate`. A discovery start in the same conditions heard it after 47 ms
+  and 69 ms.
 - A pair whose lid opened while the monitor was registered was heard about as soon as
   under discovery, within the seconds a typed marker resolves.
 - While the lid was open, about as many payloads were signaled as under discovery (runs
   A and B); idle in the open case, more (runs C and C2).
-- `RSSI` alone was signaled far less often: idle in the open case, 2 or 3 times in 62 s,
-  against 2.6 times a second under discovery. No `DeviceLost` came meanwhile.
+- `RSSI` alone was signaled far less often: idle in the open case, 2 or 3 times in the
+  first 3 s and none in the 62 s after, against 2.6 to 2.7 times a second throughout
+  under discovery. No `DeviceLost` came meanwhile; with the 5 s low timeout above, that
+  suggests the pods were still heard, only not signaled.
 - The bonded mouse, switched off and on, reconnected while the monitor was registered.
   With discovery on as well, it was still unconnected 4 s after it was switched on.
 
@@ -257,18 +264,19 @@ a bonded MX Anywhere 3S, 2026-11-06, `sudo btmon -w` (#189).** Discovery by Linu
 **An advertisement monitor instead of discovery: Intel AX211, BlueZ 5.87 with
 `Experimental = true`, a Pro 3 and the same mouse, 2026-11-06,
 `examples/adv_monitor_probe.rs` (#189).** LinuxPods quit. One `or_patterns` monitor on
-`4C 00 07`, `RSSISamplingPeriod` 0, no RSSI thresholds; `--discover` added discovery
-with the app's discovery filter. Registration was accepted every time; `Activate` came
-1 ms after it in run 1. Markers were typed after each action, so they trail it
-by a few seconds.
+`4C 00 07`, `RSSISamplingPeriod` 0, no RSSI thresholds of its own (bluetoothd's defaults
+in their place: [above](#discovery-and-directed-advertising)); `--discover` added
+discovery with the app's discovery filter. Registration was accepted every time;
+`Activate` came 1 ms after it in run 1. Markers were typed after each action, so they
+trail it by a few seconds.
 
 | Run | Steps | Seen |
 |---|---|---|
 | 1: monitor, 161 s, unmarked | Pods and mouse handled | `Discovering` false at the start, and a change to false at 38 s with no change to true before it: something touched discovery. 19 and 23 payloads, all after 46 s. A pod lost, its device removed 25 s later. Mouse `Connected` false, then true 13.4 s later. |
 | A: monitor, 48 s | Lid closed, opened, closed; mouse off and on | Pods heard 2.8 s before the `lid open` marker and 3.2 s apart; 15 and 10 payloads. Lost 9.6 s and 10.0 s after the `lid closed` marker. Mouse connected before the `mouse on` marker. |
 | B: `--discover`, 41 s | The same | Pods heard 2.0 s before the marker and 3.5 s apart; 15 and 13 payloads. Lost 7.8 s and 9.5 s after the marker. Mouse unconnected 4.3 s after the marker, at the end. |
-| C: monitor, 65 s | Lid open and pods idle for 60 s or more before the start | Pods heard 145 ms and 177 ms after `Activate`. 3 and 2 payloads, all in the first 2.8 s; 2 and 3 `RSSI` signals; no `DeviceLost` for the pods. |
-| C2: `--discover`, 66 s | The same | Pods heard 89 ms and 111 ms after discovery started. 1 payload each; `RSSI` 2.6 a second throughout; no `DeviceLost` for the pods. |
+| C: monitor, 65 s | Lid open and pods idle for 60 s or more before the start | Pods heard 119 ms and 151 ms after `Activate`. 3 and 2 payloads, all in the first 0.7 s; 2 and 3 `RSSI` signals; no `DeviceLost` for the pods. |
+| C2: `--discover`, 66 s | The same | Pods heard 47 ms and 69 ms after discovery started. 1 payload each; `RSSI` 2.6 a second throughout; no `DeviceLost` for the pods. |
 
 In every run, one other address matching `4C 00 07` without a proximity pairing payload
 was found. In runs 1, A, C and C2 it was found and lost every few seconds; in run B it
@@ -329,8 +337,8 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
   (#125).
 - Does GNOME's rename send the name as typed, so that typing the old name back sets an
   alias? A guess, not tried.
-- An advertisement monitor on the pods' proximity pairing data (#189), each shown by
-  `examples/adv_monitor_probe.rs`:
+- An advertisement monitor on the pods' proximity pairing data (#189);
+  `examples/adv_monitor_probe.rs` shows all but the first:
   - Which distributions run bluetoothd with its experimental interfaces on, which the
     monitor needs? And does a registration fail as read, with them off? Not run.
   - When another client stops discovering, bluetoothd removes the pods' devices
