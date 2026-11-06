@@ -95,10 +95,11 @@ advertising with our address will be correctly reported by the controller"
 **The monitor interface is experimental.** BlueZ 5.87 offers `RegisterMonitor`,
 `UnregisterMonitor` and the manager's properties only while bluetoothd runs with its
 experimental interfaces on: `Experimental = true` in `main.conf`, or `-E`. The default
-is off ("Defaults to false", `src/main.conf`). `src/adv_monitor.c` flags them
-experimental, and `gdbus/object.c` hides what is so flagged. Read, not run with them
-off: every run here had them on.
-The battery provider interface is not flagged so (`src/battery.c`).
+is off ("Defaults to false", `src/main.conf`). With them off, `src/adapter.c` creates no
+monitor manager at all; `src/adv_monitor.c` flags its members experimental besides, and
+`gdbus/object.c` hides what is so flagged. The battery provider manager, by contrast, is
+created whatever the setting (`src/adapter.c`). Read, not run with them off: every run
+here had them on.
 
 Settings of the monitor and of the manager (BlueZ 5.87; read, not seen in a capture):
 
@@ -134,9 +135,9 @@ AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
   under discovery, within the seconds a typed marker resolves.
 - While the lid was open, about as many payloads were signaled as under discovery (runs
   A and B); idle in the open case, more (runs C and C2).
-- `RSSI` alone was signaled far less often: idle in the open case, 2 or 3 times in the
-  first 3 s and none in the 62 s after, against 2.6 to 2.7 times a second throughout
-  under discovery. No `DeviceLost` came meanwhile; with the 5 s low timeout above, that
+- Signals carrying `RSSI` came far less often: idle in the open case, at most 2 or 3 in
+  the first 3 s and none in the 62 s after, against 2.6 to 2.7 `RSSI` signals a second
+  throughout under discovery. No `DeviceLost` came meanwhile; with the 5 s low timeout above, that
   suggests the pods were still heard, only not signaled.
 - The bonded mouse, switched off and on, reconnected while the monitor was registered.
   With discovery on as well, it was still unconnected 4 s after it was switched on.
@@ -279,8 +280,9 @@ trail it by a few seconds.
 | C2: `--discover`, 66 s | The same | Pods heard 47 ms and 69 ms after discovery started. 1 payload each; `RSSI` 2.6 and 2.7 a second throughout; no `DeviceLost` for the pods. |
 
 In every run, one other address matching `4C 00 07`, whose device held no proximity
-pairing payload the parser reads, was found. In runs 1, A, C and C2 it was found and
-lost more than once, staying found for 5 s to 78 s at a time; in run B it was found once
+pairing payload the parser reads, was found. In runs 1, C and C2 it was found and
+lost more than once, in run A found twice and lost once, staying found for 5 s to 78 s at
+a time; in run B it was found once
 and not lost.
 
 **A monitor beside another client's discovery: the same machine and day (#189).** The
@@ -291,7 +293,7 @@ start). Run D, twice:
   other Apple address above.
 - 8 s, the pair advertising: `DeviceFound` for both pods 147 ms and 162 ms in, each
   device's proximity pairing payload in its properties, and no `InterfacesAdded`.
-  `RSSI` alone 3 to 4 times a second.
+  Signals carrying `RSSI`, 3 to 4 times a second.
 
 **Discovery start: Pro 3 in the open case, not connected, 2026-11-02, ce9ed40 (#153).**
 
@@ -347,7 +349,7 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
   - When another client stops discovering, bluetoothd removes the pods' devices
     ([Discovery](#discovery)). Does a monitor registered meanwhile report them found
     again at once? Run D did not stop the other client.
-  - Is the 8 dBm rule ([Discovery](#discovery)) why `RSSI` alone is signaled so rarely
+  - Is the 8 dBm rule ([Discovery](#discovery)) why `RSSI` is signaled so rarely
     through a monitor? It fits, with no discovery filter in force; not checked.
   - With privacy on (`Privacy` in `main.conf`), the background scan runs under a
     resolvable private address. Does a device that directs its advertising at the public
