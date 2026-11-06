@@ -1017,8 +1017,8 @@ pub struct Coordinator {
     /// hold an update up there.
     #[cfg(test)]
     before_send: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    /// Runs once, in the next save just before it writes, for a test to hold
-    /// a save up there.
+    /// Runs once, in the next keystore save ([`Coordinator::store_keys`])
+    /// just before it writes, for a test to hold that save up there.
     #[cfg(test)]
     before_save: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -1168,24 +1168,12 @@ impl Coordinator {
         }
     }
 
-    /// Registers a new consumer, which sees the latest snapshot.
-    ///
-    /// A watch channel holds one value that every receiver sees, so the UI, tray,
-    /// attachment and the notifier never compete for a snapshot, and one that falls
-    /// behind skips stale snapshots rather than queueing them - an unbounded queue
-    /// per consumer grew without limit under a flood of advertisements. Sending
-    /// never waits for a consumer to take the snapshot, so a slow one cannot
-    /// stall a protocol read loop either - only an open `borrow()` holds a send
-    /// up; see below.
-    ///
-    /// Marked changed, so the current state arrives at once. Without that a
-    /// subscriber which starts before the first advertisement sees nothing at all -
-    /// the window came up blank whenever no device was connected or in range, even
-    /// though the keys were already loaded from disk.
+    /// Registers a new consumer, which sees the latest snapshot: one value
+    /// every receiver shares, latest-wins, marked changed so the current state
+    /// arrives at once (`docs/app/state.md#snapshots`).
     ///
     /// Never hold the receiver's `borrow()` across an await: it is a read lock,
-    /// and every broadcast waits for it - holding the coordinator's lock, so
-    /// every other update waits too.
+    /// and every broadcast waits for it under the coordinator's lock.
     pub fn subscribe(&self) -> watch::Receiver<Snapshot> {
         let mut rx = self.updates.subscribe();
         rx.mark_changed();
@@ -1353,19 +1341,11 @@ impl Coordinator {
     /// Works out which pair an advertisement is from, and decrypts it with
     /// that pair's ENC_KEY. Returns the pair's real MAC when identified.
     ///
-    /// The address must resolve with a stored IRK, and the same pair's
-    /// ENC_KEY decrypt the advertisement to a plaintext that passes the
-    /// suffix check (#134). One key is tried, the resolving pair's: a
-    /// decryption that passes by chance - 2^-23 per key tried - would show
-    /// random levels for one of the user's pairs, and with every key tried on
-    /// every advertisement, a crowd of foreign pairs or a spammer met that
-    /// chance within hours. Resolving is 2^-24 per address and IRK, and an
-    /// address lasts minutes ([`Coordinator::resolve`]).
-    ///
-    /// An address no stored IRK resolves counts only for a pair with no IRK
-    /// stored yet, keyed before the keystore kept IRKs: its ENC_KEY is tried,
-    /// as every key was before, until its next AAP connection brings its IRK.
-    /// Otherwise the advertisement is dropped, decrypted with nothing.
+    /// The address must resolve with a stored IRK, and only that pair's
+    /// ENC_KEY is tried, its plaintext passing the suffix check (#134). An
+    /// address no stored IRK resolves counts only for a pair with no IRK yet,
+    /// by its ENC_KEY alone; anything else is dropped. Why both checks:
+    /// `docs/app/identification.md#why-both-checks`.
     pub(crate) async fn identify_and_decrypt(
         &self,
         data: &mut ProximityData,
@@ -1389,7 +1369,7 @@ impl Coordinator {
             return None;
         }
 
-        // Pairs with no IRK yet, the old way.
+        // Pairs with no IRK yet, by their ENC_KEY alone.
         let without_irk = keys.iter().filter(|(_, k)| k.irk.is_none());
         for (&real_mac, pair) in without_irk {
             let Ok(decrypted) = decrypt_for_device(&encrypted, &pair.enc_key, real_mac) else {
@@ -1413,10 +1393,9 @@ impl Coordinator {
     /// resolve - an AES block per stored IRK - rather than one per
     /// advertisement. Only an address that resolved is remembered, with the
     /// IRK that resolved it, so a pair re-paired since is not taken for it.
-    /// One no IRK resolves is resolved again with each advertisement, as
-    /// every key used to be tried on each: remembered, a spammer rotating its
-    /// address would churn the map, and a foreign pair costs as little either
-    /// way.
+    /// One no IRK resolves is resolved again with each advertisement:
+    /// remembered, a spammer rotating its address would churn the map
+    /// (`docs/app/identification.md#resolved-addresses`).
     fn resolve(
         &self,
         ble_mac: Address,
@@ -2184,11 +2163,11 @@ impl Coordinator {
         client: &Arc<aap::Client>,
         mode: aap::NoiseMode,
     ) -> Result<()> {
-        // Recent firmware treats Off as opt-in: a bare Off command gets an error
-        // chime and no mode change. Enabling the setting is a change to the
-        // device that outlives this session, so it is sent only when Off is what
-        // was asked for - not flipped on at every connection. Idempotent, so
-        // repeating it costs nothing.
+        // A Pro 3 and a Pro 2 (USB-C) refused a bare Off with an error chime;
+        // which firmware brought that is not known. Allowing Off first lets it
+        // through. That the pods keep it allowed beyond this session is a guess,
+        // so it is sent only when Off is what was asked for, never at every
+        // connection (`docs/app/noise-control.md#allowing-off`).
         if mode == aap::NoiseMode::Off {
             client
                 .set_allow_off_listening_mode(true)
@@ -2282,8 +2261,9 @@ impl Coordinator {
     ///
     /// A packet that brings no usable IRK keeps the one stored, as long as the
     /// ENC_KEY is the one stored with it. With a new ENC_KEY the old IRK goes
-    /// too, as it may resolve none of the pair's new addresses:
-    /// without one, the pair is identified the old way rather than not at all.
+    /// too, as it may resolve none of the pair's new addresses: without one,
+    /// the pair is identified by its ENC_KEY alone rather than not at all
+    /// (`docs/app/identification.md#pairs-with-no-irk`).
     async fn store_keys(
         &self,
         mac_addr: Address,
@@ -4491,8 +4471,8 @@ mod tests {
             let fake = timeout(TIMEOUT, listener.accept()).await.unwrap().unwrap();
             assert_eq!(recv(&fake).await, SEQUENCE[0], "the handshake");
 
-            // Longer than the fixed 500 ms that came before the requests until
-            // they went unanswered on a pair that had only just connected.
+            // Long enough to catch requests sent after a fixed pause rather than
+            // on the answer (`docs/app/aap-links.md#the-handshake`).
             let early = timeout(Duration::from_secs(1), recv(&fake)).await;
             assert!(early.is_err(), "sent ahead of the answer: {early:?}");
 

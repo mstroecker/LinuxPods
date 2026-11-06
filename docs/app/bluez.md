@@ -76,14 +76,30 @@ plain, attachment's connection started that server in `BatteryProvider::register
 before the registration that bluetoothd answers by reading the root. Under load the read
 came first: the fake BlueZ took no battery, and bluetoothd would wait 25 s for its reply.
 
+bluetoothd takes the provider's `InterfacesAdded` while it waits
+([protocol/linux/bluez.md](../protocol/linux/bluez.md#battery-providers)), so it would
+miss only a battery the root held already, and there is none: attachment registers a
+provider before it exports to it. The fake BlueZ, which takes no signal before the reply,
+took no battery at all.
+
 So attachment's connection is a `bluez::ProviderConnection`, which only
 `bluez::connection` builds, and the fake world's come from `harness::connect_serving`.
+The ObjectManager `bluez::connection` serves, over every provider root, is there only to
+have something served. It never emits: zbus signals from the nearest ObjectManager above
+an object, each root's own (`Node::get_child_mut` in zbus 5.19.0's
+`src/object_server/node.rs`).
 
 ## Subscriptions that advertisements reach
 
 **Drained by a task that never awaits its reader.** Left in zbus's queue, advertisements
 stopped zbus reading the connection, and a reply attachment awaited never came (#90;
 [protocol/linux/zbus.md](../protocol/linux/zbus.md#queues)).
+
+`bluez::Devices::watch_connections` is one: its rule, every `PropertiesChanged` under
+`/org/bluez`, takes in every advertisement after an address's first while the app scans.
+The first comes in `InterfacesAdded`, which the rule does not match; every later one
+brings at least an `RSSI` change (#71;
+[protocol/linux/bluez.md](../protocol/linux/bluez.md#runs)).
 
 **Coalesced, never queued per signal, never dropped.** What an advertiser or a flapping
 adapter can trigger at will is coalesced per device or adapter. Queued one per signal, an

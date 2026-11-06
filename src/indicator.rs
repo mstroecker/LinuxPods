@@ -97,7 +97,8 @@ impl Indicator {
     }
 }
 
-/// "  Left : 80% ⚡", matching the Go layout.
+/// "  Left : 80% ⚡": the name padded to five, the level, and a bolt while
+/// charging; "  Left : --" with no level.
 fn battery_label(name: &str, level: Option<u8>, charging: bool) -> String {
     match level {
         Some(v) => {

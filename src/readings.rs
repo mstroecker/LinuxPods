@@ -48,8 +48,9 @@ pub const READINGS_FILE: &str = "readings.json";
 const FORMAT_VERSION: u32 = 1;
 
 /// How long a reading's heard time may run ahead of the one saved before a
-/// save is due for it alone - see [`due`]. A choice: a pair in range is heard
-/// every minute, and saved at that pace the file would be written all day.
+/// save is due for it alone - see [`due`]. A choice: a pair in range has a
+/// newer heard time at every save on the expiry clock (`expiry_task`, once a
+/// minute), and saved at that pace the file would be written all day.
 /// The cost is a relaunch after a crash or a power cut showing a reading up to
 /// this much older than it was; the app quitting saves it as it is.
 pub const HEARD_REFRESH: Duration = Duration::from_secs(10 * 60);
@@ -445,8 +446,9 @@ mod tests {
         }
     }
 
-    /// A pair in range is heard every minute: its heard time alone saves only
-    /// every `HEARD_REFRESH`, and at the quit whatever it is.
+    /// A heard time alone is due once it is `HEARD_REFRESH` past the one
+    /// saved, at the quit whatever it is, and when it is behind the one saved -
+    /// the clock set back.
     #[test]
     fn a_heard_time_alone_saves_once_it_has_moved_far_enough() {
         let saved = HashMap::from([(MAC, reading(1000))]);

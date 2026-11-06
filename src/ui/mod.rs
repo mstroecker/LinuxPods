@@ -76,8 +76,7 @@ fn last_seen_text(age: Duration) -> String {
 /// is visible, but switched off and grayed out: it neither claims a state nor
 /// takes a click, and nothing listens to the switch. Once it lands, a device
 /// feature's state comes with the snapshot and a change goes out as a
-/// command, as Conversation Awareness's did; an app setting becomes an app
-/// action, as Battery notifications did.
+/// command; an app setting becomes an app action.
 ///
 /// `id` names the switch, so that a test can find it and see it refuse.
 fn unavailable_row(id: &str, title: &str) -> adw::ActionRow {
