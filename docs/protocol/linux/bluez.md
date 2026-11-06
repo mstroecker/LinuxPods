@@ -276,11 +276,12 @@ trail it by a few seconds.
 | A: monitor, 48 s | Lid closed, opened, closed; mouse off and on | Pods heard 2.8 s before the `lid open` marker and 3.2 s apart; 15 and 10 payloads. Lost 9.6 s and 10.0 s after the `lid closed` marker. Mouse connected before the `mouse on` marker. |
 | B: `--discover`, 41 s | The same | Pods heard 2.0 s before the marker and 3.5 s apart; 15 and 13 payloads. Lost 7.8 s and 9.5 s after the marker. Mouse unconnected 4.3 s after the marker, at the end. |
 | C: monitor, 65 s | Lid open and pods idle for 60 s or more before the start | Pods heard 119 ms and 151 ms after `Activate`. 3 and 2 payloads, all in the first 0.7 s; 2 and 3 `RSSI` signals; no `DeviceLost` for the pods. |
-| C2: `--discover`, 66 s | The same | Pods heard 47 ms and 69 ms after discovery started. 1 payload each; `RSSI` 2.6 a second throughout; no `DeviceLost` for the pods. |
+| C2: `--discover`, 66 s | The same | Pods heard 47 ms and 69 ms after discovery started. 1 payload each; `RSSI` 2.6 and 2.7 a second throughout; no `DeviceLost` for the pods. |
 
-In every run, one other address matching `4C 00 07` without a proximity pairing payload
-was found. In runs 1, A, C and C2 it was found and lost every few seconds; in run B it
-was found once and not lost.
+In every run, one other address matching `4C 00 07`, whose device held no proximity
+pairing payload the parser reads, was found. In runs 1, A, C and C2 it was found and
+lost more than once, staying found for 5 s to 78 s at a time; in run B it was found once
+and not lost.
 
 **A monitor beside another client's discovery: the same machine and day (#189).** The
 probe ran beside LinuxPods, which discovered throughout (`Discovering` true at the
@@ -337,8 +338,10 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
   (#125).
 - Does GNOME's rename send the name as typed, so that typing the old name back sets an
   alias? A guess, not tried.
-- An advertisement monitor on the pods' proximity pairing data (#189);
-  `examples/adv_monitor_probe.rs` shows all but the first:
+- An advertisement monitor on the pods' proximity pairing data (#189).
+  `examples/adv_monitor_probe.rs` shows the second, fourth and fifth, and whether a
+  registration fails with the experimental interfaces off; the third needs `btmon`
+  beside it for the RSSI values:
   - Which distributions run bluetoothd with its experimental interfaces on, which the
     monitor needs? And does a registration fail as read, with them off? Not run.
   - When another client stops discovering, bluetoothd removes the pods' devices
