@@ -161,15 +161,21 @@
 //!   goes `idle` and stays.
 //! - `Volume` is AVRCP's absolute volume, 0 to 127, writable by any client,
 //!   as bluetoothd checks no owner for it (`transport.c`). Each client's set
-//!   is recorded ([`FakeBluez::volume_sets`]); the user's are not. A set of
-//!   the volume the transport holds does nothing, as in bluetoothd. Any
-//!   other is taken at once and signaled - unless the pair is made to answer
-//!   as bluetoothd has a real pair answer ([`FakeBluez::set_volume_answer`]):
-//!   bluetoothd sends the volume to the pods over AVRCP and changes the
-//!   property only once they answer, to the volume they report (BlueZ 5.87's
-//!   `transport.c` and `profiles/audio/avrcp.c`). The fake then changes it
-//!   after a delay, and may round it to an even volume, as a pair might. How
-//!   long real pods take, and whether they round, is untried (#150).
+//!   is recorded ([`FakeBluez::volume_sets`]), a set of the volume the
+//!   transport holds too; the user's are not. A set of the volume the
+//!   transport holds changes nothing, as in bluetoothd. Any other is taken
+//!   at once - unless the pair is made to answer as bluetoothd has a real
+//!   pair answer ([`FakeBluez::set_volume_answer`]): bluetoothd sends the
+//!   volume to the pods over AVRCP and changes the property only once they
+//!   answer, to the volume they report (BlueZ 5.87's `transport.c` and
+//!   `profiles/audio/avrcp.c`). The fake then changes it after a delay,
+//!   signaled then, and may round it to an even volume, as a pair might. How
+//!   long real pods take, and whether they round, is untried (#150). Every
+//!   set a client makes is also signaled as it returns, with the volume the
+//!   transport holds by then, as zbus's generated setter signals each set
+//!   that succeeds: one the transport already held, or one not answered yet,
+//!   brings a `PropertiesChanged` that changes nothing, where bluetoothd
+//!   has changed no property.
 //! - A call takes A2DP to `idle`, and after it A2DP plays again if it did.
 //!   That is how PipeWire's own HFP backend is assumed to show it - not read
 //!   in its source, nor watched (#150): no transport of its own in BlueZ, and
@@ -2334,10 +2340,12 @@ impl MediaTransport1 {
 
     /// Writable by any client, as bluetoothd has it whatever its
     /// documentation says. Recorded as a client's - see
-    /// [`FakeBluez::volume_sets`] - and answered as the device answers - see
-    /// [`FakeBluez::set_volume_answer`]: at once, and then signaled, as zbus
-    /// signals every property set; or later, signaled then. The volume held
-    /// already changes nothing, as in bluetoothd.
+    /// [`FakeBluez::volume_sets`] - the volume held already too, and
+    /// answered as the device answers - see [`FakeBluez::set_volume_answer`]:
+    /// at once, or later, signaled then. The volume held already changes
+    /// nothing, as in bluetoothd. zbus's generated setter signals the volume
+    /// held each time this returns `Ok`: the new one when answered at once,
+    /// else the one it replaces.
     #[zbus(property)]
     fn set_volume(&mut self, volume: u16) -> zbus::fdo::Result<()> {
         if volume > MAX_VOLUME {
@@ -2773,10 +2781,6 @@ mod tests {
         }
     }
 
-    /// A connection has its services resolved a while after `Connected=true`,
-    /// and they go just before `Connected=false`, each in a signal of its own,
-    /// as in the #71 captures. A connection that goes before its services are
-    /// resolved never has them: the next one waits its own delay.
     /// The changes the pair's device signals, each one property and its new
     /// value, from a connection to the bus at `bus`.
     async fn device_changes(bus: &PrivateBus) -> impl futures_util::Stream<Item = (String, bool)> {
