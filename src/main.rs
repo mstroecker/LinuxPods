@@ -11,7 +11,8 @@
 //! context on async channels.
 
 use cymba::{
-    APP_ID, attachment, ble, indicator, media, notify, podstate, readings, settings, ui, volume,
+    APP_ID, attachment, ble, indicator, media, migrate, notify, podstate, readings, settings, ui,
+    volume,
 };
 
 use std::cell::{OnceCell, RefCell};
@@ -243,6 +244,10 @@ fn main() -> glib::ExitCode {
     let started = primary.clone();
     let handle = runtime.handle().clone();
     app.connect_startup(move |app| {
+        // Before the coordinator and the settings read them, and only in the
+        // primary instance: a second launch never reaches startup.
+        migrate::from_linuxpods();
+
         // The window's artwork and the About dialog's icon load from the bundle.
         ui::register_resources();
 

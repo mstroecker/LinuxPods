@@ -22,9 +22,10 @@
 //! refuses the user's own session bus.
 //!
 //! The save replaces the key file outright, so `--keystore` refuses the app's
-//! own data directory and any directory with a key file in it already. Saved
-//! over the user's keys, the fake ones would leave the app reading nothing
-//! from a real pair over BLE until that pair reconnected over AAP.
+//! own data directory, the LinuxPods one the app moves there at startup, and
+//! any directory with a key file in it already. Saved over the user's keys,
+//! the fake ones would leave the app reading nothing from a real pair over BLE
+//! until that pair reconnected over AAP.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -37,6 +38,7 @@ use cymba::harness::pods::{PRO_2_USB_C, PRO_3};
 use cymba::harness::world::DEFAULT_ADAPTER;
 use cymba::harness::{FakePlayer, World};
 use cymba::keystore::{self, KEYS_FILE, Keystore, PairKeys};
+use cymba::migrate;
 
 const USAGE: &str = "\
 usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--adapter NAME]
@@ -50,7 +52,8 @@ usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--adapter 
   --experimental     run the fake BlueZ with its experimental interfaces on, offering
                      advertisement monitors, as Experimental = true in main.conf does
   --keystore DIR     save the pairs' keys in DIR/keys.json for the fake world's app;
-                     never the app's own data directory, nor a DIR holding keys
+                     never the app's own data directory or its LinuxPods one,
+                     nor a DIR holding keys
   --player-address ADDRESS
                      serve a fake media player, org.mpris.MediaPlayer2.fakeplayer,
                      on the app's session bus - a private one, never the user's
@@ -132,11 +135,11 @@ struct Args {
     player_address: Option<String>,
 }
 
-/// `None` for `--help`. `app_dir` is where the app keeps its keys, which
+/// `None` for `--help`. `app_dirs` are where the app keeps its keys, which
 /// `--keystore` must not be.
 fn parse_args(
     mut args: impl Iterator<Item = String>,
-    app_dir: Option<&Path>,
+    app_dirs: &[PathBuf],
 ) -> Result<Option<Args>, String> {
     let (mut address, mut socket_dir, mut keystore, mut player_address) = (None, None, None, None);
     let mut scenario = Scenario::InRange;
@@ -170,7 +173,7 @@ fn parse_args(
         return Err("that is the system bus; give a private one".into());
     }
     if let Some(dir) = &keystore {
-        check_keystore(dir, app_dir)?;
+        check_keystore(dir, app_dirs)?;
     }
     // The user's players are there, and a fake one among them would be
     // paused and played by their own Cymba.
@@ -202,11 +205,15 @@ fn is_user_session_bus(address: &str) -> bool {
 }
 
 /// Refuses a `--keystore` whose save would replace keys this run did not
-/// make: `app_dir` however `dir` spells it, or a directory holding a key file
-/// already - the run has saved nothing yet, so that one is someone else's.
-fn check_keystore(dir: &Path, app_dir: Option<&Path>) -> Result<(), String> {
+/// make: one of `app_dirs` however `dir` spells it, or a directory holding a
+/// key file already - the run has saved nothing yet, so that one is someone
+/// else's.
+fn check_keystore(dir: &Path, app_dirs: &[PathBuf]) -> Result<(), String> {
     let resolved = resolve(dir).map_err(|e| format!("--keystore {}: {e}", dir.display()))?;
-    if app_dir.is_some_and(|app| resolve(app).is_ok_and(|app| app == resolved)) {
+    if app_dirs
+        .iter()
+        .any(|app| resolve(app).is_ok_and(|app| app == resolved))
+    {
         return Err("that is the app's own data directory; give a new one".into());
     }
     if std::fs::symlink_metadata(resolved.join(KEYS_FILE)).is_ok() {
@@ -290,8 +297,11 @@ async fn main() -> ExitCode {
         )
         .init();
 
-    let app_dir = keystore::default_dir().ok();
-    let args = match parse_args(std::env::args().skip(1), app_dir.as_deref()) {
+    // The LinuxPods directory too: the app moves it to its own at startup.
+    let app_dirs: Vec<PathBuf> = keystore::default_dir()
+        .map(|dir| vec![migrate::linuxpods_dir(&dir), dir])
+        .unwrap_or_default();
+    let args = match parse_args(std::env::args().skip(1), &app_dirs) {
         Ok(Some(args)) => args,
         Ok(None) => {
             println!("{USAGE}");
@@ -316,7 +326,7 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Option<Args>, String> {
-        parse_args(args.iter().map(|a| a.to_string()), None)
+        parse_args(args.iter().map(|a| a.to_string()), &[])
     }
 
     #[test]
@@ -426,9 +436,9 @@ mod tests {
         }
     }
 
-    /// The user's keys are there: the save would replace them with the fake
-    /// pairs'. Refused however the path spells it, and before the app has
-    /// made the directory.
+    /// The user's keys are there, or will be once the app moves the LinuxPods
+    /// directory: the save would replace them with the fake pairs'. Refused
+    /// however the path spells it, and before the app has made the directory.
     #[test]
     fn refuses_the_apps_own_keystore() {
         let home = tempfile::tempdir().unwrap();
@@ -437,7 +447,7 @@ mod tests {
         let link = home.path().join("link");
         std::os::unix::fs::symlink(&data, &link).unwrap();
         // Not made yet, and named through the link.
-        let app_dir = link.join("cymba");
+        let app_dirs = [link.join("cymba"), link.join("linuxpods")];
         let with_keystore = |dir: &Path| {
             let args = [
                 "--address",
@@ -447,7 +457,7 @@ mod tests {
                 "--keystore",
                 dir.to_str().unwrap(),
             ];
-            parse_args(args.into_iter().map(String::from), Some(&app_dir))
+            parse_args(args.into_iter().map(String::from), &app_dirs)
         };
 
         // From the working directory, which the tests do not change.
@@ -457,21 +467,23 @@ mod tests {
             .skip(1)
             .map(|_| "..")
             .collect();
-        for dir in [
-            app_dir.clone(),
-            data.join("cymba"),
-            data.join("./cymba/"),
-            data.join("new/../cymba"),
-            up.join(data.join("cymba").strip_prefix("/").unwrap()),
-            // Back out of a part that does not exist, and through the link.
-            home.path().join("new/../link/cymba"),
-        ] {
-            let err = with_keystore(&dir).unwrap_err();
-            assert!(
-                err.contains("own data directory"),
-                "{}: {err}",
-                dir.display()
-            );
+        for name in ["cymba", "linuxpods"] {
+            for dir in [
+                link.join(name),
+                data.join(name),
+                data.join(format!("./{name}/")),
+                data.join(format!("new/../{name}")),
+                up.join(data.join(name).strip_prefix("/").unwrap()),
+                // Back out of a part that does not exist, and through the link.
+                home.path().join(format!("new/../link/{name}")),
+            ] {
+                let err = with_keystore(&dir).unwrap_err();
+                assert!(
+                    err.contains("own data directory"),
+                    "{}: {err}",
+                    dir.display()
+                );
+            }
         }
 
         // Anywhere else, so long as no key file is there.
