@@ -307,7 +307,7 @@ and without:
   backoff.
 - bluetoothd restarted after `Experimental = true` is set, the app still running: the
   monitor taken, discovery stopped.
-- Without the experimental interfaces, the Preferences hint's **Pause scanning** button:
+- Without the experimental interfaces, the Preferences hint's **Pause** button:
   `BLE discovery paused`, the hint's row reading "Paused until" and the time, the mouse
   switched off and on reconnecting, then `BLE discovery pause over`, discovery back and
   the row reading "Scanning". With them, no hint.

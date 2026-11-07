@@ -54,11 +54,12 @@ not: [bluez.md](bluez.md#listening-for-the-pods). Hidden, it takes no space.
 
 | Row | Does |
 |---|---|
+| The guide row | Names the fix, BlueZ's experimental features, and opens the user document [other-devices.md](../user/other-devices.md) on GitHub's `main`, in the browser |
 | The pause row | Its button calls `ScanControl::pause_discovery`: the app's discovery stops for `DISCOVERY_PAUSE`. Its title reads "Scanning", or "Paused until" and the local time the pause ends, from `ScanState::paused_until`. Pressed again while paused, the pause runs that long from then. |
-| The guide row | Opens the user document [other-devices.md](../user/other-devices.md) on GitHub's `main`, in the browser |
 
-The group's description says that AirPods nearby go unheard while paused, and that
-another client's discovery, such as GNOME Settings' Bluetooth panel, still blocks
+The pause row's subtitle says that the pause lets other devices connect. That AirPods
+nearby go unheard meanwhile, and that another client's discovery, such as GNOME Settings'
+Bluetooth panel, still blocks, are left to the user document
 ([bluez.md](bluez.md#listening-for-the-pods)).
 
 **A second stream, not part of the snapshot.** The scanner's state is no pair's state,

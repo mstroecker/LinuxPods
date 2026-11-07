@@ -75,9 +75,9 @@ If the group is still there after the restart, check that the line is under
 
 ## In the meantime: pause scanning
 
-The group in Preferences has a button, **Pause scanning**, which stops LinuxPods'
-scan for the time it shows. A device that is waiting to reconnect connects as soon as
-the scan stops. Press it, then switch on or wake the device.
+The group in Preferences has a button, **Pause**, which stops LinuxPods' scan for the
+time it shows. A device that is waiting to reconnect connects as soon as the scan
+stops. Press it, then switch on or wake the device.
 
 While the scan is paused:
 
