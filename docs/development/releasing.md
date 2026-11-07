@@ -9,12 +9,12 @@ nothing is uploaded by hand.
 1. Bump the version and update the changelog on a branch:
 
    ```bash
-   git switch -c release/v0.2.0
-   # set version = "0.2.0" in Cargo.toml
+   git switch -c release/vX.Y.Z
+   # set version = "X.Y.Z" in Cargo.toml
    cargo check                              # updates Cargo.lock
-   git cliff --unreleased --tag v0.2.0 --prepend CHANGELOG.md
+   git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
    # set the version in README.md's install commands (Installing → From a release)
-   git commit -am "chore(release): v0.2.0"
+   git commit -am "chore(release): vX.Y.Z"
    ```
 
    The README goes into the tarball, so its install commands name the version
@@ -30,8 +30,8 @@ nothing is uploaded by hand.
 
    ```bash
    git switch main && git pull
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
    ```
 
 The workflow refuses a tag that does not match the version in `Cargo.toml`,
@@ -54,7 +54,7 @@ on Ubuntu 24.04, so they need glibc 2.39 or newer.
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS
-gh attestation verify linuxpods-0.2.0-x86_64-linux.tar.gz -R mstroecker/LinuxPods \
+gh attestation verify linuxpods-X.Y.Z-x86_64-linux.tar.gz -R mstroecker/LinuxPods \
   --signer-workflow mstroecker/LinuxPods/.github/workflows/release-build.yml
 ```
 
