@@ -3311,9 +3311,9 @@ mod tests {
     }
 
     /// Regression (#44): a battery packet that arrived before any advertisement
-    /// left the model blank - "AirPods" in the status line - until the next
-    /// packet, which over AAP comes only when a level changes. Advertisements
-    /// kept arriving, but none was broadcast for a device on AAP.
+    /// left the model unknown until the next packet, which over AAP comes only
+    /// when a level changes. Advertisements kept arriving, but none was
+    /// broadcast for a device on AAP.
     #[tokio::test]
     async fn an_advertisement_names_a_device_already_on_aap() {
         let (coordinator, client, _dir) = linked();

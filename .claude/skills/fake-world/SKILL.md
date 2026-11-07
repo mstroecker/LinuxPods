@@ -180,6 +180,11 @@ and so is never over. The dialog's body changes once an alias is set: `world Set
 ... Kitchen`, then `Disconnect` and `Connect`. A rename sent just after `world HangUp`
 fails, and the `toasts` overlay holds `Couldn’t rename the AirPods`.
 
+The Model and Color rows: `model-name` and `color-name` read the model and `White` -
+`AirPods Pro 3` for a scenario's first pair, `AirPods Pro (2nd gen, USB-C)` for
+`two-pairs`' second - once an advertisement has identified the pair, `Unknown`, with
+`model` and `color` insensitive, before.
+
 The Firmware row (#161): `firmware-version` reads `Unknown`, and `firmware` is
 insensitive, until the pair's first AAP link of the app's run - so in `in-range` until
 `world Connect` - then `9A348`, and it stays after `world Disconnect`. No `FakeWorld1`

@@ -1,5 +1,6 @@
 //! The Control page: battery display, status text, device switcher, Noise
-//! Control, Features, and Info with the pods' name and firmware version.
+//! Control, Features, and Info with the pods' name, model, color and firmware
+//! version.
 
 use std::cell::{Cell, RefCell};
 
@@ -11,7 +12,7 @@ use super::{RESOURCE_PREFIX, last_seen_text, shown_age};
 use crate::aap::NoiseMode;
 use crate::aap::info::FirmwareVersion;
 use crate::ble::{decode_color, decode_connection_state};
-use crate::podstate::{DataSource, PodState, Snapshot};
+use crate::podstate::{DataSource, Identity, PodState, Snapshot};
 
 /// One column of the battery display: a pod, or the case.
 pub struct BatteryColumn {
@@ -117,6 +118,16 @@ pub struct ControlView {
     /// Its suffix: the pods' own name, else BlueZ's alias - see
     /// [`shown_name`].
     pub name_label: gtk::Label,
+    /// The Info group's Model row: insensitive while nothing has identified
+    /// the pair - see [`model_text`].
+    pub model_row: adw::ActionRow,
+    /// Its suffix, selectable as the firmware version is.
+    pub model_label: gtk::Label,
+    /// The Info group's Color row, alongside the Model row - see
+    /// [`color_text`].
+    pub color_row: adw::ActionRow,
+    /// Its suffix.
+    pub color_label: gtk::Label,
     /// The Info group's Firmware row: nothing to activate, insensitive while
     /// no version is known.
     pub firmware_row: adw::ActionRow,
@@ -228,12 +239,11 @@ pub(super) fn create_control_view() -> ControlView {
 
     control_box.append(&battery_box);
 
-    // Two lines - see `status_text` - centered under one another as the label
-    // is under the batteries.
+    // The summary - see `status_text` - centered as the label is under the
+    // batteries.
     let status_label = gtk::Label::builder()
         .name("status")
         .label("Searching for AirPods…")
-        .justify(gtk::Justification::Center)
         .build();
     status_label.add_css_class("dim-label");
     status_label.set_margin_top(10);
@@ -342,23 +352,29 @@ pub(super) fn create_control_view() -> ControlView {
     name_row.add_suffix(&name_label);
     name_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
     info_group.add(&name_row);
-    // The firmware version, as iOS shows it below the name. Not a command:
-    // shown connected or not, insensitive only while unknown, so the group
-    // keeps its shape.
-    let firmware_label = gtk::Label::builder()
-        .name("firmware-version")
-        .label(firmware_text(None))
-        .selectable(true)
-        .build();
-    firmware_label.add_css_class("dim-label");
-    let firmware_row = adw::ActionRow::builder()
-        .name("firmware")
-        .title("Firmware")
-        .activatable(false)
-        .sensitive(false)
-        .build();
-    firmware_row.add_suffix(&firmware_label);
-    info_group.add(&firmware_row);
+    // The model, its color and the firmware version, below the name. Not
+    // commands: shown connected or not, insensitive only while unknown, so
+    // the group keeps its shape. Selectable, to copy into a bug report.
+    let info_row = |row_id: &str, title: &str, label_id: &str| {
+        let label = gtk::Label::builder()
+            .name(label_id)
+            .label(UNKNOWN)
+            .selectable(true)
+            .build();
+        label.add_css_class("dim-label");
+        let row = adw::ActionRow::builder()
+            .name(row_id)
+            .title(title)
+            .activatable(false)
+            .sensitive(false)
+            .build();
+        row.add_suffix(&label);
+        info_group.add(&row);
+        (row, label)
+    };
+    let (model_row, model_label) = info_row("model", "Model", "model-name");
+    let (color_row, color_label) = info_row("color", "Color", "color-name");
+    let (firmware_row, firmware_label) = info_row("firmware", "Firmware", "firmware-version");
     page.add(&info_group);
 
     let content = gtk::Stack::builder().name("content").build();
@@ -378,6 +394,10 @@ pub(super) fn create_control_view() -> ControlView {
         syncing_features: Cell::default(),
         name_row,
         name_label,
+        model_row,
+        model_label,
+        color_row,
+        color_label,
         firmware_row,
         firmware_label,
     }
@@ -479,10 +499,36 @@ fn shown_name(snapshot: &Snapshot, mac: Address) -> Option<String> {
         .or_else(|| snapshot.device_name(mac).map(str::to_string))
 }
 
+/// What an Info row shows while its value is not known.
+const UNKNOWN: &str = "Unknown";
+
 /// What the Firmware row shows: the version as the iPhone shows it, `9A348`,
 /// or that none is known - before the pair's first AAP link this run.
 fn firmware_text(version: Option<FirmwareVersion>) -> String {
-    version.map_or_else(|| "Unknown".to_string(), |v| v.to_string())
+    version.map_or_else(|| UNKNOWN.to_string(), |v| v.to_string())
+}
+
+/// What the Model row shows: the decoded name, or the product ID for a model
+/// we do not recognize, so a report of it says which; "Unknown" without an
+/// identity - see docs/app/ui.md#model-and-color.
+fn model_text(identity: Option<Identity>) -> String {
+    identity.map_or_else(|| UNKNOWN.to_string(), |i| i.model_name())
+}
+
+/// What the Color row shows: the advertised color by name, or its code;
+/// "Unknown" without an identity.
+fn color_text(identity: Option<Identity>) -> String {
+    identity.map_or_else(|| UNKNOWN.to_string(), |i| decode_color(i.color))
+}
+
+/// Shows `text` in an Info row, sensitive while `known`. Set only when it
+/// changes, so a render leaves alone a selection the user is making to copy
+/// it.
+fn show_info(row: &adw::ActionRow, label: &gtk::Label, text: &str, known: bool) {
+    if label.text() != text {
+        label.set_text(text);
+    }
+    row.set_sensitive(known);
 }
 
 /// Draws one device, and gates noise control, the features and renaming on
@@ -493,13 +539,26 @@ pub(super) fn render_device(view: &ControlView, snapshot: &Snapshot, mac: Option
 
     // Kept from the pair's last link, so shown whether a reading is or not.
     let version = mac.and_then(|m| snapshot.firmware_version(m));
-    let text = firmware_text(version);
-    // Set only when it changes, so a render leaves alone a selection the
-    // user is making to copy it.
-    if view.firmware_label.text() != text {
-        view.firmware_label.set_text(&text);
-    }
-    view.firmware_row.set_sensitive(version.is_some());
+    show_info(
+        &view.firmware_row,
+        &view.firmware_label,
+        &firmware_text(version),
+        version.is_some(),
+    );
+
+    let identity = state.and_then(|s| s.identity);
+    show_info(
+        &view.model_row,
+        &view.model_label,
+        &model_text(identity),
+        identity.is_some(),
+    );
+    show_info(
+        &view.color_row,
+        &view.color_label,
+        &color_text(identity),
+        identity.is_some(),
+    );
 
     let name = mac
         .and_then(|m| shown_name(snapshot, m))
@@ -602,24 +661,9 @@ fn update_battery_display(w: &BatteryWidgets, state: &PodState) {
     }
 }
 
-/// The summary under the battery display, in two lines: the model and its
-/// color, then the lid, what the AirPods are doing and where the numbers came
-/// from. On one line it was wider than the window.
+/// The summary under the battery display: the lid, what the AirPods are
+/// doing and where the numbers came from.
 fn status_text(state: &PodState) -> String {
-    // The decoded name, or the product ID for a model we do not recognize, and
-    // the color likewise, so a report of either says which. A bare label while
-    // nothing has identified the device; the color comes only with an identity.
-    let device = state.identity.map_or_else(
-        || "AirPods".to_string(),
-        |identity| {
-            format!(
-                "{} • {}",
-                identity.model_name(),
-                decode_color(identity.color)
-            )
-        },
-    );
-
     let mut details = Vec::new();
     // Absent unless a pod is in the case: the pods report it, and only one in
     // the case can see it.
@@ -634,14 +678,13 @@ fn status_text(state: &PodState) -> String {
     // The source is which protocol produced these numbers.
     details.push(format!("Source: {}", state.source));
 
-    format!("{device}\n{}", details.join(" • "))
+    details.join(" • ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bluez::DeviceNames;
-    use crate::podstate::Identity;
 
     /// A reading identified by `product_id`, in white.
     fn identified(product_id: u16, source: DataSource) -> PodState {
@@ -661,10 +704,7 @@ mod tests {
             connection_state: Some(0x05),
             ..identified(0x2027, DataSource::Ble)
         };
-        assert_eq!(
-            status_text(&state),
-            "AirPods Pro 3 • White\nLid: Open • Music • Source: BLE"
-        );
+        assert_eq!(status_text(&state), "Lid: Open • Music • Source: BLE");
     }
 
     /// A pair on AAP with no advertisement cached has no connection state, and
@@ -672,43 +712,7 @@ mod tests {
     #[test]
     fn status_text_omits_what_nothing_reported() {
         let state = identified(0x2027, DataSource::Aap);
-        assert_eq!(status_text(&state), "AirPods Pro 3 • White\nSource: AAP");
-    }
-
-    /// A model we do not know goes by its product ID; a device nothing has
-    /// identified yet - a pair on AAP before its first advertisement - by a
-    /// bare "AirPods", and with no color to show.
-    #[test]
-    fn status_text_names_the_model_as_far_as_it_is_known() {
-        assert_eq!(
-            status_text(&identified(0xFFFF, DataSource::Ble)),
-            "Unknown (0xFFFF) • White\nSource: BLE"
-        );
-        assert_eq!(
-            status_text(&PodState::empty(DataSource::Aap)),
-            "AirPods\nSource: AAP"
-        );
-    }
-
-    /// The color as advertised, by name; a code the table lacks by itself,
-    /// said to be a color so it is not taken for an unknown model.
-    #[test]
-    fn status_text_names_the_color_beside_the_model() {
-        let colored = |color| PodState {
-            identity: Some(Identity {
-                product_id: 0x2024,
-                color,
-            }),
-            ..PodState::empty(DataSource::Ble)
-        };
-        assert_eq!(
-            status_text(&colored(0x01)),
-            "AirPods Pro (2nd gen, USB-C) • Black\nSource: BLE"
-        );
-        assert_eq!(
-            status_text(&colored(0x42)),
-            "AirPods Pro (2nd gen, USB-C) • Unknown color (0x42)\nSource: BLE"
-        );
+        assert_eq!(status_text(&state), "Source: AAP");
     }
 
     #[test]

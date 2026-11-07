@@ -43,7 +43,8 @@ they are insensitive unless the pair shown is on AAP. BLE is receive-only.
 `notify::active` does not send the setting back out. A failed command draws the last
 snapshot again, which puts the switch back.
 
-The Firmware row below Name is no command: [firmware.md](firmware.md#what-the-app-does-with-it).
+The Model, Color and Firmware rows below Name are no commands: [Model and color](#model-and-color),
+[firmware.md](firmware.md#what-the-app-does-with-it).
 
 ## The scanning hint
 
@@ -120,13 +121,20 @@ when it is missing, as it is for a plain `cargo run`.
 A planned setting not built yet is shown insensitive, with the subtitle "Not available
 yet": it neither claims a state nor takes a click.
 
-## Device color
+## Model and color
 
 The color byte and its names:
 [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#byte-7-device-color).
 
-The Control page shows the color after the model name, as `AirPods Pro 3 • White`. A code
-missing from the table shows as `Unknown color (0x..)`.
+The Color row, below the Model row, names the color. A code missing from the table shows
+as `Unknown (0x..)`, as the Model row shows a product ID it does not know. Both rows read
+"Unknown" and are insensitive while nothing has identified the pair:
+
+- a pair on AAP before its first advertisement;
+- a pair with no link and no reading in the [BLE cache](state.md#the-ble-cache): none
+  heard, or the last one has left it.
+
+A link keeps the model and color after that: [state.md](state.md#what-a-snapshot-shows).
 
 ## The tray
 

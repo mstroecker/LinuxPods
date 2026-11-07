@@ -18,7 +18,7 @@ LinuxPods: updating from it keeps your keys, last readings and settings
 ([what moves](docs/app/from-linuxpods.md)).
 
 <p align="center">
-  <img src="docs/images/control-tab.png" alt="Cymba window: device switcher in the header bar, battery levels for both pods and the case, the model and its color, noise control modes, Conversation Awareness, and the Info group with the name and firmware version" width="360">
+  <img src="docs/images/control-tab.png" alt="Cymba window: device switcher in the header bar, battery levels for both pods and the case, noise control modes, Conversation Awareness, and the Info group with the name, model, color and firmware version" width="360">
 </p>
 
 > [!WARNING]
@@ -87,11 +87,13 @@ the device switcher and the notifications keep showing. Apple devices keep the n
 have. The packet is confirmed on a Pro 3 (#160); the window's rename is still to be
 checked on a pair. See [`docs/app/names.md`](docs/app/names.md).
 
-The Firmware row below Name shows the firmware version as the iPhone shows it, such as
-`9A348`, and reads "Unknown" until the pair has connected since the app started. It
-stays on show after the pair disconnects, until the app quits. How the version is packed
-was read off one firmware (2026-11-02), to be confirmed at the next update, and the row
-is still to be checked on a pair (#161). See [`docs/app/firmware.md`](docs/app/firmware.md).
+Below it the Model and Color rows show what the pair's advertisements say it is:
+"Unknown" until one is heard, and again once the last one is a day old while the pair
+is not connected. The Firmware row shows the firmware version as the iPhone shows it,
+such as `9A348`. The version reads "Unknown" until the pair has connected since the app
+started. It stays on show after the pair disconnects, until the app quits. How the
+version is packed was read off one firmware (2026-11-02), to be confirmed at the next
+update, and the row is still to be checked on a pair (#161). See [`docs/app/firmware.md`](docs/app/firmware.md).
 
 ### Linux integration
 
@@ -223,7 +225,7 @@ Launch with `cargo run`, or `./target/release/cymba` after a release build.
 leaves the window as it is.
 
 The window shows the three battery levels, charging state and in-ear detection; under
-them the model and its color, and which source the reading came from. With more than
+them which source the reading came from, and in the Info group the model and its color. With more than
 one pair to show - each one it holds a key for, and each one connected over AAP - the
 header bar switches between them. **Preferences**, in the main menu, lists every one of
 them with its encryption key status, turns low battery notifications off and on, and
