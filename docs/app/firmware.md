@@ -44,7 +44,7 @@ How field 10 packs the version:
   shows at the pair's next AAP connection.
 - **Only from the live link.** It is set through `Inner::live_link`, so a `0x1D` read on a
   link that has since been replaced is dropped, as every packet of the old link is.
-- **The Firmware row** in the Info group, below Name, shows the version as the iPhone does,
+- **The Firmware row** in the Info group, below Name, Model and Color, shows the version as the iPhone does,
   dimmed and selectable, so it can be copied into a bug report. It is no command and opens
   nothing. Before the pair's first AAP connection in a run there is no version: the row
   shows "Unknown" and is insensitive, so the group keeps its shape.

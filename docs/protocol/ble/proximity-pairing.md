@@ -240,7 +240,7 @@ The table is LibrePods' Linux parser's. Every captured advertisement in
 `examples/decrypt_probe.rs`, from both models verified here, carries `0x00`, White. The
 rest is unverified.
 
-How Cymba shows it: [app/ui.md](../../app/ui.md#device-color).
+How Cymba shows it: [app/ui.md](../../app/ui.md#model-and-color).
 
 ### Byte 8: Connection State
 

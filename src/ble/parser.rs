@@ -371,9 +371,9 @@ pub(crate) fn decode_color(color: u8) -> String {
         0x0A => "Dark Blue".into(),
         0x0B => "Light Blue".into(),
         0x0C => "Yellow".into(),
-        // Said to be a color: shown beside the model name, a bare "Unknown"
-        // would read as an unknown model.
-        other => format!("Unknown color (0x{other:02X})"),
+        // The code itself, as `Identity::model_name` shows a product ID it does
+        // not know.
+        other => format!("Unknown (0x{other:02X})"),
     }
 }
 
@@ -888,12 +888,11 @@ mod tests {
         assert_eq!(decode_model_name(0x0000), None);
     }
 
-    /// A code the table lacks says it is a color: shown beside the model
-    /// name, a bare "Unknown" would read as an unknown model.
+    /// A code the table lacks shows by itself, so a report of it says which.
     #[test]
-    fn names_colors_and_says_what_an_unknown_code_is() {
+    fn names_colors_and_shows_an_unknown_code() {
         assert_eq!(decode_color(0x00), "White");
-        assert_eq!(decode_color(0x42), "Unknown color (0x42)");
+        assert_eq!(decode_color(0x42), "Unknown (0x42)");
     }
 
     #[test]

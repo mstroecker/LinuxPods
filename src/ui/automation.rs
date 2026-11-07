@@ -63,7 +63,7 @@
 //! | `battery-left`, `battery-right`, `battery-case` | a column's percentage, `--` when unknown |
 //! | `battery-<column>-level` | its level bar |
 //! | `battery-<column>-charging`, `battery-<column>-in-ear` | its icons, visible while they apply |
-//! | `status` | the status text under the battery display: model and color, then the rest |
+//! | `status` | the status text under the battery display: the lid, what the pods are doing, the source |
 //! | `last-seen` | how old a BLE reading is; hidden for AAP |
 //! | `noise-control` | the Noise Control group, insensitive unless the device is on AAP |
 //! | `noise-off`, `noise-noise-cancellation`, `noise-transparency`, `noise-adaptive` | its radios |
@@ -71,6 +71,10 @@
 //! | `info` | the Info group |
 //! | `rename` | its Name row, insensitive unless the device is on AAP and its link has reported the pods' name; clicked, it opens the rename dialog |
 //! | `device-name` | the row's name: the pods' own, else BlueZ's alias |
+//! | `model` | the Info group's Model row, insensitive while nothing has identified the pair |
+//! | `model-name` | its model, `AirPods Pro 3`; `Unknown (0x....)` for a product ID the app does not know; `Unknown` while unidentified |
+//! | `color` | the Info group's Color row, insensitive while nothing has identified the pair |
+//! | `color-name` | its color, `White`; `Unknown (0x..)` for a code the app does not know; `Unknown` while unidentified |
 //! | `firmware` | the Info group's Firmware row, insensitive while no version is known |
 //! | `firmware-version` | its version, `9A348`, kept after the link goes; `Unknown` before the pair's first AAP link this run |
 //! | `rename-dialog` | the rename dialog, while open; its responses are buttons labeled `_Cancel` and `_Rename` |
