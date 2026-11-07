@@ -1,9 +1,10 @@
 //! Apple Continuity proximity pairing parser.
 //!
-//! Includes the flip handling: the AirPods
-//! advertise which pod is "primary", and when the right pod is primary the
-//! battery nibbles, charging bits and ear-detection bits are all swapped so that
-//! "left" and "right" always refer to the physical pods.
+//! Includes the flip handling: the fields that carry one value per pod name the
+//! pods relative to the sender, status bit 5, and the ear bits also by whether
+//! the sender is in the case
+//! (`docs/protocol/ble/proximity-pairing.md#which-pod-sent-it`). The parser
+//! turns them into the physical left and right pods.
 
 use super::decrypt::ENCRYPTED_LEN;
 
@@ -53,10 +54,9 @@ pub struct ProximityData {
     /// `None` unless the status byte puts a pod in the case - see
     /// [`parse_proximity_data`].
     pub lid_open: Option<bool>,
-    /// Status bit 4, "one pod is in the case" in LibrePods' parser. A worn pod
-    /// whose partner is in the case sets it: its own advertisement has no lid
-    /// to report, while its partner's does. Clear whenever no pod is in the
-    /// case.
+    /// Status bit 4, "one pod is in the case" in LibrePods' parser: set by both
+    /// pods while one is in the case and one out, with exceptions
+    /// (`docs/protocol/ble/proximity-pairing.md#byte-3-status-byte`).
     pub one_in_case: bool,
     pub color: u8,
     pub connection_state: u8,
@@ -173,12 +173,14 @@ pub fn parse_proximity_data(data: &[u8]) -> Result<ProximityData, ParseError> {
         ..Default::default()
     };
 
-    // Battery nibbles from byte 4, swapped when flipped.
+    // Byte 4: the sending pod's level in the low nibble, the other pod's in the
+    // high one (docs/protocol/ble/proximity-pairing.md#which-pod-sent-it).
     let battery_byte = payload[4];
+    let (sender_nibble, other_nibble) = (battery_byte & 0x0F, battery_byte >> 4);
     let (left_nibble, right_nibble) = if is_flipped {
-        (battery_byte & 0x0F, (battery_byte >> 4) & 0x0F)
+        (other_nibble, sender_nibble)
     } else {
-        ((battery_byte >> 4) & 0x0F, battery_byte & 0x0F)
+        (sender_nibble, other_nibble)
     };
     pd.left_battery = decode_battery(left_nibble);
     pd.right_battery = decode_battery(right_nibble);
@@ -292,14 +294,12 @@ impl Cleartext {
             | u8::from(self.both_in_case) << 2
             | u8::from(bit1_in_ear) << 1;
 
-        // The sending pod, the "primary" of status bit 5, takes charging bit 4
-        // and, as `parse_proximity_data` reads it, the high battery nibble.
-        // Which nibble is the sender's is open: see
-        // `docs/app/identification.md#hardware-checks`.
+        // The sending pod, the "primary" of status bit 5, takes the low battery
+        // nibble and charging bit 4, as `parse_proximity_data` reads them.
         let (high, low) = if is_flipped {
-            (self.right_battery, self.left_battery)
-        } else {
             (self.left_battery, self.right_battery)
+        } else {
+            (self.right_battery, self.left_battery)
         };
         let (bit5_charging, bit4_charging) = if is_flipped {
             (self.left_charging, self.right_charging)
@@ -778,18 +778,73 @@ mod tests {
         );
     }
 
+    /// The sending pod's level is byte 4's low nibble, the other pod's the high
+    /// one. The cleartext of AirPods Pro 3 advertisements, the left pod at 56-57%
+    /// and the right at 80% over AAP, the left in the closed case with no level
+    /// in one (2026-11-07, #184); and the 17f6591 sample, the right pod at 80%
+    /// and the left at 77% decrypted. The levels come in 10% steps, rounded down.
     #[test]
-    fn parses_unflipped_layout() {
-        // bit 5 set -> primary is left -> not flipped; bit 2 set -> both pods
-        // in the case, so the lid is read.
-        let pd = parse_proximity_data(&advert(0b0010_0100, 0x87, 0x00)).unwrap();
-        assert!(!pd.is_flipped);
-        assert_eq!(pd.primary_pod(), PodSide::Left);
-        assert_eq!(pd.left_battery, Some(80));
-        assert_eq!(pd.right_battery, Some(70));
-        assert_eq!(pd.product_id, 0x2027);
-        assert_eq!(decode_model_name(pd.product_id), Some("AirPods Pro 3"));
-        assert_eq!(pd.lid_open, Some(true));
+    fn reads_the_senders_level_from_the_low_nibble() {
+        for (state, cleartext, sender, left, right) in [
+            (
+                "left pod sending, both worn",
+                [0x01, 0x27, 0x20, 0x2b, 0x85, 0x8f, 0x11, 0x00, 0x05],
+                PodSide::Left,
+                Some(50),
+                Some(80),
+            ),
+            (
+                "left pod sending, out of the ear",
+                [0x01, 0x27, 0x20, 0x29, 0x85, 0x8f, 0x11, 0x00, 0x05],
+                PodSide::Left,
+                Some(50),
+                Some(80),
+            ),
+            (
+                "left pod sending from the case",
+                [0x01, 0x27, 0x20, 0x73, 0x85, 0x98, 0x5a, 0x00, 0x05],
+                PodSide::Left,
+                Some(50),
+                Some(80),
+            ),
+            (
+                "right pod sending, the left in the case",
+                [0x01, 0x27, 0x20, 0x13, 0x58, 0xa8, 0x11, 0x00, 0x05],
+                PodSide::Right,
+                Some(50),
+                Some(80),
+            ),
+            (
+                "right pod sending, the left out of the ear",
+                [0x01, 0x27, 0x20, 0x03, 0x58, 0x8f, 0x11, 0x00, 0x04],
+                PodSide::Right,
+                Some(50),
+                Some(80),
+            ),
+            (
+                "right pod sending, the left in the closed case",
+                [0x01, 0x27, 0x20, 0x02, 0xf8, 0x8f, 0x11, 0x00, 0x04],
+                PodSide::Right,
+                None,
+                Some(80),
+            ),
+            (
+                "17f6591, right pod sending, both worn",
+                [0x01, 0x27, 0x20, 0x0b, 0x78, 0x8f, 0x11, 0x00, 0x04],
+                PodSide::Right,
+                Some(70),
+                Some(80),
+            ),
+        ] {
+            let data = proximity_message(&cleartext, &[0; ENCRYPTED_LEN]);
+            let pd = parse_proximity_data(&data).unwrap();
+            assert_eq!(pd.primary_pod(), sender, "{state}");
+            assert_eq!(
+                (pd.left_battery, pd.right_battery),
+                (left, right),
+                "{state}"
+            );
+        }
     }
 
     /// The two models verified on hardware, from the cleartext of captured
@@ -839,16 +894,6 @@ mod tests {
     fn names_colors_and_says_what_an_unknown_code_is() {
         assert_eq!(decode_color(0x00), "White");
         assert_eq!(decode_color(0x42), "Unknown color (0x42)");
-    }
-
-    #[test]
-    fn swaps_batteries_when_flipped() {
-        // bit 5 clear -> primary is right -> flipped.
-        let pd = parse_proximity_data(&advert(0b0000_0000, 0x87, 0x00)).unwrap();
-        assert!(pd.is_flipped);
-        assert_eq!(pd.primary_pod(), PodSide::Right);
-        assert_eq!(pd.left_battery, Some(70));
-        assert_eq!(pd.right_battery, Some(80));
     }
 
     #[test]
