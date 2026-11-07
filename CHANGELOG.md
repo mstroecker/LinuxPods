@@ -5,7 +5,7 @@ User-facing changes in each release.
 ## [0.5.0] - 2026-11-07
 
 Media paused when you take a pod out; other Bluetooth devices left free to reconnect;
-and the last battery levels kept for a day, across a relaunch.
+the last battery levels kept for a day, across a relaunch; and rewritten documentation.
 
 ### Features
 
@@ -26,6 +26,14 @@ and the last battery levels kept for a day, across a relaunch.
   `~/.local/share/linuxpods/readings.json` beside the keys. The age stays right across a
   suspend. GNOME Settings shows a pair's battery only once it is heard again after a
   relaunch, not yesterday's level as today's (#169, #170).
+
+### Documentation
+
+- **Rewritten documentation:** the README is written for people using the app, and a
+  first user guide says what to do when other Bluetooth devices do not reconnect.
+  Everything else is in `docs/`, split by what it covers: the AirPods' protocols as
+  observed, what the app does and why, and working on it. Each protocol fact says where it
+  comes from: a run on real AirPods, LibrePods, or a guess.
 
 ## [0.4.0] - 2026-11-03
 
