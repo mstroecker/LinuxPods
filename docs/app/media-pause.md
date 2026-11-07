@@ -1,6 +1,6 @@
 # Pausing the media
 
-How LinuxPods pauses what plays when a pod leaves an ear, and plays it again once the pod
+How Cymba pauses what plays when a pod leaves an ear, and plays it again once the pod
 is back (#167). None of it has been tried on a pair yet: it has run against the fake world
 only, in the pipeline tests ([Hardware checks](#hardware-checks)). The places are the
 pods' ([protocol/aap/ear.md](../protocol/aap/ear.md#ear-report-0x06)); MPRIS is the

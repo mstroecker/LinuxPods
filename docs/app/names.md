@@ -1,6 +1,6 @@
 # Names
 
-How LinuxPods names a pair: the pods' own name beside BlueZ's alias, the Name row, the
+How Cymba names a pair: the pods' own name beside BlueZ's alias, the Name row, the
 rename dialog, and the name shown everywhere else. The rename packet and what the pods do
 with a name are theirs: [protocol/aap/rename.md](../protocol/aap/rename.md). The alias is
 BlueZ's: [protocol/linux/bluez.md](../protocol/linux/bluez.md#device1name-and-device1alias).

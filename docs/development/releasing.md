@@ -42,10 +42,10 @@ cannot be changed: fix a broken release with a new version.
 
 | File | Content |
 |---|---|
-| `linuxpods-<version>-x86_64-linux.tar.gz`, `…-aarch64-linux.tar.gz` | binary, `install.sh`, icons, LICENSE, README |
-| `linuxpods-<version>-x86_64-linux.cdx.json`, `…-aarch64-linux.cdx.json` | CycloneDX SBOM of each build |
+| `cymba-<version>-x86_64-linux.tar.gz`, `…-aarch64-linux.tar.gz` | binary, `install.sh`, icons, LICENSE, README |
+| `cymba-<version>-x86_64-linux.cdx.json`, `…-aarch64-linux.cdx.json` | CycloneDX SBOM of each build |
 | `SHA256SUMS` | checksums of the tarballs and the SBOMs |
-| `linuxpods-<version>.intoto.jsonl` | SLSA build provenance bundle, for offline verification with `--bundle` |
+| `cymba-<version>.intoto.jsonl` | SLSA build provenance bundle, for offline verification with `--bundle` |
 
 The binaries are built with `cargo auditable`, which embeds the dependency list,
 on Ubuntu 24.04, so they need glibc 2.39 or newer.
@@ -54,10 +54,17 @@ on Ubuntu 24.04, so they need glibc 2.39 or newer.
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS
-gh attestation verify linuxpods-X.Y.Z-x86_64-linux.tar.gz -R mstroecker/LinuxPods \
-  --signer-workflow mstroecker/LinuxPods/.github/workflows/release-build.yml
+gh attestation verify cymba-X.Y.Z-x86_64-linux.tar.gz -R mstroecker/Cymba \
+  --signer-workflow mstroecker/Cymba/.github/workflows/release-build.yml
 ```
 
 The attestation proves the file was built by `release-build.yml` from the tagged
-commit. Each tarball also carries an attestation of its own build's SBOM
+commit. Releases up to 0.5.0 are LinuxPods': their files are named `linuxpods-…`, and were
+signed while the repository was `mstroecker/LinuxPods`. Each tarball also carries an attestation of its own build's SBOM
 (`--predicate-type https://cyclonedx.org/bom`).
+
+## Open questions
+
+- Which repository name `gh attestation verify` wants for a LinuxPods release, up to
+  0.5.0, signed before the repository was renamed: `mstroecker/LinuxPods` or
+  `mstroecker/Cymba`.

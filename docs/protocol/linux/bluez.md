@@ -374,7 +374,7 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
 ## Open questions
 
 - Do the pods answer a set of `Volume` with another volume than the one set, by how
-  much, and how long do they take? No run of its own: the app's debug log (`RUST_LOG=linuxpods::volume=debug`) of a
+  much, and how long do they take? No run of its own: the app's debug log (`RUST_LOG=cymba::volume=debug`) of a
   stretch of speech shows each volume set beside what the transport read then, and
   `examples/conversation_awareness.rs` with `--duck` what it read back after each set.
 - An adapter that goes - a USB dongle unplugged - taking its battery providers: not

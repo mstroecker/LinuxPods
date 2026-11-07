@@ -1,6 +1,6 @@
 # Battery
 
-How LinuxPods reads a pair's battery levels, what counts as unknown, and where a level
+How Cymba reads a pair's battery levels, what counts as unknown, and where a level
 goes: the window, the tray and GNOME Settings. The packet is the pods':
 [protocol/aap/battery.md](../protocol/aap/battery.md); the advertisement's levels:
 [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md).

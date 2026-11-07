@@ -1,26 +1,26 @@
 # Other Bluetooth devices do not reconnect
 
-While LinuxPods scans for AirPods, some other Bluetooth devices may not reconnect on
+While Cymba scans for AirPods, some other Bluetooth devices may not reconnect on
 their own. A mouse or keyboard that you switch off and on may then stay unconnected.
-This page says how to tell whether LinuxPods is the cause, how to fix it, and what to
+This page says how to tell whether Cymba is the cause, how to fix it, and what to
 do in the meantime. What it says about the scan was seen with one Bluetooth mouse on
-one computer, and how LinuxPods switches has been tried only in its tests; the linked
+one computer, and how Cymba switches has been tried only in its tests; the linked
 details say what is still unknown.
 
-## Is LinuxPods the cause?
+## Is Cymba the cause?
 
-Open **Preferences** from the LinuxPods main menu:
+Open **Preferences** from the Cymba main menu:
 
-- If it shows a group named **Other Bluetooth Devices** at the top, LinuxPods is
+- If it shows a group named **Other Bluetooth Devices** at the top, Cymba is
   scanning in the way that blocks such devices. Read on.
-- If it does not, LinuxPods listens without blocking them
+- If it does not, Cymba listens without blocking them
   ([details](../app/bluez.md#listening-for-the-pods)). Another app may be scanning
   instead: GNOME Settings' Bluetooth panel does so while it is open
   ([details](../protocol/linux/bluez.md#discovery)).
 
 ## Why it happens
 
-To show the battery of AirPods nearby, LinuxPods listens to what they broadcast. Unless
+To show the battery of AirPods nearby, Cymba listens to what they broadcast. Unless
 the experimental features of BlueZ, the Linux Bluetooth service, are turned on - they
 are off by default - the only way an app can do that is to scan actively. While any app
 scans that way, the Linux kernel stops the quiet listening that reconnects such devices,
@@ -34,7 +34,7 @@ The details, with their sources:
 
 ## The fix: turn on BlueZ's experimental features
 
-The setting turns on all of BlueZ's experimental features, not only the one LinuxPods
+The setting turns on all of BlueZ's experimental features, not only the one Cymba
 uses. If you rely on other Bluetooth features, check with
 [BlueZ](https://github.com/bluez/bluez) first.
 
@@ -65,24 +65,24 @@ uses. If you rely on other Bluetooth features, check with
    ([details](../protocol/linux/bluez.md#adapters-and-restarts)); reconnect any that do
    not come back on their own.
 
-LinuxPods notices the restart and switches to the quiet way by itself
+Cymba notices the restart and switches to the quiet way by itself
 ([details](../app/bluez.md#listening-for-the-pods)). You do not need to restart
-LinuxPods. Once it has switched, the group in Preferences goes away.
+Cymba. Once it has switched, the group in Preferences goes away.
 
 If the group is still there after the restart, check that the line is under
-`[General]` and has no `#` in front of it. If it is, restart LinuxPods, and please
-[open an issue](https://github.com/mstroecker/LinuxPods/issues).
+`[General]` and has no `#` in front of it. If it is, restart Cymba, and please
+[open an issue](https://github.com/mstroecker/Cymba/issues).
 
 ## In the meantime: pause scanning
 
-The group in Preferences has a button, **Pause**, which stops LinuxPods' scan for the
+The group in Preferences has a button, **Pause**, which stops Cymba's scan for the
 time it shows. A device that is waiting to reconnect connects as soon as the scan
 stops. Press it, then switch on or wake the device.
 
 While the scan is paused:
 
 - The group says until when.
-- LinuxPods does not hear AirPods nearby. A pair connected to this computer still
+- Cymba does not hear AirPods nearby. A pair connected to this computer still
   shows its battery.
 - Another app's scan still blocks the device. Close GNOME Settings' Bluetooth panel if
   it is open.

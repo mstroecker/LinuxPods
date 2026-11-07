@@ -7,7 +7,7 @@ AirPods Pro 2 (USB-C) (see [Runs](#runs)). Rows for other models come
 from public tables and are unverified; several bytes are still unexplained (see
 [Open questions](#open-questions)).
 
-Parsed by `ble::parser` and `ble::decrypt`; what LinuxPods does with it:
+Parsed by `ble::parser` and `ble::decrypt`; what Cymba does with it:
 [app/identification.md](../../app/identification.md).
 
 **Byte offsets** count from the first payload byte, the one after the type and length
@@ -26,7 +26,7 @@ advertisements, which any receiver nearby can read without a connection.
 
 - **Identifying the pair needs both keys.** An advertisement comes from a resolvable
   private address that only the pair's IRK resolves ([addresses.md](addresses.md)),
-  and only the pair's ENC_KEY decrypts it. Both keys come over AAP. What LinuxPods
+  and only the pair's ENC_KEY decrypts it. Both keys come over AAP. What Cymba
   counts, and what it drops:
   [app/identification.md](../../app/identification.md#what-counts).
 - **The payload changes seldom.** It changes when something happens, and a few times
@@ -162,7 +162,7 @@ Bits 1 and 3 say which pods are in an ear, read as in
 [Which pod sent it](#which-pod-sent-it). Each pod advertises its own status byte, so
 two advertisements can disagree: with both pods worn, they flipped between left
 out/right in and left in/right out within 0.6 s (Pro 3, 2026-11-01, #142). Where
-LinuxPods takes in-ear from instead: [app/in-ear.md](../../app/in-ear.md).
+Cymba takes in-ear from instead: [app/in-ear.md](../../app/in-ear.md).
 
 ### Byte 4: Battery Levels (Left/Right AirPods)
 
@@ -216,7 +216,7 @@ The low bits are not a lid-open counter, which LibrePods calls them: they stayed
 across two lid opens and went to `2` when the pods went back in (Pro 3, 2026-10-25,
 #71). The captures behind these rules: [Runs](#the-71-captures).
 
-How LinuxPods reads and keeps the lid: [app/state.md](../../app/state.md#the-lid).
+How Cymba reads and keeps the lid: [app/state.md](../../app/state.md#the-lid).
 
 ### Byte 7: Device Color
 
@@ -240,7 +240,7 @@ The table is LibrePods' Linux parser's. Every captured advertisement in
 `examples/decrypt_probe.rs`, from both models verified here, carries `0x00`, White. The
 rest is unverified.
 
-How LinuxPods shows it: [app/ui.md](../../app/ui.md#device-color).
+How Cymba shows it: [app/ui.md](../../app/ui.md#device-color).
 
 ### Byte 8: Connection State
 
@@ -280,7 +280,7 @@ that the key was the pair's.
   (L2CAP PSM 4097): [aap/keys.md](../aap/keys.md).
 - **Where it is:** every payload seen here is exactly 25 bytes, so bytes 9-24 are also
   the last 16 bytes (7ba6bbc, 2026-09-09). Where it sits in a payload of another length
-  is an [open question](#open-questions). Which range LinuxPods takes:
+  is an [open question](#open-questions). Which range Cymba takes:
   [app/identification.md](../../app/identification.md#where-the-ciphertext-is).
 
 Both models verified here decrypt this way (2026-09-09/10, 7ba6bbc, 1a7c66d). The tools
@@ -296,7 +296,7 @@ With the pair's ENC_KEY (key type `0x04`):
 3. **Validate** the plaintext by its MAC suffix: [Decryption Validation](#decryption-validation).
 4. **Read** the batteries from bytes 1-3: the sending pod, the other pod, the case.
 
-`examples/decrypt_probe.rs` does this for captured payloads. Which keys LinuxPods
+`examples/decrypt_probe.rs` does this for captured payloads. Which keys Cymba
 tries: [app/identification.md](../../app/identification.md#what-counts).
 
 #### Decrypted Format
@@ -345,7 +345,7 @@ suffix went to zero with the first advertisement from out of the case, and came 
 about 0.1 s after bit 2 when the pods went back in (Pro 3, 2026-10-25, #71). It was
 first seen on a Pro 3 connected and out of the case, the rest of the plaintext intact
 (2026-09-11, 17f6591); the sample is under [Runs](#runs). What rejecting that form would
-do in LinuxPods: [app/identification.md](../../app/identification.md#the-suffix).
+do in Cymba: [app/identification.md](../../app/identification.md#the-suffix).
 
 **Accepting both forms is safe.** The suffix only tests that the key was right, and
 zeros test that just as well: a wrong key yields pseudorandom bytes either way. The
@@ -365,7 +365,7 @@ it (2026-09-10, 1a7c66d):
 
 A magic-byte check therefore rejects *correct* decryptions, which leaves every pair
 unidentified. Do not add one beside the suffix check either. What that does in
-LinuxPods: [app/identification.md](../../app/identification.md#the-suffix).
+Cymba: [app/identification.md](../../app/identification.md#the-suffix).
 
 ## Accuracy Limitations
 
@@ -389,7 +389,7 @@ LinuxPods: [app/identification.md](../../app/identification.md#the-suffix).
 - **The encrypted levels** tracked the cleartext ones on both models (2026-09-09/10,
   7ba6bbc).
 
-Which levels LinuxPods shows: [app/identification.md](../../app/identification.md#batteries-in-the-clear-and-encrypted).
+Which levels Cymba shows: [app/identification.md](../../app/identification.md#batteries-in-the-clear-and-encrypted).
 
 ### Update Frequency
 
@@ -431,7 +431,7 @@ also changed once about 2 s after discovery started, then stayed (Pro 3, #153).
 | Control (noise modes) | No | No |
 | Keys required | No | IRK and ENC_KEY, from AAP |
 
-What LinuxPods shows of each: [app/identification.md](../../app/identification.md#batteries-in-the-clear-and-encrypted).
+What Cymba shows of each: [app/identification.md](../../app/identification.md#batteries-in-the-clear-and-encrypted).
 
 ### AAP (Apple Accessory Protocol)
 

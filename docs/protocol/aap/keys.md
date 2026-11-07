@@ -23,7 +23,7 @@ the advertisement. The two keys undo both:
 With them, a client reads a pair's advertisements while the pair is disconnected or
 connected to another device. AAP gives the exact levels too, but only over a connection.
 
-What LinuxPods counts without the keys: [app/identification.md](../../app/identification.md#what-counts).
+What Cymba counts without the keys: [app/identification.md](../../app/identification.md#what-counts).
 
 ## Key Retrieval Protocol
 
@@ -140,7 +140,7 @@ used again:
 - **Re-pairing:** an AirPods Pro 2 (USB-C), forgotten in GNOME Settings and paired again
   with the same computer, sent the same ENC_KEY and IRK as before (2026-11-01, f9620ca).
 
-Why LinuxPods requests them on every connection anyway, and where it keeps them: [app/keystore.md](../../app/keystore.md#requested-on-every-connection).
+Why Cymba requests them on every connection anyway, and where it keeps them: [app/keystore.md](../../app/keystore.md#requested-on-every-connection).
 
 ## Supported Devices
 

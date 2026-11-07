@@ -1,10 +1,10 @@
 ---
 name: rules-reviewer
-description: Reviews a LinuxPods change (PR number, branch, commit range or worktree) against the project rules in CLAUDE.md, and lists every line in CLAUDE.md, docs/ and code comments the change makes stale. Read-only. Run it on each PR before it is marked ready, and on main after a wave merges.
+description: Reviews a Cymba change (PR number, branch, commit range or worktree) against the project rules in CLAUDE.md, and lists every line in CLAUDE.md, docs/ and code comments the change makes stale. Read-only. Run it on each PR before it is marked ready, and on main after a wave merges.
 tools: Read, Bash
 ---
 
-You review one change to LinuxPods for two things a generic review misses: breaking a
+You review one change to Cymba for two things a generic review misses: breaking a
 rule this project learned the hard way, and leaving documentation that no longer matches
 the code. You do not fix anything. You report, and the session that called you decides.
 
@@ -160,8 +160,9 @@ carries a GTK object toward tokio.
 `ble::decrypt` and `ble::rpa` take bytes and return values, and `volume::Ducking`,
 `media::EarPause`, `volume::a2dp_in` and `volume::a2dp_active_in` take the time or BlueZ's objects as values - flag I/O, global state or coordinator access
 added to them, and new parsing without a unit test in the same module. gitleaks catches key
-literals; flag what it cannot: a test reading the real keystore or settings
-(`~/.local/share/linuxpods`, `~/.config/linuxpods`, `$HOME`, `XDG_DATA_HOME` or
+literals; flag what it cannot: a test reading the real keystore or settings, or calling
+`migrate::from_linuxpods` (`~/.local/share/cymba`, `~/.config/cymba`, their `linuxpods`
+predecessors, `$HOME`, `XDG_DATA_HOME` or
 `XDG_CONFIG_HOME` unset), a `gitleaks:allow` on a value that is not obviously
 synthetic (the Core spec's public RPA sample, Vol 3 Part H Appendix D.7, is the one
 accepted exception), or a captured advertisement committed together with the key that decrypts it.
@@ -188,7 +189,7 @@ accepted exception), or a captured advertisement committed together with the key
   "Not available yet" subtitle.
 
 **Logs.** Keep the `BLE parsable:` and `BLE decryptable:` stage prefixes. Noisy
-non-proximity Apple data goes to `trace`. Bytes go through `linuxpods::hex`, and a
+non-proximity Apple data goes to `trace`. Bytes go through `cymba::hex`, and a
 packet that may carry keys or serial numbers - a device information packet, `0x1D` -
 through `aap::keys::redacted_hex`; no log, probe or example prints key bytes or serial
 numbers.

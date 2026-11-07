@@ -1,6 +1,6 @@
 # In-ear
 
-Where LinuxPods takes each pod's in-ear from, and how it reads the ear report across a
+Where Cymba takes each pod's in-ear from, and how it reads the ear report across a
 role switch. The packets are the pods':
 [protocol/aap/ear.md](../protocol/aap/ear.md). What the media pause does with the
 places: [media-pause.md](media-pause.md).

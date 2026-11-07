@@ -1,13 +1,13 @@
 # Documentation
 
 Two kinds of document live here, and they are kept apart: what the AirPods and the
-Linux Bluetooth stack do, in `protocol/`, and what LinuxPods does about it, in `app/`.
-`development/` holds what is needed to work on LinuxPods rather than to understand it,
+Linux Bluetooth stack do, in `protocol/`, and what Cymba does about it, in `app/`.
+`development/` holds what is needed to work on Cymba rather than to understand it,
 and `user/` what someone using it needs.
 
 ## Which side a fact goes on
 
-**Would it still be true if LinuxPods did not exist?** Then it goes in `protocol/`. If
+**Would it still be true if Cymba did not exist?** Then it goes in `protocol/`. If
 it is true because of a choice made here, it goes in `app/`.
 
 | `protocol/` | `app/` |
@@ -41,7 +41,7 @@ support. Each document ends with **Open questions**: what is not known yet.
 
 ## `app/`
 
-How LinuxPods behaves and why: what it does with each fact, the tradeoffs it accepts,
+How Cymba behaves and why: what it does with each fact, the tradeoffs it accepts,
 and the bugs that shaped it, by issue number. Written for whoever changes the code
 next.
 
@@ -55,7 +55,7 @@ Releases, the fake world and where it departs from the hardware, and the probes 
 
 ## `user/`
 
-For people who use LinuxPods, not those who change it: a problem they may meet, how to
+For people who use Cymba, not those who change it: a problem they may meet, how to
 tell it is theirs, and what to do. The app links some of these on GitHub, so a file
 here keeps its name.
 

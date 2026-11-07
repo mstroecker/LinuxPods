@@ -1,16 +1,24 @@
-# LinuxPods
+<div align="center">
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mstroecker/LinuxPods/badge)](https://scorecard.dev/viewer/?uri=github.com/mstroecker/LinuxPods)
-[![codecov](https://codecov.io/gh/mstroecker/LinuxPods/graph/badge.svg)](https://codecov.io/gh/mstroecker/LinuxPods)
-[![Release](https://img.shields.io/github/v/release/mstroecker/LinuxPods)](https://github.com/mstroecker/LinuxPods/releases/latest)
-[![License: GPL-3.0-or-later](https://img.shields.io/github/license/mstroecker/LinuxPods)](LICENSE)
+<img src="assets/icons/hicolor/scalable/apps/io.github.mstroecker.Cymba.svg" alt="" width="128">
+
+# Cymba
+
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mstroecker/Cymba/badge)](https://scorecard.dev/viewer/?uri=github.com/mstroecker/Cymba)
+[![codecov](https://codecov.io/gh/mstroecker/Cymba/graph/badge.svg)](https://codecov.io/gh/mstroecker/Cymba)
+[![Release](https://img.shields.io/github/v/release/mstroecker/Cymba)](https://github.com/mstroecker/Cymba/releases/latest)
+[![License: GPL-3.0-or-later](https://img.shields.io/github/license/mstroecker/Cymba)](LICENSE)
 [![MSRV 1.92](https://img.shields.io/badge/rustc-1.92+-orange?logo=rust)](Cargo.toml)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](docs/development/releasing.md#verifying-a-release)
 
-A native GNOME desktop application for managing Apple AirPods on Linux.
+</div>
+
+A native GNOME desktop application for managing Apple AirPods on Linux. Formerly
+LinuxPods: updating from it keeps your keys, last readings and settings
+([what moves](docs/app/from-linuxpods.md)).
 
 <p align="center">
-  <img src="docs/images/control-tab.png" alt="LinuxPods window: device switcher in the header bar, battery levels for both pods and the case, the model and its color, noise control modes, Conversation Awareness, and the Info group with the name and firmware version" width="360">
+  <img src="docs/images/control-tab.png" alt="Cymba window: device switcher in the header bar, battery levels for both pods and the case, the model and its color, noise control modes, Conversation Awareness, and the Info group with the name and firmware version" width="360">
 </p>
 
 > [!WARNING]
@@ -18,7 +26,7 @@ A native GNOME desktop application for managing Apple AirPods on Linux.
 
 ## Features
 
-What the AirPods can do, grouped by how LinuxPods reaches it.
+What the AirPods can do, grouped by how Cymba reaches it.
 
 ✅ fully working &nbsp;·&nbsp; 🚧 partial &nbsp;·&nbsp; 📋 planned &nbsp;·&nbsp; ❓ unsure
 
@@ -166,8 +174,8 @@ nix-shell -p gtk4 libadwaita bluez cargo
 ## Building
 
 ```bash
-git clone https://github.com/mstroecker/LinuxPods.git
-cd LinuxPods
+git clone https://github.com/mstroecker/Cymba.git
+cd Cymba
 cargo build --release    # or: make build-release
 cargo run                # or: make run
 ```
@@ -180,12 +188,12 @@ Later builds are incremental.
 ### From a release
 
 Download the tarball for your architecture from
-[Releases](https://github.com/mstroecker/LinuxPods/releases), then:
+[Releases](https://github.com/mstroecker/Cymba/releases), then:
 
 ```bash
-tar -xzf linuxpods-0.5.0-x86_64-linux.tar.gz
-linuxpods-0.5.0-x86_64-linux/install.sh              # same as make install below
-linuxpods-0.5.0-x86_64-linux/install.sh --uninstall
+tar -xzf cymba-0.5.0-x86_64-linux.tar.gz
+cymba-0.5.0-x86_64-linux/install.sh              # same as make install below
+cymba-0.5.0-x86_64-linux/install.sh --uninstall
 ```
 
 The release binaries need glibc 2.39 or newer besides the runtime libraries listed under
@@ -200,7 +208,7 @@ make install      # ~/.local/bin, autostart entry, launcher entry - no sudo
 make uninstall
 ```
 
-`make install` puts a release build in `~/.local/bin/linuxpods`, writes an autostart entry
+`make install` puts a release build in `~/.local/bin/cymba`, writes an autostart entry
 that starts it in the tray on login, adds a launcher entry that opens it with the window,
 and starts it straight away. `PREFIX` overrides the install location.
 
@@ -209,9 +217,9 @@ compiled into the binary, so the installed copy does not depend on the source tr
 
 ## Usage
 
-Launch with `cargo run`, or `./target/release/linuxpods` after a release build.
+Launch with `cargo run`, or `./target/release/cymba` after a release build.
 `--minimized` starts in the system tray without showing the window; the tray's
-**Open LinuxPods** brings it up. Launched again with `--minimized` while it runs, it
+**Open Cymba** brings it up. Launched again with `--minimized` while it runs, it
 leaves the window as it is.
 
 The window shows the three battery levels, charging state and in-ear detection; under
@@ -220,27 +228,27 @@ one pair to show - each one it holds a key for, and each one connected over AAP 
 header bar switches between them. **Preferences**, in the main menu, lists every one of
 them with its encryption key status, turns low battery notifications off and on, and
 pausing the media when a pod is taken out. Both switches are kept across restarts, in
-`~/.config/linuxpods/settings.json`. Low battery
+`~/.config/cymba/settings.json`. Low battery
 notifications need the launcher entry that `make install` writes: GNOME Shell shows none
-for an app it has no desktop entry for. While LinuxPods scans in a way that can keep
+for an app it has no desktop entry for. While Cymba scans in a way that can keep
 other Bluetooth devices from reconnecting, Preferences says so at the top: see
 [Troubleshooting](#troubleshooting).
 
-Setup is connecting the AirPods to this machine once. On every connection LinuxPods asks
+Setup is connecting the AirPods to this machine once. On every connection Cymba asks
 them for their keys - the IRK and the encryption key - and writes them to
-`~/.local/share/linuxpods/keys.json`,
+`~/.local/share/cymba/keys.json`,
 which is what identifies them over BLE: until then the app has no way to tell their
 advertisements from any other pair's, and shows nothing for them there. From then on the
 app reads exact levels even when the AirPods are connected elsewhere. Should the keys
 ever change, asking again on each connection picks up the new ones: reconnecting the
 AirPods is all it takes. Once heard, a pair's last reading stays on show for a day, with
 how long ago it was heard - a pair in its closed case says nothing - and across restarts
-too, kept in `~/.local/share/linuxpods/readings.json` beside the keys.
+too, kept in `~/.local/share/cymba/readings.json` beside the keys.
 
 ## Troubleshooting
 
-**A Bluetooth mouse or keyboard does not reconnect while LinuxPods runs.** On a stock
-BlueZ, LinuxPods scans in a way that can keep some of them from reconnecting, and
+**A Bluetooth mouse or keyboard does not reconnect while Cymba runs.** On a stock
+BlueZ, Cymba scans in a way that can keep some of them from reconnecting, and
 Preferences then says so, with a button that pauses the scan. The fix is a line in
 `/etc/bluetooth/main.conf`: see
 [`docs/user/other-devices.md`](docs/user/other-devices.md).
@@ -265,7 +273,7 @@ Coordinator (state per device, keyed by real MAC)
 
 The design is in [`docs/app/architecture.md`](docs/app/architecture.md).
 [`docs/README.md`](docs/README.md) maps the rest of the documentation: what the AirPods
-and Linux do, in `docs/protocol/`, what LinuxPods does about it, in `docs/app/`, and what
+and Linux do, in `docs/protocol/`, what Cymba does about it, in `docs/app/`, and what
 users need to know, in `docs/user/`.
 
 ## Development
@@ -275,7 +283,7 @@ make test    # cargo test --all-targets, then again with --features harness
 make lint    # cargo clippy --all-targets -- -D warnings, likewise
 cargo fmt
 
-RUST_LOG=linuxpods=debug cargo run   # protocol tracing (make run-trace)
+RUST_LOG=cymba=debug cargo run   # protocol tracing (make run-trace)
 GTK_DEBUG=interactive cargo run      # GTK inspector (make run-debug)
 ```
 
@@ -293,7 +301,7 @@ make fake-world-stop
 to change the fake world and drive the app's UI while it runs, and
 [`docs/development/fake-world.md`](docs/development/fake-world.md) where the fakes depart
 from the hardware. Both `make test` and `make fake-world` leave a harness build at
-`target/debug/linuxpods`: run `cargo build` before testing against real AirPods.
+`target/debug/cymba`: run `cargo build` before testing against real AirPods.
 
 Debug logging reports each protocol stage separately
 ([`docs/app/logging.md`](docs/app/logging.md)):
@@ -305,7 +313,7 @@ BLE 4B:11:22:33:44:55 [decrypted]: left=Some(75) right=Some(73) case=Some(61) li
 AAP connected to AA:BB:CC:DD:EE:FF (cid 2822) in 412 ms
 ```
 
-Add `linuxpods=trace` to also see Apple manufacturer data that is not proximity pairing.
+Add `cymba=trace` to also see Apple manufacturer data that is not proximity pairing.
 
 The examples in `examples/` exercise the protocol layers without the window - asking a
 pair for its keys, cycling noise control, renaming, logging Conversation Awareness:

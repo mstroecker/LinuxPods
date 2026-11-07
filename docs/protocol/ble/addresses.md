@@ -5,7 +5,7 @@ change every few minutes, and that only the pair's IRK ties back to the pair. Ch
 here on two models only, AirPods Pro 3 and AirPods Pro 2 (USB-C) (see [Runs](#runs));
 other models are untested.
 
-Resolved by `ble::rpa`; what LinuxPods does with it:
+Resolved by `ble::rpa`; what Cymba does with it:
 [app/identification.md](../../app/identification.md).
 
 Addresses are written as usual, most significant byte first: in `AA:BB:CC:DD:EE:FF`,
@@ -88,7 +88,7 @@ disagreed (Pro 3 and Pro 2 (USB-C), 2026-10-28, #134; [Runs](#runs)).
 - **A recorded advertisement replayed from another address** does not resolve with the
   pair's IRK.
 
-Where LinuxPods keeps the IRK and reverses it:
+Where Cymba keeps the IRK and reverses it:
 [app/keystore.md](../../app/keystore.md#the-file). Which advertisements it
 counts: [app/identification.md](../../app/identification.md#what-counts).
 
@@ -114,7 +114,7 @@ BLE advertisement received (address PP:PP:PP:HH:HH:HH)
 ```
 
 The decryption and the suffix check:
-[proximity-pairing.md](proximity-pairing.md#decryption-validation). How LinuxPods keys
+[proximity-pairing.md](proximity-pairing.md#decryption-validation). How Cymba keys
 what it identifies, and drops the rest:
 [app/identification.md](../../app/identification.md#keyed-by-the-real-mac).
 

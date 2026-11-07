@@ -1,6 +1,6 @@
 # Firmware
 
-How LinuxPods reads the firmware version from the device information packet, keeps it,
+How Cymba reads the firmware version from the device information packet, keeps it,
 and shows it (#161). The packet and how field 10 packs the version are the pods':
 [protocol/aap/device-info.md](../protocol/aap/device-info.md). The version's layout is read
 off one value; the app's Firmware row has run against the fake world only.

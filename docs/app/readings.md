@@ -1,13 +1,13 @@
 # Readings
 
-What LinuxPods keeps of each pair's last BLE reading across a relaunch, and why (#170).
+What Cymba keeps of each pair's last BLE reading across a relaunch, and why (#170).
 A pair put away in its closed case says nothing until it is opened again, and its last
 levels are still a hint of how charged it was. The file is `readings`; the coordinator
 loads and saves it.
 
 ## What is kept
 
-`readings.json`, beside the keys (`~/.local/share/linuxpods/`), mode 0600, written to a
+`readings.json`, beside the keys (`~/.local/share/cymba/`), mode 0600, written to a
 temporary file and renamed over the old one, as the keystore is
 ([keystore.md](keystore.md)).
 

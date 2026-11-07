@@ -1,6 +1,6 @@
 # Identification
 
-Which advertisements LinuxPods counts, how it ties each to a pair, and what it drops. The
+Which advertisements Cymba counts, how it ties each to a pair, and what it drops. The
 addresses and the advertisement are the pods':
 [protocol/ble/addresses.md](../protocol/ble/addresses.md),
 [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md). The keys come
@@ -17,7 +17,7 @@ ENC_KEY decrypts it** (#134). Everything else is dropped on arrival.
 3. **Check the decrypted MAC suffix** ([below](#the-suffix)).
 4. **Key the reading by the pair's real MAC** ([below](#keyed-by-the-real-mac)).
 
-So what LinuxPods shows over BLE is always the exact, decrypted reading. The scanner's
+So what Cymba shows over BLE is always the exact, decrypted reading. The scanner's
 `BLE parsable:` log still records an advertisement that is then dropped
 ([logging.md](logging.md#ble-advertisements)).
 
@@ -74,7 +74,7 @@ What the suffix holds, and when the pods zero it:
 
 - **`00 00 00` is accepted.** The pods zero the field unless both are in the case,
   connected or not (#71). Rejecting it left the pair unidentified whenever a pod was out of
-  the case, and so dropped: the pair vanished from BLE in exactly the case LinuxPods sets
+  the case, and so dropped: the pair vanished from BLE in exactly the case Cymba sets
   out to support.
 - **Identification never came from reading the suffix.** It comes from the IRK that
   resolved the address and the key that decrypted the payload, one key tried at a time.
@@ -87,7 +87,7 @@ As an unidentified advertisement is dropped, nothing showed over BLE at all.
 
 ## Where the ciphertext is
 
-LinuxPods takes the fixed range `payload[9..25]` (`ble::parser::ENCRYPTED_RANGE`), right
+Cymba takes the fixed range `payload[9..25]` (`ble::parser::ENCRYPTED_RANGE`), right
 after the last cleartext byte. Where it sits in the payloads seen:
 [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#bytes-9-24-encrypted-battery-data).
 

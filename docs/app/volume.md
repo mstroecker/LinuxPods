@@ -1,6 +1,6 @@
 # Volume
 
-How LinuxPods lowers the pair's volume while the user speaks, and puts it back. The
+How Cymba lowers the pair's volume while the user speaks, and puts it back. The
 speech levels it acts on are the pods'
 ([protocol/aap/conversation-awareness.md](../protocol/aap/conversation-awareness.md#speech-levels-0x4b));
 the transport's volume is bluetoothd's
