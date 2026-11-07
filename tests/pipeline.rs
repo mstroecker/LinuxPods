@@ -44,23 +44,23 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use zbus::Connection;
 
-use linuxpods::aap::ear::ROLE_SWITCH_HOLD;
-use linuxpods::aap::noise::{allow_off_packet, set_packet};
-use linuxpods::aap::{NoiseMode, conversation, name};
-use linuxpods::attachment::Attachment;
-use linuxpods::ble::decrypt::random_key;
-use linuxpods::ble::decrypt_for_device;
-use linuxpods::ble::parser::{PodSide, parse_proximity_data};
-use linuxpods::ble::rpa::{resolvable_address, resolves};
-use linuxpods::ble::scanner::{Advertisement, ScanControl, Scanner};
-use linuxpods::bluez::{BatteryProvider, ProviderConnection};
-use linuxpods::harness::bluez::{VolumeAnswer, device_path};
-use linuxpods::harness::pods::{ADDRESS_ROTATION, PRO_2_USB_C, PRO_3, Part, Pods};
-use linuxpods::harness::{FakePlayer, PrivateBus, World};
-use linuxpods::keystore::{KEYS_FILE, Keystore, PairKeys};
-use linuxpods::media::{Media, MediaControl, Playback, Switch};
-use linuxpods::podstate::{Command, Coordinator, DataSource, Snapshot};
-use linuxpods::volume::{self, Volume, VolumeControl};
+use cymba::aap::ear::ROLE_SWITCH_HOLD;
+use cymba::aap::noise::{allow_off_packet, set_packet};
+use cymba::aap::{NoiseMode, conversation, name};
+use cymba::attachment::Attachment;
+use cymba::ble::decrypt::random_key;
+use cymba::ble::decrypt_for_device;
+use cymba::ble::parser::{PodSide, parse_proximity_data};
+use cymba::ble::rpa::{resolvable_address, resolves};
+use cymba::ble::scanner::{Advertisement, ScanControl, Scanner};
+use cymba::bluez::{BatteryProvider, ProviderConnection};
+use cymba::harness::bluez::{VolumeAnswer, device_path};
+use cymba::harness::pods::{ADDRESS_ROTATION, PRO_2_USB_C, PRO_3, Part, Pods};
+use cymba::harness::{FakePlayer, PrivateBus, World};
+use cymba::keystore::{KEYS_FILE, Keystore, PairKeys};
+use cymba::media::{Media, MediaControl, Playback, Switch};
+use cymba::podstate::{Command, Coordinator, DataSource, Snapshot};
+use cymba::volume::{self, Volume, VolumeControl};
 
 /// The longest any one wait may take, so that a regression fails the test
 /// instead of hanging CI. The slowest wait is for a pair's first BLE reading:
@@ -118,7 +118,7 @@ const HCI1: &str = "hci1";
 /// what; by default the app's info lines.
 fn init_logs() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "linuxpods=info".into());
+        .unwrap_or_else(|_| "cymba=info".into());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_test_writer()
@@ -189,7 +189,7 @@ impl Fixture {
     ) -> Self {
         init_logs();
         let sockets = tempfile::Builder::new()
-            .prefix("linuxpods-aap")
+            .prefix("cymba-aap")
             .tempdir()
             .unwrap();
         let data = tempfile::tempdir().unwrap();
@@ -3644,7 +3644,7 @@ async fn a_bluez_restart_read_twice_keeps_the_battery() {
     assert_eq!(bluez.providers_on(HCI0), 1);
 }
 
-/// Two LinuxPods on one system bus - two users logged in, each with the app
+/// Two Cymba on one system bus - two users logged in, each with the app
 /// starting with their session - each get a battery provider of their own,
 /// at a root of their own: bluetoothd tells providers apart by root alone.
 /// Once the first has gone, the second's batteries are the ones GNOME

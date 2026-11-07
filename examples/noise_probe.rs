@@ -17,10 +17,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
-use linuxpods::aap::conversation::describe_level;
-use linuxpods::aap::noise::{NoiseMode, set_packet};
-use linuxpods::aap::{Client, Message, decode, keys};
-use linuxpods::hex;
+use cymba::aap::conversation::describe_level;
+use cymba::aap::noise::{NoiseMode, set_packet};
+use cymba::aap::{Client, Message, decode, keys};
+use cymba::hex;
 
 /// How long to listen after each command. The 0x0D echo, when it comes at all,
 /// took seconds to arrive on the hardware this was verified against.
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "linuxpods=debug".into()),
+                .unwrap_or_else(|_| "cymba=debug".into()),
         )
         .init();
 
@@ -144,10 +144,7 @@ async fn main() -> anyhow::Result<()> {
     // `Coordinator::set_noise_control` does it.
     println!("\n--- Off, with allow-off enabled ---");
     client.set_allow_off_listening_mode(true).await?;
-    println!(
-        "  sent {}",
-        hex(&linuxpods::aap::noise::allow_off_packet(true))
-    );
+    println!("  sent {}", hex(&cymba::aap::noise::allow_off_packet(true)));
     client.set_noise_mode(NoiseMode::Off).await?;
     println!("  sent {}", hex(&set_packet(NoiseMode::Off)));
     listen(&client, RESPONSE_WINDOW, "recv").await;

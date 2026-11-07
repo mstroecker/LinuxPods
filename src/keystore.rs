@@ -2,7 +2,7 @@
 //! decrypts its advertisements, and its IRK, which resolves the addresses
 //! they come from.
 //!
-//! Stored at ~/.local/share/linuxpods/keys.json (XDG Base Directory), mode 0600:
+//! Stored at ~/.local/share/cymba/keys.json (XDG Base Directory), mode 0600:
 //! {"version": 2, "keys": {"MAC": "base64 ENC_KEY", ...}, "irks": {"MAC": "base64 IRK", ...}}
 //!
 //! Version 1 had no `irks`, and loads with no IRK for any pair: each gets one
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::KEY_LEN;
 
-const APP_NAME: &str = "linuxpods";
+const APP_NAME: &str = "cymba";
 /// The key file's name, inside [`default_dir`] or the directory given to
 /// [`Keystore::with_dir`].
 pub const KEYS_FILE: &str = "keys.json";
@@ -276,8 +276,8 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// Where [`Keystore::new`] keeps the keys: $XDG_DATA_HOME/linuxpods, falling
-/// back to ~/.local/share/linuxpods.
+/// Where [`Keystore::new`] keeps the keys: $XDG_DATA_HOME/cymba, falling
+/// back to ~/.local/share/cymba.
 pub fn default_dir() -> Result<PathBuf> {
     let base = dirs::data_dir().context("failed to determine XDG data directory")?;
     Ok(base.join(APP_NAME))

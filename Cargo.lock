@@ -238,6 +238,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "cymba"
+version = "0.5.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "async-channel",
+ "base64",
+ "bluer",
+ "dirs",
+ "futures-util",
+ "glib-build-tools",
+ "gtk4",
+ "ksni",
+ "libadwaita",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-seqpacket",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
 name = "dirs"
 version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -843,33 +870,6 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-
-[[package]]
-name = "linuxpods"
-version = "0.5.0"
-dependencies = [
- "aes",
- "anyhow",
- "async-channel",
- "base64",
- "bluer",
- "dirs",
- "futures-util",
- "glib-build-tools",
- "gtk4",
- "ksni",
- "libadwaita",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-seqpacket",
- "tracing",
- "tracing-subscriber",
- "zbus",
-]
 
 [[package]]
 name = "log"

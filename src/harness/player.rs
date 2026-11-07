@@ -12,7 +12,7 @@
 //!
 //! What the user does in the player's own window - play, pause, stop - goes
 //! through [`FakePlayer::set_status`], in the same process, or over D-Bus
-//! through `io.github.mstroecker.LinuxPods.FakePlayer1` beside the rest, for
+//! through `io.github.mstroecker.Cymba.FakePlayer1` beside the rest, for
 //! `fakepods` and `scripts/fake-world.sh player`:
 //!
 //! | Method | Does |
@@ -32,7 +32,7 @@ use zbus::{Connection, fdo, interface};
 use crate::media::{MPRIS_PATH, MPRIS_PREFIX, Playback};
 
 /// The interface the fake's own controls are on.
-pub const CONTROL_INTERFACE: &str = "io.github.mstroecker.LinuxPods.FakePlayer1";
+pub const CONTROL_INTERFACE: &str = "io.github.mstroecker.Cymba.FakePlayer1";
 
 /// A fake MPRIS player. Clones share it; it stays on the bus until
 /// [`FakePlayer::close`], or until the last clone is dropped.
@@ -272,7 +272,7 @@ struct FakePlayer1 {
     state: Arc<Mutex<State>>,
 }
 
-#[interface(name = "io.github.mstroecker.LinuxPods.FakePlayer1")]
+#[interface(name = "io.github.mstroecker.Cymba.FakePlayer1")]
 impl FakePlayer1 {
     async fn set_status(
         &self,

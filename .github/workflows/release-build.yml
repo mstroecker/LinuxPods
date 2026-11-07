@@ -1,8 +1,8 @@
 # Builds the release files and attests them. A reusable workflow, so the
 # attestations are signed with this workflow's identity rather than the caller's
 # (SLSA Build L3). Verify with:
-#   gh attestation verify <file> -R mstroecker/LinuxPods \
-#     --signer-workflow mstroecker/LinuxPods/.github/workflows/release-build.yml
+#   gh attestation verify <file> -R mstroecker/Cymba \
+#     --signer-workflow mstroecker/Cymba/.github/workflows/release-build.yml
 name: Release build
 
 on:
@@ -46,7 +46,7 @@ jobs:
       # Native build, so the SBOM's default (host) target is this build's target
       - run: |
           make sbom
-          mv target/sbom/linuxpods.cdx.json "dist/linuxpods-${VERSION}-${ARCH}-linux.cdx.json"
+          mv target/sbom/cymba.cdx.json "dist/cymba-${VERSION}-${ARCH}-linux.cdx.json"
         env:
           VERSION: ${{ inputs.version }}
           ARCH: ${{ matrix.arch }}
@@ -80,18 +80,18 @@ jobs:
       # Each tarball is attested against the SBOM of its own build
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: dist/linuxpods-${{ inputs.version }}-x86_64-linux.tar.gz
-          sbom-path: dist/linuxpods-${{ inputs.version }}-x86_64-linux.cdx.json
+          subject-path: dist/cymba-${{ inputs.version }}-x86_64-linux.tar.gz
+          sbom-path: dist/cymba-${{ inputs.version }}-x86_64-linux.cdx.json
           create-storage-record: false
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: dist/linuxpods-${{ inputs.version }}-aarch64-linux.tar.gz
-          sbom-path: dist/linuxpods-${{ inputs.version }}-aarch64-linux.cdx.json
+          subject-path: dist/cymba-${{ inputs.version }}-aarch64-linux.tar.gz
+          sbom-path: dist/cymba-${{ inputs.version }}-aarch64-linux.cdx.json
           create-storage-record: false
       # The provenance bundle also goes into the release, so it can be checked
       # without the GitHub API. One bundle per line (.intoto.jsonl), as
       # gh attestation download writes them and Scorecard looks for them.
-      - run: jq -c . "$BUNDLE" > "dist/linuxpods-${VERSION}.intoto.jsonl"
+      - run: jq -c . "$BUNDLE" > "dist/cymba-${VERSION}.intoto.jsonl"
         env:
           BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
           VERSION: ${{ inputs.version }}

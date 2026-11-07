@@ -26,7 +26,7 @@
 //! Apple devices keep the name they have: an iPhone did not follow the run's
 //! rename.
 //!
-//! Quit LinuxPods first, so the probe's AAP session is the only one.
+//! Quit Cymba first, so the probe's AAP session is the only one.
 //!
 //! Of the device information packet only the name is printed: the rest holds
 //! the model number and serial numbers, and probe output gets pasted into
@@ -48,10 +48,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
-use linuxpods::aap::info::{info_name_bytes, is_info_packet, parse_device_info};
-use linuxpods::aap::name::rename_packet;
-use linuxpods::aap::{Client, keys, message};
-use linuxpods::hex;
+use cymba::aap::info::{info_name_bytes, is_info_packet, parse_device_info};
+use cymba::aap::name::rename_packet;
+use cymba::aap::{Client, keys, message};
+use cymba::hex;
 use tokio::time::Instant;
 
 /// How long the startup dump is read for, the device information in it.
@@ -276,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "linuxpods=info".into()),
+                .unwrap_or_else(|_| "cymba=info".into()),
         )
         .init();
 

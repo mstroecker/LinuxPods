@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs LinuxPods for the current user: the binary, the icons, the launcher
+# Installs Cymba for the current user: the binary, the icons, the launcher
 # entry and the autostart entry. Everything is user-local, so none of it needs
 # sudo. `install.sh --uninstall` removes it all again.
 #
@@ -8,11 +8,11 @@
 set -eu
 
 here=$(dirname "$(readlink -f "$0")")
-BIN=${BIN:-$here/linuxpods}
+BIN=${BIN:-$here/cymba}
 ICONS=${ICONS:-$here/icons}
 PREFIX=${PREFIX:-$HOME/.local}
 
-APP_ID=io.github.mstroecker.LinuxPods
+APP_ID=io.github.mstroecker.Cymba
 BINDIR=$PREFIX/bin
 ICONDIR=$PREFIX/share/icons/hicolor
 APPDIR=$PREFIX/share/applications
@@ -35,19 +35,19 @@ refresh_caches() {
 
 if [ "${1:-}" = --uninstall ]; then
     remove_legacy
-    pkill -f "^$BINDIR/linuxpods" 2>/dev/null || true
-    rm -f "$BINDIR/linuxpods" \
+    pkill -f "^$BINDIR/cymba" 2>/dev/null || true
+    rm -f "$BINDIR/cymba" \
         "$ICONDIR/scalable/apps/$APP_ID.svg" \
         "$ICONDIR/symbolic/apps/$APP_ID-symbolic.svg" \
         "$AUTOSTART/$APP_ID.desktop" \
         "$APPDIR/$APP_ID.desktop"
     refresh_caches
-    echo "LinuxPods uninstalled"
+    echo "Cymba uninstalled"
     exit 0
 fi
 
 remove_legacy
-install -Dm755 "$BIN" "$BINDIR/linuxpods"
+install -Dm755 "$BIN" "$BINDIR/cymba"
 # The battery artwork is compiled into the binary. These icons go into the theme
 # because the shell draws the launcher and the tray, and cannot read resources
 # inside the binary. hicolor/index.theme is deliberately not installed: it exists
@@ -64,10 +64,10 @@ cat > "$AUTOSTART/$APP_ID.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=LinuxPods
+Name=Cymba
 Comment=Manage Apple AirPods on Linux
-Exec=$BINDIR/linuxpods --minimized
-TryExec=$BINDIR/linuxpods
+Exec=$BINDIR/cymba --minimized
+TryExec=$BINDIR/cymba
 Icon=$APP_ID
 Terminal=false
 Categories=AudioVideo;Audio;
@@ -77,13 +77,13 @@ sed -e 's/ --minimized//' -e '/^X-GNOME-Autostart-enabled/d' \
     "$AUTOSTART/$APP_ID.desktop" > "$APPDIR/$APP_ID.desktop"
 refresh_caches
 
-if pgrep -f "^$BINDIR/linuxpods" >/dev/null 2>&1; then
-    echo "LinuxPods is already running - restart it to pick up this build"
+if pgrep -f "^$BINDIR/cymba" >/dev/null 2>&1; then
+    echo "Cymba is already running - restart it to pick up this build"
 else
-    nohup "$BINDIR/linuxpods" --minimized >/dev/null 2>&1 &
-    echo "LinuxPods started in the tray (PID $!)"
+    nohup "$BINDIR/cymba" --minimized >/dev/null 2>&1 &
+    echo "Cymba started in the tray (PID $!)"
 fi
-echo "Installed:  $BINDIR/linuxpods"
+echo "Installed:  $BINDIR/cymba"
 echo "Icons:      $ICONDIR/{scalable,symbolic}/apps"
 echo "Autostart:  $AUTOSTART/$APP_ID.desktop"
 echo "Launcher:   $APPDIR/$APP_ID.desktop"

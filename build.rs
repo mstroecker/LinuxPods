@@ -6,6 +6,6 @@ fn main() {
     glib_build_tools::compile_resources(
         &["assets"],
         "assets/resources.gresource.xml",
-        "linuxpods.gresource",
+        "cymba.gresource",
     );
 }

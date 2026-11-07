@@ -1,8 +1,8 @@
 #!/bin/sh
-# Runs LinuxPods against the fake world of the test harness (#72): fakepods
+# Runs Cymba against the fake world of the test harness (#72): fakepods
 # serves a fake BlueZ and fake AirPods on a private bus that stands in for the
 # system bus, and the app runs on a second private bus as its session bus,
-# with a fake media player beside it. The real bluetoothd, a running LinuxPods,
+# with a fake media player beside it. The real bluetoothd, a running Cymba,
 # its tray and the user's players never see any of it.
 #
 #   scripts/fake-world.sh start [SCENARIO]       in-range (default), connected,
@@ -21,10 +21,10 @@
 # than discovery. `make fake-world` builds the binaries first; this runs them as
 # they are, from ${CARGO_TARGET_DIR:-target}/debug.
 #
-# Everything lives in $XDG_RUNTIME_DIR/linuxpods-harness/world: the buses'
+# Everything lives in $XDG_RUNTIME_DIR/cymba-harness/world: the buses'
 # sockets, the AAP sockets, the app's data and config directories, the logs,
 # and `env`, which holds the bus addresses for gdbus and busctl:
-#   . "$XDG_RUNTIME_DIR/linuxpods-harness/world/env"
+#   . "$XDG_RUNTIME_DIR/cymba-harness/world/env"
 #   gdbus call --address "$SYSTEM_BUS" ...   # fake BlueZ, FakeWorld1
 #   gdbus call --address "$SESSION_BUS" ...  # the app, Automation1, the player
 # The paths stay short: a Unix socket path over 108 bytes cannot be bound.
@@ -32,19 +32,19 @@ set -eu
 
 cd "$(dirname "$0")/.."
 bin=${CARGO_TARGET_DIR:-target}/debug
-base=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/linuxpods-harness
+base=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/cymba-harness
 run=$base/world
 pids=$run/pids
 
-APP_NAME=io.github.mstroecker.LinuxPods
-AUTOMATION_PATH=/io/github/mstroecker/LinuxPods/Automation
-AUTOMATION=io.github.mstroecker.LinuxPods.Automation1
-WORLD_NAME=io.github.mstroecker.LinuxPods.FakeWorld
-WORLD_PATH=/io/github/mstroecker/LinuxPods/FakeWorld
-WORLD=io.github.mstroecker.LinuxPods.FakeWorld1
+APP_NAME=io.github.mstroecker.Cymba
+AUTOMATION_PATH=/io/github/mstroecker/Cymba/Automation
+AUTOMATION=io.github.mstroecker.Cymba.Automation1
+WORLD_NAME=io.github.mstroecker.Cymba.FakeWorld
+WORLD_PATH=/io/github/mstroecker/Cymba/FakeWorld
+WORLD=io.github.mstroecker.Cymba.FakeWorld1
 PLAYER_NAME=org.mpris.MediaPlayer2.fakeplayer
 PLAYER_PATH=/org/mpris/MediaPlayer2
-PLAYER=io.github.mstroecker.LinuxPods.FakePlayer1
+PLAYER=io.github.mstroecker.Cymba.FakePlayer1
 
 die() {
     echo "fake-world: $*" >&2
@@ -116,7 +116,7 @@ start() {
     adapter=${ADAPTER:-hci0}
     experimental=
     [ "${EXPERIMENTAL:-}" != 1 ] || experimental=--experimental
-    for b in fakepods linuxpods; do
+    for b in fakepods cymba; do
         [ -x "$bin/$b" ] || die "$bin/$b is missing: build with cargo build --features harness, or run make fake-world"
     done
     [ ! -e "$pids" ] || die "a fake world is running already, or was not stopped: $0 stop"
@@ -144,10 +144,10 @@ start() {
 
     # shellcheck disable=SC2086 # $common is a list of assignments, $experimental empty or one flag
     spawn fakepods "$run/log/fakepods.log" env $common \
-        RUST_LOG="${RUST_LOG:-linuxpods=debug,fakepods=debug}" \
+        RUST_LOG="${RUST_LOG:-cymba=debug,fakepods=debug}" \
         "$bin/fakepods" --address "$SYSTEM_BUS" --socket-dir "$run/aap" \
         --scenario "$scenario" --adapter "$adapter" $experimental \
-        --keystore "$run/home/data/linuxpods" \
+        --keystore "$run/home/data/cymba" \
         --player-address "$SESSION_BUS"
     fakepods=$(tail -n 1 "$pids" | cut -d' ' -f1)
     i=0
@@ -181,21 +181,21 @@ start() {
     # Automation1 is asked for here and nowhere else: on this private session
     # bus, nothing of the user's can press the window.
     # shellcheck disable=SC2086 # $display and $common are lists of arguments
-    spawn linuxpods "$run/log/linuxpods.log" env $display $common \
+    spawn cymba "$run/log/cymba.log" env $display $common \
         XDG_DATA_HOME="$run/home/data" XDG_CONFIG_HOME="$run/home/config" \
         GSETTINGS_BACKEND=memory GTK_A11Y=none NO_AT_BRIDGE=1 GTK_USE_PORTAL=0 \
-        LINUXPODS_AAP_SOCKET_DIR="$run/aap" LINUXPODS_HARNESS_AUTOMATION=1 \
-        RUST_LOG="${RUST_LOG:-linuxpods=debug}" \
-        "$bin/linuxpods"
+        CYMBA_AAP_SOCKET_DIR="$run/aap" CYMBA_HARNESS_AUTOMATION=1 \
+        RUST_LOG="${RUST_LOG:-cymba=debug}" \
+        "$bin/cymba"
     app=$(tail -n 1 "$pids" | cut -d' ' -f1)
 
     # GApplication takes its name before Automation1 is registered, so the
     # first call is retried until it is.
     i=0
     until call_app Settle 5000 > /dev/null 2>&1; do
-        ours "$app" linuxpods || die "the app exited: $(tail -n 5 "$run/log/linuxpods.log")"
+        ours "$app" cymba || die "the app exited: $(tail -n 5 "$run/log/cymba.log")"
         i=$((i + 1))
-        [ "$i" -lt 150 ] || die "the app did not come up: $run/log/linuxpods.log"
+        [ "$i" -lt 150 ] || die "the app did not come up: $run/log/cymba.log"
         sleep 0.2
     done
     trap - EXIT

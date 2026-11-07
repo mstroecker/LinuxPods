@@ -1,4 +1,4 @@
-//! LinuxPods: AirPods management for GNOME.
+//! Cymba: AirPods management for GNOME.
 //!
 //! Split into a library so the protocol and coordination layers can be driven
 //! from integration tests and probes, not just the GUI binary.
@@ -15,15 +15,15 @@ pub const KEY_LEN: usize = 16;
 
 /// The application ID: the name the app owns on the session bus, and the one
 /// its icon and desktop file are installed under.
-pub const APP_ID: &str = "io.github.mstroecker.LinuxPods";
+pub const APP_ID: &str = "io.github.mstroecker.Cymba";
 
 /// [`APP_ID`]'s icon as a symbolic: the tray's, which the panel recolors to
 /// match its own foreground, and the window's while it has no device to show.
-pub const APP_SYMBOLIC_ICON: &str = "io.github.mstroecker.LinuxPods-symbolic";
+pub const APP_SYMBOLIC_ICON: &str = "io.github.mstroecker.Cymba-symbolic";
 
 /// [`APP_ID`] as an object path: where GTK looks for the app's resources, and
 /// the namespace of the objects it serves on D-Bus.
-pub const APP_PATH: &str = "/io/github/mstroecker/LinuxPods";
+pub const APP_PATH: &str = "/io/github/mstroecker/Cymba";
 
 /// Bytes as hex, two lowercase digits each and a space between: `04 00 04 00`.
 /// For logs and probe output, which get pasted into issues - a packet that

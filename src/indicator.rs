@@ -120,11 +120,11 @@ fn disabled(label: String) -> MenuItem<Indicator> {
 
 impl Tray for Indicator {
     fn id(&self) -> String {
-        "linuxpods".into()
+        "cymba".into()
     }
 
     fn title(&self) -> String {
-        "LinuxPods".into()
+        "Cymba".into()
     }
 
     fn icon_name(&self) -> String {
@@ -149,7 +149,7 @@ impl Tray for Indicator {
             None => "Searching for AirPods…".to_string(),
         };
         ksni::ToolTip {
-            title: "LinuxPods".into(),
+            title: "Cymba".into(),
             description,
             ..Default::default()
         }
@@ -190,7 +190,7 @@ impl Tray for Indicator {
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
-                label: "Open LinuxPods".into(),
+                label: "Open Cymba".into(),
                 activate: Box::new(|this: &mut Self| this.actions.show_window()),
                 ..Default::default()
             }

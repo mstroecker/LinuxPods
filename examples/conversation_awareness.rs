@@ -19,7 +19,7 @@
 //!
 //! With `--duck`, the levels lower the pair's own A2DP volume - BlueZ's
 //! `MediaTransport1.Volume`, on the system bus - as the app lowers it, with
-//! the same logic (`linuxpods::volume::Ducking`): to a fifth at the first
+//! the same logic (`cymba::volume::Ducking`): to a fifth at the first
 //! `01`/`02`, faded back over 1.5 s from the first level of `03` or above,
 //! only while A2DP plays, and left alone once you move it yourself. Each
 //! volume set is logged with its time, and with what the transport read back
@@ -38,10 +38,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
-use linuxpods::aap::conversation::{describe_level, set_packet};
-use linuxpods::aap::{Client, Message, decode, keys};
-use linuxpods::hex;
-use linuxpods::volume::{A2dp, Ducking, find_a2dp, set_volume};
+use cymba::aap::conversation::{describe_level, set_packet};
+use cymba::aap::{Client, Message, decode, keys};
+use cymba::hex;
+use cymba::volume::{A2dp, Ducking, find_a2dp, set_volume};
 use tokio::time::Instant;
 use zbus::Connection;
 
@@ -178,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "linuxpods=info".into()),
+                .unwrap_or_else(|_| "cymba=info".into()),
         )
         .init();
 

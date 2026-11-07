@@ -41,7 +41,7 @@
 //! [protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery-and-directed-advertising)).
 //! With them off, every registration fails with `UnknownMethod` (read, not
 //! run), and the probe stops when no adapter takes the monitor. Close GNOME
-//! Settings' Bluetooth panel, which discovers, and quit LinuxPods wherever it
+//! Settings' Bluetooth panel, which discovers, and quit Cymba wherever it
 //! discovers: on an adapter where BlueZ gives it no monitor. A run says
 //! something about the passive scan only while every adapter reads
 //! `discovering=false`. Decrypts nothing and prints no payload bytes. Prints the random
@@ -57,9 +57,9 @@ use std::io::BufRead;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use cymba::ble::parser::parse_proximity_data;
+use cymba::bluez::{self, BLUEZ_SERVICE};
 use futures_util::StreamExt;
-use linuxpods::ble::parser::parse_proximity_data;
-use linuxpods::bluez::{self, BLUEZ_SERVICE};
 use tokio::sync::mpsc;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
 use zbus::{Connection, MatchRule, Message, MessageStream, interface, proxy};
@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
         Some("--discover") => true,
         Some(other) => bail!("unknown argument {other}; usage: adv_monitor_probe [--discover]"),
     };
-    let root = format!("{}/probe_monitor", linuxpods::APP_PATH);
+    let root = format!("{}/probe_monitor", cymba::APP_PATH);
     let root_path = ObjectPath::try_from(root.as_str())?;
     let (events_tx, mut events) = mpsc::unbounded_channel();
     // Both objects served at build, before `RegisterMonitor`:
@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
         // After the subscription in `signals`: an address's first
         // advertisement comes in the InterfacesAdded that announces it
         // ([protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery)).
-        let scanning = linuxpods::ble::scanner::Scanner::with_connection(conn.clone())
+        let scanning = cymba::ble::scanner::Scanner::with_connection(conn.clone())
             .start_discovery()
             .await?;
         println!(

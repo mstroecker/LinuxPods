@@ -3,12 +3,12 @@
 //! other apps, and GTK's accessibility tree is incomplete and gives no
 //! coordinates to click at. So the app answers for itself.
 //!
-//! `io.github.mstroecker.LinuxPods.Automation1` at
-//! `/io/github/mstroecker/LinuxPods/Automation`, in harness builds only, and
-//! only with `LINUXPODS_HARNESS_AUTOMATION=1`. `scripts/fake-world.sh` sets it
+//! `io.github.mstroecker.Cymba.Automation1` at
+//! `/io/github/mstroecker/Cymba/Automation`, in harness builds only, and
+//! only with `CYMBA_HARNESS_AUTOMATION=1`. `scripts/fake-world.sh` sets it
 //! for an app it has put on a private session bus. Nothing else does: a
 //! harness build is also what `make test` and `make fake-world` leave at
-//! `target/debug/linuxpods`, and served on the user's own session, the
+//! `target/debug/cymba`, and served on the user's own session, the
 //! interface would let any process there press and screenshot the window.
 //!
 //! It is registered in `startup` on the application's own session bus
@@ -25,14 +25,14 @@
 //! | `SetActive(s widget, b active)` | Turns a switch, check or toggle button on or off |
 //! | `Select(s widget, u position)` | Selects a dropdown's item through `set_selected`, so `selected-notify` fires as for a user |
 //! | `SetText(s widget, s text)` | Replaces an entry's text, as typing or pasting it does: `changed` fires, and the cursor ends up after it |
-//! | `Screenshot(s widget) → s path` | Draws the widget to a PNG in `$XDG_RUNTIME_DIR/linuxpods-harness/` |
+//! | `Screenshot(s widget) → s path` | Draws the widget to a PNG in `$XDG_RUNTIME_DIR/cymba-harness/` |
 //! | `Settle(u timeout_ms)` | Returns once the window has taken in the latest snapshot and scanner state, and what was opened is on screen |
 //! | `Notifications() → s` | Every notification sent and withdrawn so far, as JSON |
 //!
 //! The menu's entries are actions, which GApplication already serves on
 //! `org.gtk.Actions`: `app.quit` at the application's path, and on Wayland and
 //! X11 `win.preferences`, `win.about` and `win.noise-mode` at the window's,
-//! `/io/github/mstroecker/LinuxPods/window/1`. On Broadway GTK exports no
+//! `/io/github/mstroecker/Cymba/window/1`. On Broadway GTK exports no
 //! window actions; there, open the menu with `Click("main-menu")` and click
 //! its item.
 //!
@@ -165,7 +165,7 @@
 //!
 //! ## Errors
 //!
-//! Under `io.github.mstroecker.LinuxPods.Automation1.Error.`: `NotFound`;
+//! Under `io.github.mstroecker.Cymba.Automation1.Error.`: `NotFound`;
 //! `Ambiguous`, for an ID that more than one widget carries; `Hidden`;
 //! `Insensitive`; `Unsupported`, for a press the widget does not take, such as
 //! a click on a label; `Timeout`; and `Failed`. A malformed path, or a position
@@ -183,16 +183,16 @@ use serde::Serialize;
 
 use crate::notify::Action;
 
-const INTERFACE_NAME: &str = "io.github.mstroecker.LinuxPods.Automation1";
-const OBJECT_PATH: &str = "/io/github/mstroecker/LinuxPods/Automation";
+const INTERFACE_NAME: &str = "io.github.mstroecker.Cymba.Automation1";
+const OBJECT_PATH: &str = "/io/github/mstroecker/Cymba/Automation";
 
 /// Set to `1`, it has [`register`] serve the interface. A variable of its
 /// own, rather than the AAP socket directory the fake world also sets: that
 /// one says where AAP goes, and neither should switch on the other.
-const ENABLE_ENV: &str = "LINUXPODS_HARNESS_AUTOMATION";
+const ENABLE_ENV: &str = "CYMBA_HARNESS_AUTOMATION";
 
 const INTERFACE_XML: &str = r#"<node>
-  <interface name="io.github.mstroecker.LinuxPods.Automation1">
+  <interface name="io.github.mstroecker.Cymba.Automation1">
     <method name="Tree">
       <arg name="json" type="s" direction="out"/>
     </method>
@@ -226,7 +226,7 @@ const INTERFACE_XML: &str = r#"<node>
 
 /// Below `$XDG_RUNTIME_DIR`: where screenshots go. The caller never names a
 /// path, so a call cannot write anywhere else.
-const SCREENSHOT_DIR: &str = "linuxpods-harness";
+const SCREENSHOT_DIR: &str = "cymba-harness";
 
 /// How often `Settle` looks again. Small beside the render interval it waits
 /// out, so it adds little to the wait.
@@ -483,16 +483,14 @@ enum Error {
 impl Error {
     fn dbus_name(&self) -> &'static str {
         match self {
-            Error::NotFound(_) => "io.github.mstroecker.LinuxPods.Automation1.Error.NotFound",
-            Error::Ambiguous { .. } => "io.github.mstroecker.LinuxPods.Automation1.Error.Ambiguous",
-            Error::Hidden(_) => "io.github.mstroecker.LinuxPods.Automation1.Error.Hidden",
-            Error::Insensitive(_) => "io.github.mstroecker.LinuxPods.Automation1.Error.Insensitive",
-            Error::Unsupported { .. } => {
-                "io.github.mstroecker.LinuxPods.Automation1.Error.Unsupported"
-            }
+            Error::NotFound(_) => "io.github.mstroecker.Cymba.Automation1.Error.NotFound",
+            Error::Ambiguous { .. } => "io.github.mstroecker.Cymba.Automation1.Error.Ambiguous",
+            Error::Hidden(_) => "io.github.mstroecker.Cymba.Automation1.Error.Hidden",
+            Error::Insensitive(_) => "io.github.mstroecker.Cymba.Automation1.Error.Insensitive",
+            Error::Unsupported { .. } => "io.github.mstroecker.Cymba.Automation1.Error.Unsupported",
             Error::InvalidArgs(_) => "org.freedesktop.DBus.Error.InvalidArgs",
-            Error::Timeout(_) => "io.github.mstroecker.LinuxPods.Automation1.Error.Timeout",
-            Error::Failed(_) => "io.github.mstroecker.LinuxPods.Automation1.Error.Failed",
+            Error::Timeout(_) => "io.github.mstroecker.Cymba.Automation1.Error.Timeout",
+            Error::Failed(_) => "io.github.mstroecker.Cymba.Automation1.Error.Failed",
         }
     }
 }

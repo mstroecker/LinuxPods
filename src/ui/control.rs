@@ -67,7 +67,7 @@ fn charging_icon(level: Option<u8>) -> String {
 
 /// Drawn for this app and bundled: the theme has no icon for an earbud being
 /// worn, and headphones read as "audio device" rather than "in an ear".
-pub(super) const IN_EAR_ICON: &str = "linuxpods-in-ear-symbolic";
+pub(super) const IN_EAR_ICON: &str = "cymba-in-ear-symbolic";
 
 /// Window action for noise control. Its state names the mode shown, by
 /// `noise_target`, and is `""` while no mode has been reported.

@@ -2,7 +2,7 @@
 # Run with `make deny`; CI runs the same checks.
 
 [graph]
-# LinuxPods only runs on Linux, so Windows and macOS dependencies are not judged
+# Cymba only runs on Linux, so Windows and macOS dependencies are not judged
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 # Judge the crates optional features pull in too - the harness feature's, say.
 # Releases never enable them, but they still build on CI and developer machines.

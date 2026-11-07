@@ -1,4 +1,4 @@
-//! The scanning hint in Preferences: shown while LinuxPods listens by
+//! The scanning hint in Preferences: shown while Cymba listens by
 //! discovery, with a button that pauses it and a link to the user document.
 //! Why it is shown, and how it is drawn:
 //! [app/ui.md](../../docs/app/ui.md#the-scanning-hint).
@@ -12,7 +12,7 @@ use tokio::time::Instant;
 use crate::ble::scanner::{DISCOVERY_PAUSE, ScanControl, ScanState};
 
 /// The user document the hint links, as it stands on `main`.
-const GUIDE: &str = "https://github.com/mstroecker/LinuxPods/blob/main/docs/user/other-devices.md";
+const GUIDE: &str = "https://github.com/mstroecker/Cymba/blob/main/docs/user/other-devices.md";
 
 /// An icon for a link that leaves the app, bundled with libadwaita: found in
 /// libadwaita 1.10, not checked against the oldest version the build takes.
@@ -57,7 +57,7 @@ impl ScanHint {
             .name("scan-hint")
             .title("Other Bluetooth Devices")
             .description(
-                "Mice and similar devices may not reconnect while LinuxPods scans for \
+                "Mice and similar devices may not reconnect while Cymba scans for \
                  AirPods.",
             )
             .visible(false)

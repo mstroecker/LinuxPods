@@ -26,7 +26,7 @@ use zbus::{Connection, MatchRule, Message, MessageStream, interface, proxy};
 pub const BLUEZ_SERVICE: &str = "org.bluez";
 const ADAPTER_INTERFACE: &str = "org.bluez.Adapter1";
 const BATTERY_NAME: &str = "airpods_battery";
-const SOURCE: &str = "LinuxPods";
+const SOURCE: &str = "Cymba";
 
 /// The service UUID every AirPods lists in `Device1.UUIDs` - the identifier
 /// LibrePods uses too. Unlike the alias it survives a rename, and unlike Apple's
@@ -144,7 +144,7 @@ fn provider_path() -> String {
 /// bluetoothd reads a provider's objects from the ObjectManager at its root.
 ///
 /// bluetoothd tells providers apart by their root alone, whoever registered
-/// it. A root of one connection's own is one no other can hold: two LinuxPods
+/// it. A root of one connection's own is one no other can hold: two Cymba
 /// on one system bus - two users logged in - each get a provider, and BlueZ
 /// refusing a root as registered already can only mean this connection's.
 fn provider_root(owner: &str, adapter: &str) -> Result<OwnedObjectPath> {

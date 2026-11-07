@@ -1,4 +1,4 @@
-//! fakepods: a fake world of AirPods for LinuxPods to run against (#72).
+//! fakepods: a fake world of AirPods for Cymba to run against (#72).
 //!
 //! Serves a fake BlueZ and `FakeWorld1` on the bus at `--address`, with a
 //! pair's AAP socket in `--socket-dir`, and runs until killed. The fake BlueZ
@@ -33,17 +33,17 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bluer::Address;
-use linuxpods::harness::pods::{PRO_2_USB_C, PRO_3};
-use linuxpods::harness::world::DEFAULT_ADAPTER;
-use linuxpods::harness::{FakePlayer, World};
-use linuxpods::keystore::{self, KEYS_FILE, Keystore, PairKeys};
+use cymba::harness::pods::{PRO_2_USB_C, PRO_3};
+use cymba::harness::world::DEFAULT_ADAPTER;
+use cymba::harness::{FakePlayer, World};
+use cymba::keystore::{self, KEYS_FILE, Keystore, PairKeys};
 
 const USAGE: &str = "\
 usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--adapter NAME]
                 [--experimental] [--keystore DIR] [--player-address ADDRESS]
 
   --address ADDRESS  the bus to serve on - a private one, never the system bus
-  --socket-dir DIR   where each pair's AAP socket goes: LINUXPODS_AAP_SOCKET_DIR
+  --socket-dir DIR   where each pair's AAP socket goes: CYMBA_AAP_SOCKET_DIR
   --scenario NAME    in-range (default), connected, two-pairs, flood or empty
   --adapter NAME     the fake BlueZ's one adapter, at /org/bluez/NAME: hci0 (default),
                      or another such as hci1
@@ -173,7 +173,7 @@ fn parse_args(
         check_keystore(dir, app_dir)?;
     }
     // The user's players are there, and a fake one among them would be
-    // paused and played by their own LinuxPods.
+    // paused and played by their own Cymba.
     if player_address.as_deref().is_some_and(is_user_session_bus) {
         return Err("--player-address is the user's session bus; give a private one".into());
     }
@@ -286,7 +286,7 @@ async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "linuxpods=info,fakepods=info".into()),
+                .unwrap_or_else(|_| "cymba=info,fakepods=info".into()),
         )
         .init();
 
@@ -359,7 +359,7 @@ mod tests {
             "--socket-dir",
             "/tmp/a",
             "--player-address",
-            "unix:path=/run/user/1000/linuxpods-harness/world/session/dbus-x,guid=1",
+            "unix:path=/run/user/1000/cymba-harness/world/session/dbus-x,guid=1",
         ])
         .unwrap()
         .unwrap();
@@ -437,7 +437,7 @@ mod tests {
         let link = home.path().join("link");
         std::os::unix::fs::symlink(&data, &link).unwrap();
         // Not made yet, and named through the link.
-        let app_dir = link.join("linuxpods");
+        let app_dir = link.join("cymba");
         let with_keystore = |dir: &Path| {
             let args = [
                 "--address",
@@ -459,12 +459,12 @@ mod tests {
             .collect();
         for dir in [
             app_dir.clone(),
-            data.join("linuxpods"),
-            data.join("./linuxpods/"),
-            data.join("new/../linuxpods"),
-            up.join(data.join("linuxpods").strip_prefix("/").unwrap()),
+            data.join("cymba"),
+            data.join("./cymba/"),
+            data.join("new/../cymba"),
+            up.join(data.join("cymba").strip_prefix("/").unwrap()),
             // Back out of a part that does not exist, and through the link.
-            home.path().join("new/../link/linuxpods"),
+            home.path().join("new/../link/cymba"),
         ] {
             let err = with_keystore(&dir).unwrap_err();
             assert!(

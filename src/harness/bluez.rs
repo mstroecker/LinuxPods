@@ -4218,7 +4218,7 @@ mod tests {
         assert_eq!(battery.get_property::<u8>("Percentage").await.unwrap(), 73);
         assert_eq!(
             battery.get_property::<String>("Source").await.unwrap(),
-            "LinuxPods"
+            "Cymba"
         );
         eventually(|| {
             bluez.ignored_batteries() == [(ADAPTER.to_string(), device_path(ADAPTER, nobody))]

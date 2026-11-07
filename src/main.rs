@@ -1,4 +1,4 @@
-//! LinuxPods - AirPods management for GNOME.
+//! Cymba - AirPods management for GNOME.
 //!
 //! GTK owns the main thread; a multi-threaded tokio runtime carries the BLE, AAP
 //! and D-Bus work, and the two meet over channels: snapshots come to the UI on a
@@ -10,7 +10,7 @@
 //! notifications and a quit asked for by SIGTERM or SIGINT to the GTK main
 //! context on async channels.
 
-use linuxpods::{
+use cymba::{
     APP_ID, attachment, ble, indicator, media, notify, podstate, readings, settings, ui, volume,
 };
 
@@ -22,9 +22,9 @@ use adw::prelude::*;
 use bluer::Address;
 use gtk::{gio, glib};
 
+use cymba::aap::NoiseMode;
+use cymba::bluez::Backoff;
 use indicator::{Indicator, TrayActions};
-use linuxpods::aap::NoiseMode;
-use linuxpods::bluez::Backoff;
 use podstate::{Command, Coordinator};
 
 /// Bridges tray clicks onto the GTK main context, and noise control to the
@@ -199,7 +199,7 @@ fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "linuxpods=info".into()),
+                .unwrap_or_else(|_| "cymba=info".into()),
         )
         .init();
 
@@ -469,7 +469,7 @@ mod tests {
     /// window shows, with it it stays hidden.
     #[test]
     fn minimized_keeps_the_window_hidden() {
-        assert!(shows_window_for(&["linuxpods"]));
-        assert!(!shows_window_for(&["linuxpods", "--minimized"]));
+        assert!(shows_window_for(&["cymba"]));
+        assert!(!shows_window_for(&["cymba", "--minimized"]));
     }
 }
