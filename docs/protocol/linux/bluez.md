@@ -119,6 +119,21 @@ Settings of the monitor and of the manager (BlueZ 5.87; read, not seen in a capt
   (`doc/org.bluez.AdvertisementMonitorManager.rst`): the patterns go to a controller
   that can match them. The Intel AX211 offers it (2026-11-06, #189).
 
+**With the experimental interfaces off, `RegisterMonitor` is refused as unknown.** gdbus
+leaves a call to a hidden member unhandled (`generic_message` in BlueZ 5.87's
+`gdbus/object.c`), and no manager is there to take it. Which error libdbus answers with -
+`UnknownMethod`, or `UnknownInterface` - is a guess, not read nor run.
+
+How bluetoothd keeps a monitor (BlueZ 5.87, `src/adv_monitor.c` and `src/adapter.c`;
+read, not run):
+
+| What | bluetoothd |
+|---|---|
+| A registration | Kept per adapter by the caller's unique name and the root (`app_match`): the same again is refused with `org.bluez.Error.AlreadyExists`. Answered only once the root's objects have been read from the caller (`app_ready_cb`); each monitor is then activated with `Activate`. |
+| `Release` | Called on a monitor whose properties it cannot take, on each monitor of an app that unregisters, on one the kernel removes, and on every monitor of an adapter that goes (`monitor_release`, `manager_destroy`). Not on those of a client that left the bus (`app_disconnect_cb`). |
+| The adapter powering off | The registrations stay; a device whose lost timer runs is reported lost at once (`btd_adv_monitor_power_down`). |
+| A device removed | Dropped from every monitor's found devices, with no `DeviceLost` (`btd_adapter_remove_device`, `btd_adv_monitor_device_remove`). Heard again, it is a new device to the monitor. |
+
 **Through a monitor, the pods' payload arrives and the mouse reconnects** (Pro 3, Intel
 AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
 
@@ -356,3 +371,6 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
     address still connect then? Not run: the runs here had privacy off.
   - Only the Intel AX211, with the patterns in the controller, has run. Does an adapter
     without `controller-patterns` behave the same?
+  - Does a monitor hear again once its adapter has powered off and on? bluetoothd keeps
+    it registered ([above](#discovery-and-directed-advertising)); whether the kernel
+    scans for it again was not read, and has not run.
