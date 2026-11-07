@@ -242,6 +242,16 @@ MPRIS method the app called, in order - never `PlayPause`).
 
 Change, settle, then read: `SetBattery`, `Settle`, `tree`.
 
+The scanning hint (#189), once Preferences is open (see below): with the experimental
+interfaces off, as the fake BlueZ starts, the `scan-hint` group is visible at the top;
+with `EXPERIMENTAL=1` it is not, and `SetExperimental` and `RestartBluez` show or hide it
+at runtime. `app Click scan-pause` pauses the app's discovery: the app logs `BLE
+discovery paused` and `BLE discovery stopped on` the adapter, and the `scan-pause-row`'s
+title reads `Paused until` and the local time; `DISCOVERY_PAUSE` later it logs `BLE
+discovery pause over`, discovery starts again, and the title reads `Scanning`. Never
+click `scan-guide`: it hands the guide's URL to GTK to open, which may reach a browser
+on the user's desktop.
+
 Low battery notifications: `SetBattery` a part to 20 or below (5 or below is critical),
 then `app Notifications` lists the notification sent, by ID `low-battery-<MAC>`. Above 25
 again, clear of the low threshold, or charging, it lists the withdrawal - or, while another

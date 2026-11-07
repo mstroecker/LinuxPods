@@ -26,7 +26,7 @@
 //! | `Select(s widget, u position)` | Selects a dropdown's item through `set_selected`, so `selected-notify` fires as for a user |
 //! | `SetText(s widget, s text)` | Replaces an entry's text, as typing or pasting it does: `changed` fires, and the cursor ends up after it |
 //! | `Screenshot(s widget) → s path` | Draws the widget to a PNG in `$XDG_RUNTIME_DIR/linuxpods-harness/` |
-//! | `Settle(u timeout_ms)` | Returns once the window has taken in the latest snapshot, and what was opened is on screen |
+//! | `Settle(u timeout_ms)` | Returns once the window has taken in the latest snapshot and scanner state, and what was opened is on screen |
 //! | `Notifications() → s` | Every notification sent and withdrawn so far, as JSON |
 //!
 //! The menu's entries are actions, which GApplication already serves on
@@ -80,6 +80,10 @@
 //! | `auto-connect` | its switch, always insensitive |
 //! | `battery-notifications` | its switch for low battery notifications, as saved: on unless turned off |
 //! | `pause-on-ear` | its switch for pausing the media when a pod leaves an ear, as saved: on unless turned off |
+//! | `scan-hint` | the scanning hint's group, at the top of Preferences: visible while a powered adapter listens by discovery |
+//! | `scan-pause-row` | its row; the title is `Scanning`, or `Paused until` and the local time the pause ends |
+//! | `scan-pause` | its button; clicked, it pauses the app's discovery for `DISCOVERY_PAUSE`, or that long from then when paused already |
+//! | `scan-guide` | its row linking the user document; clicked, it hands the document's URL to GTK to open in a browser |
 //! | `device-<MAC>` | a device's row in the Development group |
 //! | `device-status-<MAC>` | its status: Connected, Advertising, ... |
 //! | `about` | the About dialog, while open |
@@ -122,19 +126,20 @@
 //! button bound to an action - a noise radio - activates the action, and the
 //! action's state decides. Whatever a press sets off - a command to the
 //! AirPods - comes back as a snapshot, when it comes back at all, and as a
-//! toast when it fails.
+//! toast when it fails; a discovery pause comes back as the scanner's state.
 //!
 //! ## Settling
 //!
-//! The window takes in a snapshot at most once per render interval, so a tree
-//! read straight after a change can be one snapshot behind. Nor does a popover
-//! appear at once: it is on screen only once the display server has placed
-//! it, a moment after the click that opened it. And libadwaita puts a dialog's
-//! content on screen only as it lays the dialog out, which happens as a frame
-//! is drawn - over two frames, when a narrow window turns the dialog into a
-//! bottom sheet. `Settle` waits until no snapshot is waiting for the window
-//! and every window and popover that has been shown is on screen, then has
-//! them draw frames until one changes nothing in the tree. It covers the app's
+//! The window takes in a snapshot at most once per render interval, and the
+//! scanner's state likewise, so a tree read straight after a change can be one
+//! behind. Nor does a popover appear at once: it is on screen only once the
+//! display server has placed it, a moment after the click that opened it. And
+//! libadwaita puts a dialog's content on screen only as it lays the dialog
+//! out, which happens as a frame is drawn - over two frames, when a narrow
+//! window turns the dialog into a bottom sheet. `Settle` waits until no
+//! snapshot or scanner state is waiting for the window and every window and
+//! popover that has been shown is on screen, then has them draw frames until
+//! one changes nothing in the tree. It covers the app's
 //! side only: a change still on its way through BlueZ, AAP or the coordinator
 //! has not been broadcast, and nothing here can wait for it.
 //!
@@ -236,8 +241,9 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 static SHOTS: AtomicU32 = AtomicU32::new(1);
 
 thread_local! {
-    /// Whether a snapshot is waiting for the window's render loop, as
-    /// `window::activate` reports it. Empty until the window is built.
+    /// Whether a snapshot or a scanner state is waiting for the window's
+    /// render loops, as `window::activate` reports it. Empty until the window
+    /// is built.
     static SNAPSHOT_WAITING: RefCell<Option<Box<dyn Fn() -> bool>>> = const { RefCell::new(None) };
 
     /// What `Notifications` returns. `None` until the interface is served, so
@@ -293,8 +299,8 @@ fn enabled(value: Option<&OsStr>) -> bool {
     value == Some(OsStr::new("1"))
 }
 
-/// Lets `Settle` ask the window's render loop whether a snapshot is waiting
-/// for it. Called by `window::activate`.
+/// Lets `Settle` ask the window's render loops whether a snapshot or a
+/// scanner state is waiting for them. Called by `window::activate`.
 pub(super) fn watch_render_loop(waiting: impl Fn() -> bool + 'static) {
     SNAPSHOT_WAITING.with_borrow_mut(|slot| *slot = Some(Box::new(waiting)));
 }
@@ -673,8 +679,8 @@ fn screenshot_name(target: &str, pid: u32, shot: u32) -> String {
     format!("{stem}-{pid}-{shot}.png")
 }
 
-/// Whether the window has taken in every snapshot broadcast so far. Not before
-/// it is built: until then, nothing is shown at all.
+/// Whether the window has taken in every snapshot broadcast so far, and every
+/// scanner state. Not before it is built: until then, nothing is shown at all.
 fn snapshots_taken_in() -> bool {
     SNAPSHOT_WAITING.with_borrow(|waiting| waiting.as_ref().is_some_and(|waiting| !waiting()))
 }

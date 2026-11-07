@@ -156,9 +156,12 @@ impl ScanControl {
     }
 
     /// How the adapters listen now, kept as it changes: latest-wins, as a
-    /// watch is.
+    /// watch is, and marked changed, so that the current state arrives at
+    /// once.
     pub fn state(&self) -> watch::Receiver<ScanState> {
-        self.state.subscribe()
+        let mut state = self.state.subscribe();
+        state.mark_changed();
+        state
     }
 
     /// Stops the app's discovery on every adapter for [`DISCOVERY_PAUSE`],
@@ -1317,6 +1320,21 @@ fn mac_from_path(path: &str) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A receiver taken after the state was set - a window built once the
+    /// scanner has decided - is woken for it, and holds it.
+    #[test]
+    fn a_new_receiver_has_the_state_at_once() {
+        let control = ScanControl::new();
+        let state = ScanState {
+            fallback: true,
+            paused_until: None,
+        };
+        control.state.send_replace(state);
+        let mut receiver = control.state();
+        assert!(receiver.has_changed().unwrap());
+        assert_eq!(*receiver.borrow_and_update(), state);
+    }
 
     fn found(device: &str) -> MonitorEvent {
         MonitorEvent {

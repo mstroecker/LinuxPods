@@ -3,7 +3,8 @@
 //! Updates arrive from the coordinator over a watch channel consumed on the GTK
 //! main context. That is the only path into the device state the UI shows:
 //! GTK types are !Send, so a background task can never touch a widget
-//! directly. Commands go
+//! directly. The scanning hint in Preferences follows the scanner's
+//! `ScanState` the same way, over a watch of its own. Commands go
 //! out with `Coordinator::command`, and each one's result comes back to the main
 //! context too, where a failure goes to a toast. Low battery notifications
 //! are worked out from the same snapshots on the tokio side, by
@@ -28,6 +29,7 @@ mod media;
 mod notifications;
 mod preferences;
 mod rename;
+mod scanning;
 mod window;
 
 #[cfg(feature = "harness")]

@@ -167,8 +167,10 @@ synthetic (the Core spec's public RPA sample, Vol 3 Part H Appendix D.7, is the 
 accepted exception), or a captured advertisement committed together with the key that decrypts it.
 
 **UI.**
-- A widget updated from anywhere but the snapshot stream - a button handler setting a
-  label from a command's result, say. A setting is not device state: its switch bound to
+- A widget updated from anywhere but the snapshot stream, or for the scanning hint the
+  scanner's (`ScanControl::state`) - a button handler setting a label from a command's
+  result, or the hint's pause button showing the pause before the scanner reports it,
+  say. A setting is not device state: its switch bound to
   an app action and showing that action's state is fine, as Battery notifications' is with
   `app.battery-notifications` and pausing on the ears' with `app.pause-on-ear`.
 - A `StringList` behind a `DropDown` spliced, appended or removed without reading

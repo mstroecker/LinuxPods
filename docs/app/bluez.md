@@ -124,14 +124,15 @@ Beyond that, `DeviceLost` changes nothing: a reading expires in the coordinator
 ([state.md](state.md#the-ble-cache)).
 
 **`ble::scanner::ScanControl` is there for the rest of the app,** made once in `main.rs`
-and kept across the scanner's restarts; nothing reads it yet (#189):
+and kept across the scanner's restarts. The Preferences hint reads it and asks it for the
+pause ([ui.md](ui.md#the-scanning-hint), #189):
 
 - `ScanControl::state` is a watch of `ScanState`: `fallback`, whether a powered adapter
   has no monitor and so has to discover - also while discovery is paused, or its starts
   fail - and `paused_until`, the end of a pause.
 - `ScanControl::pause_discovery` stops the app's discovery on every adapter for
-  `DISCOVERY_PAUSE`, and starts it again after that. A device waiting to reconnect
-  connects as soon as discovery stops
+  `DISCOVERY_PAUSE`, whatever the table above says, and starts it again after that. A
+  device waiting to reconnect connects as soon as discovery stops
   ([protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising)).
   Nothing is heard over discovery meanwhile. Another client's discovery, such as GNOME
   Settings' Bluetooth panel, still blocks.
@@ -306,8 +307,10 @@ and without:
   backoff.
 - bluetoothd restarted after `Experimental = true` is set, the app still running: the
   monitor taken, discovery stopped.
-- A pause, once something asks for one (#189): discovery off for `DISCOVERY_PAUSE` and the mouse reconnecting, then
-  discovery back.
+- Without the experimental interfaces, the Preferences hint's **Pause scanning** button:
+  `BLE discovery paused`, the hint's row reading "Paused until" and the time, the mouse
+  switched off and on reconnecting, then `BLE discovery pause over`, discovery back and
+  the row reading "Scanning". With them, no hint.
 - The adapter powered off and on with the monitor registered: whether the pair is still
   heard ([protocol/linux/bluez.md](../protocol/linux/bluez.md#open-questions)).
 - GNOME Settings' Bluetooth panel open before the app starts: each pod heard from
@@ -325,7 +328,8 @@ and without:
   the release warning, then a discovery start that fails or is stopped, or none, as the
   adapter was seen powered off first - and that the
   monitor is registered again under the new bluetoothd, with `Discovering` false at the
-  end.
+  end. With Preferences open, whether the scanning hint shows for that moment, and for
+  how long ([ui.md](ui.md#the-scanning-hint)).
 
 Bluetooth off and on, `rfkill`, `systemctl restart bluetooth`, `kill -9 bluetoothd` and a
 suspend ran on one adapter with a Pro 3 and a Pro 2 (USB-C) (2026-10-26, PR #121):

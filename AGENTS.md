@@ -32,7 +32,7 @@ src/
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
 ├── volume.rs      # The pair's volume lowered while the user speaks (MediaTransport1)
-├── ui/            # GTK4/libadwaita: window, Control page, rename dialog, Preferences, notifications, automation
+├── ui/            # GTK4/libadwaita: window, Control page, rename dialog, Preferences, scanning hint, notifications, automation
 ├── harness/       # Harness only: fake AirPods, fake BlueZ, a fake media player, the fake world
 └── bin/fakepods.rs # Harness only: the fake world's process, which `make fake-world` runs
 ```
@@ -53,7 +53,7 @@ How the parts fit together: [docs/app/architecture.md](docs/app/architecture.md)
 - `subscribe()` returns a `watch::Receiver`, latest-wins and marked changed; never a queue per
   consumer. [Why](docs/app/state.md#snapshots)
 - Never hold `borrow()` across an await: every broadcast waits for it under `inner`'s write lock.
-  The UI loop pauses `RENDER_INTERVAL` per pass. [Why](docs/app/state.md#snapshots)
+  The UI's loops pause `RENDER_INTERVAL` per pass. [Why](docs/app/state.md#snapshots)
 - Snapshots go out under the lock they were changed under: `broadcast(&inner)` while the write guard
   is live, never a snapshot built earlier (#88). [Why](docs/app/state.md#snapshots)
 - Both `open_aap` and `disconnect_aap` broadcast; disconnect drops the pair's AAP state, all but the
@@ -149,7 +149,7 @@ How the parts fit together: [docs/app/architecture.md](docs/app/architecture.md)
   (`HeardDevices`) is read from its properties by the scanner's reader; the drain only records
   what it heard, and from whom, never calls. A `DeviceLost` forgets the device as heard, and takes
   back a find waiting before it. `ScanControl` carries the state and the discovery pause across
-  scanner restarts.
+  scanner restarts; a pause stops the app's discovery on every adapter, whatever would start it.
   [Why](docs/app/bluez.md#listening-for-the-pods)
 - Consumers start again when the `AdapterSet` token changes, never on a single signal;
   `AlreadyExists` counts as registered (#50). [Why](docs/app/bluez.md#adapters)
@@ -350,8 +350,12 @@ notification was Conversation Awareness's speech level `09` (#150).
   player goes only on a private session bus: `fakepods` refuses `/run/user/<uid>/bus`.
 
 **UI.** [Why](docs/app/ui.md)
-- Widget updates arrive only from the snapshot stream. The one exception is a command that fails: a
+- Widget updates arrive only from the snapshot stream, and the scanning hint's from the scanner's
+  (`ScanControl::state`), followed the same way. The one exception is a command that fails: a
   toast, an event, never a control's state. [Why](docs/app/ui.md#updates-come-from-snapshots)
+- The scanning hint shows while `ScanState::fallback` holds, undamped; its button asks
+  `ScanControl::pause_discovery`, and the pause shows only once the scanner reports it, as the time
+  it ends, never a countdown. [Why](docs/app/ui.md#the-scanning-hint)
 - A setting is not device state: its switch is bound to an app action (`app.battery-notifications`,
   `app.pause-on-ear`) and shows that action's state. [Why](docs/app/ui.md#settings)
 - Settings load (`settings::open`) before any action is created, so a switch saved off starts off.
@@ -434,10 +438,13 @@ A `Co-Authored-By:` trailer is fine.
 - [`names.md`](docs/app/names.md) - the pods' name beside BlueZ's alias, the rename dialog
 - [`firmware.md`](docs/app/firmware.md) - the firmware version read, kept for the run, shown
 - [`notifications.md`](docs/app/notifications.md) - low battery notifications
-- [`ui.md`](docs/app/ui.md) - updates from snapshots, controls, settings, resources, the tray
+- [`ui.md`](docs/app/ui.md) - updates from snapshots, controls, the scanning hint, settings, resources, the tray
 - [`logging.md`](docs/app/logging.md) - log stages, what is never logged
 
 [`docs/development/`](docs/development/) - working on LinuxPods:
 - [`releasing.md`](docs/development/releasing.md) - release steps, what a release contains, verifying one
 - [`fake-world.md`](docs/development/fake-world.md) - what the fakes do, and where they depart from the hardware
 - [`probes.md`](docs/development/probes.md) - every probe in `examples/`: what it does, prints and never prints
+
+[`docs/user/`](docs/user/) - for people using LinuxPods:
+- [`other-devices.md`](docs/user/other-devices.md) - other Bluetooth devices not reconnecting while the app scans, the fix, the pause
