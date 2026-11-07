@@ -34,6 +34,10 @@ The details, with their sources:
 
 ## The fix: turn on BlueZ's experimental features
 
+The setting turns on all of BlueZ's experimental features, not only the one LinuxPods
+uses. If you rely on other Bluetooth features, check with
+[BlueZ](https://github.com/bluez/bluez) first.
+
 1. Open `/etc/bluetooth/main.conf` as root in a text editor, for example:
 
    ```sh
