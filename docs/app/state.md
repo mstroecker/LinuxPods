@@ -133,17 +133,26 @@ worn.
 | The advertisement | The lid |
 |---|---|
 | Reports a lid | Taken |
-| Reports none, status bit 4 set: its sender is out of the case, the other pod in it | The cached lid is kept |
-| Reports none, bit 4 clear: no pod in the case | No lid |
+| Reports none, status bit 4 set | The cached lid is kept |
+| Reports none, status bit 4 clear | No lid |
 
 The parser reports bit 4 as `one_in_case` and stays stateless;
-`Coordinator::handle_advertisement` does the keeping.
+`Coordinator::handle_advertisement` does the keeping. Which pods set bit 4:
+[protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#byte-3-status-byte).
+Bit 4 can be clear with a pod in the case (same link), and such an advertisement clears
+a closed lid ([Hardware checks](#hardware-checks)).
 
 A closed lid stays on show while the app runs, until the pods advertise again, for up to
 `BLE_CACHE_TTL`. A relaunch does not keep it: [readings.md](readings.md#what-is-kept).
 
 ## Hardware checks
 
-None open. Two pairs on AAP at once ran on hardware (a Pro 3 and a Pro 2 (USB-C),
+- **A closed lid with one pod worn:** wear one pod, put the other in the case and close
+  the lid, and wait until the pod in the case stops advertising
+  ([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#update-frequency)).
+  Does the window drop the closed lid to unknown, as the code reads the worn pod's bit 4
+  clear? The fake sets bit 4 there, so the pipeline tests cannot show it.
+
+Two pairs on AAP at once ran on hardware (a Pro 3 and a Pro 2 (USB-C),
 2026-10-26, PR #121). The snapshot order (#88) and the advertisement flood have run in
 the pipeline tests only.

@@ -35,6 +35,7 @@ The pipeline tests drive the same world from the test process.
 | Handshake answer | At once, unless `handshake_delay_ms` is set | Later: [protocol/aap/session.md](../protocol/aap/session.md#step-2-send-handshake) |
 | Battery after the notification request | At once, unless `report_delay_ms` is set | Later: [protocol/aap/session.md](../protocol/aap/session.md#initial-state-report) |
 | Startup dump | `DUMP_DELAY` after the first `0x0C`, unless `dump_delay_ms` is set. Any delay keeps the order: battery and ears first, the mode later. | Later: [protocol/aap/session.md](../protocol/aap/session.md#initial-state-report) |
+| One pod worn, the other in the closed case | The worn pod advertises its partner's level and sets status bit 4 | The worn Pro 3 sent `f` for its partner's level and bit 4 clear (2026-11-07, #184): [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#the-184-run) |
 | Closed case | A pod in the case is in the closed case the moment the lid closes | Seconds later: [protocol/aap/ear.md](../protocol/aap/ear.md#ear-report-0x06) |
 | Role switch | The `0x06` in the new order and the battery, then two `0x08`s, `PRIMARY_AFTER_EAR` and `SECOND_PRIMARY` apart | The battery comes between the two `0x08`s: [protocol/aap/ear.md](../protocol/aap/ear.md#the-role-switch) |
 | Device information (`0x1D`) | Laid out as the hardware's, with fields 1-9 made up | [protocol/aap/device-info.md](../protocol/aap/device-info.md#layout) |

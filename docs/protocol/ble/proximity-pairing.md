@@ -74,7 +74,7 @@ same bit means the left pod in one advertisement and the right pod in the next:
 
 | Field | Left pod sends (bit 5 = 1) | Right pod sends (bit 5 = 0) | Source |
 |---|---|---|---|
-| Byte 4, low nibble | Left | Right | LibrePods' Linux parser; furiousMAC/continuity; one sample (Pro 3, 2026-09-11, 17f6591) |
+| Byte 4, low nibble | Left | Right | Pro 3, 2026-11-07, #184; LibrePods' Linux parser; furiousMAC/continuity |
 | Byte 4, high nibble | Right | Left | As the low nibble |
 | Byte 5, bit 4 (charging) | Left | Right | LibrePods' Linux parser |
 | Byte 5, bit 5 (charging) | Right | Left | LibrePods' Linux parser |
@@ -88,11 +88,13 @@ same bit means the left pod in one advertisement and the right pod in the next:
 In short: the sender has the low battery nibble, charging bit 4 and decrypted byte 1.
 The case's fields do not depend on the sender.
 
-- **Byte 4:** furiousMAC/continuity gives "the 4 MSBits are the right battery and the
-  4 LSbits are the left battery", which is the left pod's order. In the one sample that
-  tells them apart, the right pod sent byte 4 = `0x78` with the decrypted levels 80%
-  for itself and 77% for the left pod: its own level is the low nibble's `8` (Pro 3,
-  2026-09-11, 17f6591; [Runs](#september-samples)).
+- **Byte 4:** with the left pod at 56-57% and the right at 80%, each pod sent its own
+  level in the low nibble, the left pod as well as the right (Pro 3, 2026-11-07, #184;
+  [Runs](#the-184-run)). furiousMAC/continuity gives "the 4 MSBits are the right
+  battery and the 4 LSbits are the left battery", which is the left pod's order. The
+  September sample of the right pod sending agrees: byte 4 = `0x78` beside the
+  decrypted levels 80% for itself and 77% for the left pod (Pro 3, 2026-09-11,
+  17f6591; [Runs](#september-samples)).
 - **Decrypted bytes 1 and 2:** in the first #71 capture every level was 100%, but the
   charging bits settled it: in each advertisement from the right pod, decrypted byte 1
   was the right pod and byte 2 the left (Pro 3, 2026-10-25, #71).
@@ -134,7 +136,7 @@ which are in the case.
 | 1 | A pod is in an ear; which one: [Which pod sent it](#which-pod-sent-it) | LibrePods' Linux parser |
 | 2 | Both pods are in the case | LibrePods' Linux parser; Pro 3, 2026-10-25, #71 |
 | 3 | The other pod's in-ear bit; see bit 1 | LibrePods' Linux parser |
-| 4 | One pod is in the case, sent by the worn pod | LibrePods' Linux parser; Pro 3, 2026-10-25, #71 |
+| 4 | One pod is in the case and the other out, set by both pods; exceptions below | LibrePods' Linux parser; Pro 3, 2026-10-25, #71; Pro 3, 2026-11-07, #184 |
 | 5 | The sending pod: `1` left, `0` right | LibrePods' Linux parser; Pro 3, #71 and #142 |
 | 6 | The sending pod is in the case | LibrePods' Linux parser; Pro 3, 2026-10-25, #71 |
 | 7 | Unknown | |
@@ -145,10 +147,13 @@ What the #71 captures (Pro 3, 2026-10-25) showed of bits 2, 4 and 6:
 - **Bit 6:** with one pod in the case and the other worn, the pod in the case sets it.
   Not every pod in the case sets it: with both inside, only one pod at a time did.
 - **Out of the case or in ears,** neither bit 2 nor bit 6 is set.
-- **Bit 4:** the worn pod whose partner is in the case sets it (`0x13`, beside the
-  partner's `0x73`). It is clear whenever no pod is in the case: `0x0b` both worn,
-  `0x01` both on the desk. It is not set with every pod in the case. One capture
-  contradicts it (see [Runs](#the-71-captures)).
+- **Bit 4:** with one pod in the case and the other worn, both set it: `0x13` from the
+  worn pod, `0x73` from the one in the case. It is clear whenever no pod is in the
+  case: `0x0b` both worn, `0x01` both on the desk. It is not set with every pod in the
+  case. Capture 2 of #71 contradicts it ([Runs](#the-71-captures)), and so does the
+  right pod's `0x02`, worn with its partner in the closed case per AAP, bit 4 clear, and
+  the left pod's `0x24`, in the case around the lid opening with the right pod worn
+  (Pro 3, 2026-11-07, #184; [Runs](#the-184-run)).
 - Bits 2 and 6 together gate the lid: see [Byte 6](#byte-6-lid-state).
 
 #### Ear Detection
@@ -161,8 +166,9 @@ LinuxPods takes in-ear from instead: [app/in-ear.md](../../app/in-ear.md).
 
 ### Byte 4: Battery Levels (Left/Right AirPods)
 
-One nibble per pod: the sender's in the low nibble, the other pod's in the high one
-([Which pod sent it](#which-pod-sent-it)). Each nibble is a level in 10% steps,
+One nibble per pod: on the Pro 3, the sender's in the low nibble, the other pod's in the
+high one ([Which pod sent it](#which-pod-sent-it)); on the Pro 2 (USB-C), an
+[open question](#open-questions). Each nibble is a level in 10% steps,
 rounded down (see [Batteries in the clear and encrypted](#batteries-in-the-clear-and-encrypted)).
 
 ### Byte 5: Charging Status
@@ -374,9 +380,9 @@ LinuxPods: [app/identification.md](../../app/identification.md#the-suffix).
 
 - **Rounded down:** the September samples (both models, 2026-09-09/10) advertised 58% as
   50% and 14% as 10% in the clear.
-- **`0xA` = 100%:** both Pro 2 (USB-C) September payloads in
-  `examples/decrypt_probe.rs` carry byte 4 = `0xaa` and decrypt to 100% / 100%
-  (2026-09-10, 1a7c66d).
+- **`0xA` = 100%:** the three Pro 2 (USB-C) September payloads in
+  `examples/decrypt_probe.rs` carry byte 4 = `0xaa`, and the two whose decryption is
+  recorded ([Runs](#september-samples)) read 100% / 100% (2026-09-10, 1a7c66d).
 - **`0xB`-`0xE` = 100%:** from LinuxPods' first notes, after LibrePods at the time
   (3e5033a, 2025-10-12); never recorded here. LibrePods' Linux parser treats only
   `0xF` as special (`linux/ble/blemanager.cpp` at commit 89356c0).
@@ -523,6 +529,29 @@ AirPods Pro 3 on one adapter (#71):
 - **Lid closed (capture 2):** both pods sent byte 6 = `0x39` within 22 ms of the marker
   and kept advertising for 3.9 s, then stopped.
 
+### The #184 run
+
+AirPods Pro 3, 2026-11-07: the app on main (296f726) listening through an
+advertisement monitor (Intel AX211, BlueZ 5.87), at `RUST_LOG=linuxpods=trace`, its
+`BLE parsable raw:` line cut to bytes 0-8. Both pods were worn and connected over AAP,
+which read the left pod at 56-57% and the right at 80% throughout; the left had no AAP
+level in the closed case. The left pod was taken out of the ear for a moment, then put
+in the case with the lid closed for about 10 s, which made the right pod primary and
+advertise, then taken out again.
+
+| Bytes 0-8 | Sender (bit 5) | Low nibble | High nibble |
+|---|---|---|---|
+| `01 27 20 2b 85 8f 11 00 05` | Left | `5`, left | `8`, right |
+| `01 27 20 29 85 8f 11 00 05`, the left pod out of the ear | Left | `5` | `8` |
+| `01 27 20 71 85 98 5a 00 04`, `01 27 20 73 85 98 5a 00 05`, the left pod in the case | Left | `5` | `8` |
+| `01 27 20 13 58 a8 11 00 05` | Right | `8`, right | `5`, left |
+| `01 27 20 03 58 8f 11 00 04`, the left pod out of the ear (AAP's ear report) | Right | `8` | `5` |
+| `01 27 20 02 f8 8f 11 00 04`, the left pod in the closed case (AAP's ear report) | Right | `8` | `f`, unknown |
+| `01 27 20 24 f5 98 58 00 00`, `01 27 20 24 f5 98 51 00 00`, the left pod in the case around the lid opening | Left | `5` | `f`, the right pod worn at 80% |
+
+- Each pod sent its own level in the low nibble, and the other pod's in the high one.
+- The `f` in `24 f5` is unexplained ([Open questions](#open-questions)).
+
 ### Payload changes
 
 - 987ffe3: with the pods worn, connected to this host or to nothing, the payload
@@ -565,9 +594,14 @@ AirPods Pro 3 on one adapter (#71):
 - Cleartext nibbles `0xB`-`0xE`: never recorded here.
 - Status bit 4: being put back, the left pod sent `0x29`, `0x22` and `0x20` from the
   hand while the right pod already sent `0x51` from the case (capture 2 of #71), which
-  the rule for bit 4 does not explain.
-- Byte 4: which nibble carries the sender's level rests on one sample (Pro 3,
-  2026-09-11, 17f6591).
+  the rule for bit 4 does not explain; nor does the right pod's `0x02`, worn with its
+  partner in the closed case (Pro 3, 2026-11-07, #184).
+- Byte 4 on the Pro 2 (USB-C): which nibble carries the sender's level. Every sample
+  has `0xaa`, which cannot tell the halves apart; the check:
+  [app/identification.md](../../app/identification.md#hardware-checks).
+- Byte 4: why the left pod sent `f` for the right pod's level in `24 f5`, around the
+  lid opening, while the right pod was worn at 80% (Pro 3, 2026-11-07, #184). Status
+  `0x24` also sets bit 2, both pods in the case, and leaves bit 4 clear.
 - Why each pod's payload changed once about 2 s after discovery started (Pro 3,
   2026-11-02, #153). Under an advertisement monitor, with no active scan, the payloads
   changed within 0.5 s of each pod being first heard, one of them twice; under discovery
