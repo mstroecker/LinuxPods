@@ -2,6 +2,31 @@
 
 User-facing changes in each release.
 
+## [0.5.0] - 2026-11-07
+
+Media paused when you take a pod out; other Bluetooth devices left free to reconnect;
+and the last battery levels kept for a day, across a relaunch.
+
+### Features
+
+- **Pause when a pod leaves an ear:** while audio plays to the AirPods, taking a pod out
+  pauses every playing media player (MPRIS), and putting it back plays them again, as an
+  iPhone does. Only players it paused are played again, not one you started meanwhile,
+  and a pod put into the case forgets the pause. A switch in Preferences turns it off;
+  it is on by default (#167).
+- **Other Bluetooth devices reconnect:** the app's endless scan for AirPods kept some
+  devices, such as a bonded mouse or keyboard, from reconnecting for as long as it ran.
+  With BlueZ's experimental features turned on, the app now listens without scanning,
+  and switches over by itself when bluetoothd restarts. Where they are off, as by
+  default, Preferences says so, links a guide to turning them on, and offers a button
+  that pauses the scan for 20 s so such a device can connect (#189).
+- **Last readings kept for a day:** a pair in its closed case goes silent, and after half
+  an hour the window showed "No recent data". It now shows the last levels heard, and
+  their age, for up to a day, also across a relaunch or a logout: they are kept in
+  `~/.local/share/linuxpods/readings.json` beside the keys. The age stays right across a
+  suspend. GNOME Settings shows a pair's battery only once it is heard again after a
+  relaunch, not yesterday's level as today's (#169, #170).
+
 ## [0.4.0] - 2026-11-03
 
 Conversation Awareness, with the volume lowered while you speak; low battery
