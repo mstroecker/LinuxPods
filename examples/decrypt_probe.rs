@@ -4,10 +4,10 @@
 //!
 //! Usage: cargo run --example decrypt_probe
 
-use linuxpods::ble::decrypt::decrypt_raw;
-use linuxpods::ble::matches_device;
-use linuxpods::hex;
-use linuxpods::keystore::Keystore;
+use cymba::ble::decrypt::decrypt_raw;
+use cymba::ble::matches_device;
+use cymba::hex;
+use cymba::keystore::Keystore;
 
 /// Payloads captured from the running app. Bytes 1-2 are the product ID,
 /// little-endian.

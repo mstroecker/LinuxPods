@@ -2,7 +2,7 @@
 //! away in its closed case says nothing until it is opened again, and its
 //! last levels are still a hint of how charged it was.
 //!
-//! Stored at ~/.local/share/linuxpods/readings.json, beside the keys
+//! Stored at ~/.local/share/cymba/readings.json, beside the keys
 //! ([`crate::keystore`]), mode 0600:
 //! {"version": 1, "readings": {"MAC": {"left_battery": 80, "right_battery": 79,
 //! "case_battery": null, "left_charging": false, "right_charging": false,

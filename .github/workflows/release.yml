@@ -82,7 +82,7 @@ jobs:
       # immutable release never goes out incomplete
       - run: |
           gh release create "$TAG" --draft --verify-tag \
-            --title "LinuxPods $VERSION" --notes-file notes.md dist/*
+            --title "Cymba $VERSION" --notes-file notes.md dist/*
           gh release edit "$TAG" --draft=false
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,16 +1,16 @@
 [package]
-name = "linuxpods"
+name = "cymba"
 version = "0.5.0"
 edition = "2024"
 rust-version = "1.92"
 license = "GPL-3.0-or-later"
 
 [lib]
-name = "linuxpods"
+name = "cymba"
 path = "src/lib.rs"
 
 [[bin]]
-name = "linuxpods"
+name = "cymba"
 path = "src/main.rs"
 
 # The fake world of the test harness (#72). Built only with the feature, so

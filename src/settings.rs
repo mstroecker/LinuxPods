@@ -1,7 +1,7 @@
 //! The app's settings, kept across restarts: those in Preferences' General
 //! group that do something.
 //!
-//! Stored at ~/.config/linuxpods/settings.json (XDG Base Directory):
+//! Stored at ~/.config/cymba/settings.json (XDG Base Directory):
 //! {"version": 1, "battery_notifications": true, "pause_on_ear": true}
 //!
 //! Every field has a default, and a missing field takes it, so a file from an
@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-const APP_NAME: &str = "linuxpods";
+const APP_NAME: &str = "cymba";
 /// The settings file's name, inside [`default_dir`] or the directory given to
 /// [`Store::with_dir`].
 pub const SETTINGS_FILE: &str = "settings.json";
@@ -210,8 +210,8 @@ fn write_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// Where [`Store::new`] keeps the settings: $XDG_CONFIG_HOME/linuxpods,
-/// falling back to ~/.config/linuxpods.
+/// Where [`Store::new`] keeps the settings: $XDG_CONFIG_HOME/cymba,
+/// falling back to ~/.config/cymba.
 pub fn default_dir() -> Result<PathBuf> {
     let base = dirs::config_dir().context("failed to determine XDG config directory")?;
     Ok(base.join(APP_NAME))

@@ -99,7 +99,7 @@ pub fn age(heard: SystemTime, now: SystemTime) -> Option<Duration> {
 /// [`Coordinator::new`] to open AAP links to in place of L2CAP, one per pair at
 /// [`aap::client::unix_socket_path`]: a fake answers there (#74).
 #[cfg(feature = "harness")]
-pub const AAP_SOCKET_DIR_ENV: &str = "LINUXPODS_AAP_SOCKET_DIR";
+pub const AAP_SOCKET_DIR_ENV: &str = "CYMBA_AAP_SOCKET_DIR";
 
 /// Which protocol a reading came over. Its `Display` is what the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

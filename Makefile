@@ -16,11 +16,11 @@ run:
 
 # Run with the GTK inspector for UI debugging
 run-debug:
-	GTK_DEBUG=interactive RUST_LOG=linuxpods=debug cargo run
+	GTK_DEBUG=interactive RUST_LOG=cymba=debug cargo run
 
 # Run with protocol tracing (BLE parse/decrypt, AAP packets)
 run-trace:
-	RUST_LOG=linuxpods=debug cargo run
+	RUST_LOG=cymba=debug cargo run
 
 # Run against fake AirPods and a fake BlueZ on private buses, out of reach of
 # the real bluetoothd and session (scripts/fake-world.sh). SCENARIO is in-range,
@@ -39,7 +39,7 @@ fake-world-stop:
 
 # Both feature sets, as CI checks them: the harness, its branches in the app
 # and the pipeline tests build only with --features harness. That run leaves a
-# harness build at target/debug/linuxpods.
+# harness build at target/debug/cymba.
 test:
 	cargo test --all-targets
 	cargo test --all-targets --features harness
@@ -76,11 +76,11 @@ sbom:
 	python3 -c 'import json, sys, uuid; d = json.load(open(sys.argv[1])); \
 		d["serialNumber"] = uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[2]).urn; \
 		json.dump(d, open(sys.argv[3], "w"), indent=2)' \
-		linuxpods_bin.cdx.json "https://github.com/mstroecker/LinuxPods/commit/$$(git rev-parse HEAD)" \
-		$(SBOM_DIR)/linuxpods.cdx.json
-	rm linuxpods_bin.cdx.json
+		cymba_bin.cdx.json "https://github.com/mstroecker/Cymba/commit/$$(git rev-parse HEAD)" \
+		$(SBOM_DIR)/cymba.cdx.json
+	rm cymba_bin.cdx.json
 	rm -f fakepods_bin.cdx.json
-	@echo "SBOM: $(SBOM_DIR)/linuxpods.cdx.json"
+	@echo "SBOM: $(SBOM_DIR)/cymba.cdx.json"
 
 # Install the pre-commit secret scan into this checkout
 hooks:
@@ -93,11 +93,11 @@ clean:
 # (scripts/install.sh, which the release tarball ships too). PREFIX defaults to
 # ~/.local, so none of this needs sudo.
 install: build-release
-	BIN=target/release/linuxpods ICONS=assets/icons scripts/install.sh
+	BIN=target/release/cymba ICONS=assets/icons scripts/install.sh
 
 uninstall:
 	scripts/install.sh --uninstall
 
-# Release tarball for this machine's architecture: dist/linuxpods-<version>-<arch>-linux.tar.gz
+# Release tarball for this machine's architecture: dist/cymba-<version>-<arch>-linux.tar.gz
 dist: build-release
 	scripts/package.sh

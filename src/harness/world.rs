@@ -35,9 +35,9 @@
 //!
 //! The world changes in two ways that do the same: in the same process, by
 //! the methods of [`World`], which the pipeline tests (#73) use; or over
-//! D-Bus, by `io.github.mstroecker.LinuxPods.FakeWorld1` at
-//! `/io/github/mstroecker/LinuxPods/FakeWorld`, under the name
-//! `io.github.mstroecker.LinuxPods.FakeWorld` on the bus the fake BlueZ is on,
+//! D-Bus, by `io.github.mstroecker.Cymba.FakeWorld1` at
+//! `/io/github/mstroecker/Cymba/FakeWorld`, under the name
+//! `io.github.mstroecker.Cymba.FakeWorld` on the bus the fake BlueZ is on,
 //! for `fakepods`, `scripts/fake-world.sh` and Claude Code:
 //!
 //! | Method | Does |
@@ -105,9 +105,9 @@ use crate::ble::decrypt::random_key;
 use crate::ble::parser::PodSide;
 
 /// The name `FakeWorld1` is served under.
-pub const SERVICE: &str = "io.github.mstroecker.LinuxPods.FakeWorld";
-pub const PATH: &str = "/io/github/mstroecker/LinuxPods/FakeWorld";
-pub const INTERFACE: &str = "io.github.mstroecker.LinuxPods.FakeWorld1";
+pub const SERVICE: &str = "io.github.mstroecker.Cymba.FakeWorld";
+pub const PATH: &str = "/io/github/mstroecker/Cymba/FakeWorld";
+pub const INTERFACE: &str = "io.github.mstroecker.Cymba.FakeWorld1";
 
 /// The adapter a world has unless it is made with others: the one bluetoothd
 /// puts first.
@@ -855,7 +855,7 @@ struct FakeWorld1 {
     world: World,
 }
 
-#[interface(name = "io.github.mstroecker.LinuxPods.FakeWorld1")]
+#[interface(name = "io.github.mstroecker.Cymba.FakeWorld1")]
 impl FakeWorld1 {
     async fn add_pods(&self, mac: &str, model: u16, name: &str) -> fdo::Result<()> {
         let mac = parse_mac(mac)?;

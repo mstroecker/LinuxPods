@@ -19,11 +19,11 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bluer::Address;
-use linuxpods::aap::conversation::describe_level;
-use linuxpods::aap::keys::{self, KeyType};
-use linuxpods::aap::message::opcode;
-use linuxpods::aap::{Client, Message, decode, find_encryption_key, parse_proximity_keys};
-use linuxpods::hex;
+use cymba::aap::conversation::describe_level;
+use cymba::aap::keys::{self, KeyType};
+use cymba::aap::message::opcode;
+use cymba::aap::{Client, Message, decode, find_encryption_key, parse_proximity_keys};
+use cymba::hex;
 
 /// How long to listen after the request, unless the command line says.
 const DEFAULT_WINDOW: Duration = Duration::from_secs(5);
@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "linuxpods=info".into()),
+                .unwrap_or_else(|_| "cymba=info".into()),
         )
         .init();
 

@@ -4,7 +4,7 @@
 # panel.
 [Icon Theme]
 Name=hicolor
-Comment=Fallback theme carrying the LinuxPods icons
+Comment=Fallback theme carrying the Cymba icons
 Directories=scalable/apps,symbolic/apps
 
 [scalable/apps]

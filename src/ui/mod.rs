@@ -48,8 +48,7 @@ const RESOURCE_PREFIX: &str = crate::APP_PATH;
 /// Registers the resources compiled into the binary. Call once, before the
 /// window is built.
 pub fn register_resources() {
-    gio::resources_register_include!("linuxpods.gresource")
-        .expect("the bundled GResource is valid");
+    gio::resources_register_include!("cymba.gresource").expect("the bundled GResource is valid");
 }
 
 /// How long ago a reading heard at `seen` was heard, for the window to show.

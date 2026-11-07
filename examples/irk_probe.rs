@@ -25,7 +25,7 @@
 //! phase (lid closed, disconnected) to the output. `q` prints a summary and
 //! quits.
 //!
-//! Quit LinuxPods first, so the probe's AAP session is the only one. Each pair
+//! Quit Cymba first, so the probe's AAP session is the only one. Each pair
 //! must be connected when the probe starts; it can be disconnected after the
 //! keys are in.
 //!
@@ -37,12 +37,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 use bluer::Address;
-use linuxpods::aap::{Client, Message, decode, find_encryption_key, find_irk};
-use linuxpods::ble::decrypt::decrypt_raw;
-use linuxpods::ble::matches_device;
-use linuxpods::ble::rpa;
-use linuxpods::ble::scanner::{Advertisement, Scanner};
-use linuxpods::podstate::Identity;
+use cymba::aap::{Client, Message, decode, find_encryption_key, find_irk};
+use cymba::ble::decrypt::decrypt_raw;
+use cymba::ble::matches_device;
+use cymba::ble::rpa;
+use cymba::ble::scanner::{Advertisement, Scanner};
+use cymba::podstate::Identity;
 
 /// How long to wait for a pair's key packet after the request.
 const KEY_WINDOW: Duration = Duration::from_secs(5);
@@ -221,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 // The client's warning on a connect still pending names the
                 // address; `fetch_keys` reports the same failure without it.
-                .unwrap_or_else(|_| "linuxpods=warn,linuxpods::aap::client=error".into()),
+                .unwrap_or_else(|_| "cymba=warn,cymba::aap::client=error".into()),
         )
         .init();
 

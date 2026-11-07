@@ -1,4 +1,4 @@
-# Secret scanning for LinuxPods. Runs in CI and from the pre-commit hook
+# Secret scanning for Cymba. Runs in CI and from the pre-commit hook
 # (scripts/pre-commit). The built-in rules cover tokens and private keys; the
 # rules below cover what this project actually handles: 16-byte AirPods keys
 # (IRK and ENC_KEY), which generic rules skip as too ambiguous.
@@ -10,8 +10,8 @@
 useDefault = true
 
 [[rules]]
-id = "linuxpods-keystore-file"
-description = "LinuxPods keystore (keys.json holds real device keys)"
+id = "cymba-keystore-file"
+description = "Cymba keystore (keys.json holds real device keys)"
 path = '''(^|/)keys\.json$'''
 
 [[rules]]

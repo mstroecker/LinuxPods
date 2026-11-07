@@ -24,7 +24,7 @@ use crate::podstate::{Command, ConnectionLost, Coordinator, Snapshot};
 /// replayed advertisement can arrive every few milliseconds.
 const RENDER_INTERVAL: Duration = Duration::from_millis(100);
 
-const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
+const WEBSITE: &str = "https://github.com/mstroecker/Cymba";
 
 /// Builds the window and wires it to the coordinator, and Preferences' scanning
 /// hint to `scan`. The caller presents it, so that `--minimized` can leave it
@@ -38,7 +38,7 @@ pub fn activate(
     let scan_updates = Rc::new(RefCell::new(scan.state()));
     let win = adw::ApplicationWindow::new(app);
     win.set_widget_name("main-window");
-    win.set_title(Some("LinuxPods"));
+    win.set_title(Some("Cymba"));
     // The Control page scrolls within it, the Info group at its bottom.
     win.set_default_size(420, 680);
 
@@ -362,7 +362,7 @@ impl Ui {
 fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) -> adw::ToastOverlay {
     let menu = gio::Menu::new();
     menu.append(Some("_Preferences"), Some("win.preferences"));
-    menu.append(Some("_About LinuxPods"), Some("win.about"));
+    menu.append(Some("_About Cymba"), Some("win.about"));
     // Closing the window only hides it, so quitting needs a place of its own -
     // not least without a tray, where this is the only way out.
     let quit_section = gio::Menu::new();
@@ -379,7 +379,7 @@ fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) -> adw::ToastOv
     // The device switcher takes the title's place when there is a choice to
     // make, the way a view switcher would; with a single device the header shows
     // the app name as usual.
-    let window_title = adw::WindowTitle::new("LinuxPods", "");
+    let window_title = adw::WindowTitle::new("Cymba", "");
     window_title.set_widget_name("window-title");
     control
         .device_dropdown
@@ -413,7 +413,7 @@ fn setup_ui(win: &adw::ApplicationWindow, control: &ControlView) -> adw::ToastOv
 fn show_about(win: &adw::ApplicationWindow) {
     adw::AboutDialog::builder()
         .name("about")
-        .application_name("LinuxPods")
+        .application_name("Cymba")
         .application_icon(crate::APP_ID)
         .comments("Manage Apple AirPods on Linux")
         .version(env!("CARGO_PKG_VERSION"))

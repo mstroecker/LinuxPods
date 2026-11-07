@@ -63,7 +63,7 @@ const ACTIVATIONS: &str = "activations";
 
 /// The variable that tells what an activating bus starts where to record it,
 /// so that the path stays out of the service file's `Exec` and its quoting.
-const ACTIVATIONS_VAR: &str = "LINUXPODS_BUS_ACTIVATIONS";
+const ACTIVATIONS_VAR: &str = "CYMBA_BUS_ACTIVATIONS";
 
 /// A `dbus-daemon` of its own, for a test to run the fake world and the app's
 /// D-Bus code on, out of reach of the real system and session buses. Stopped
@@ -103,7 +103,7 @@ impl PrivateBus {
 
     fn start_with(activated: Option<&str>) -> Result<Self> {
         let dir = tempfile::Builder::new()
-            .prefix("linuxpods-bus")
+            .prefix("cymba-bus")
             .tempdir()
             .context("failed to create a directory for the bus")?;
         let services = match activated {

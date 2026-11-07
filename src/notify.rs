@@ -1,5 +1,5 @@
 //! Low battery notifications (#126): GNOME never warns about a Bluetooth
-//! battery, so LinuxPods warns itself.
+//! battery, so Cymba warns itself.
 //!
 //! [`Alerts`] works out what to show and what to withdraw from a snapshot and
 //! the time - pure, and tested without GTK; [`run`] hands that to the GTK main
@@ -664,7 +664,7 @@ mod tests {
         async fn a_low_battery_over_aap_is_shown_and_withdrawn() {
             let bus = PrivateBus::start().unwrap();
             let sockets = tempfile::Builder::new()
-                .prefix("linuxpods-aap")
+                .prefix("cymba-aap")
                 .tempdir()
                 .unwrap();
             let world = World::new(bus.address(), sockets.path()).await.unwrap();
