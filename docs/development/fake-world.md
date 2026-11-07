@@ -17,7 +17,7 @@ method and every behavior in detail is in the module doc comments this page link
 | Part | What it is | Source |
 |---|---|---|
 | The fake AirPods | One pair's state, and the bytes it sends over BLE and AAP. Pure: state in, bytes out, the time an argument. Every packet the app reads comes from the builders beside its parsers, so the fake cannot encode those otherwise than the app reads them. The packets the app does not read (`0x0C`, `0x0E`, `0x2E`, `0x2B`, the startup dump's stand-ins) are built in `pods.rs` alone. | [`src/harness/pods.rs`](../../src/harness/pods.rs) |
-| The fake BlueZ | `org.bluez` on a private bus: adapters, devices, discovery, battery providers, A2DP transports | [`src/harness/bluez.rs`](../../src/harness/bluez.rs) |
+| The fake BlueZ | `org.bluez` on a private bus: adapters, devices, discovery, advertisement monitors, battery providers, A2DP transports | [`src/harness/bluez.rs`](../../src/harness/bluez.rs) |
 | The world | The pairs, the fake BlueZ and each pair's AAP socket running together, changed in the same process or over D-Bus (`FakeWorld1`) | [`src/harness/world.rs`](../../src/harness/world.rs) |
 | The fake media player | An MPRIS player on the app's private session bus, `org.mpris.MediaPlayer2.fakeplayer` under `fakepods` | [`src/harness/player.rs`](../../src/harness/player.rs) |
 | `fakepods` | The process `make fake-world` runs: the world on a private bus | [`src/bin/fakepods.rs`](../../src/bin/fakepods.rs) |
@@ -38,8 +38,14 @@ The pipeline tests drive the same world from the test process.
 | Closed case | A pod in the case is in the closed case the moment the lid closes | Seconds later: [protocol/aap/ear.md](../protocol/aap/ear.md#ear-report-0x06) |
 | Role switch | The `0x06` in the new order and the battery, then two `0x08`s, `PRIMARY_AFTER_EAR` and `SECOND_PRIMARY` apart | The battery comes between the two `0x08`s: [protocol/aap/ear.md](../protocol/aap/ear.md#the-role-switch) |
 | Device information (`0x1D`) | Laid out as the hardware's, with fields 1-9 made up | [protocol/aap/device-info.md](../protocol/aap/device-info.md#layout) |
-| bluetoothd restart | A crash: `NameOwnerChanged` twice, nothing announced again. A test passing on a restart proves the `NameOwnerChanged` path only. | A new bluetoothd also announces every object again with `InterfacesAdded`: [protocol/linux/bluez.md](../protocol/linux/bluez.md#adapters-and-restarts) |
+| bluetoothd restart | A crash: `NameOwnerChanged` twice, nothing announced again. A test passing on a restart proves the `NameOwnerChanged` path only. | A new bluetoothd also announces every object again with `InterfacesAdded`; a graceful stop first powers the adapters off and releases every monitor: [protocol/linux/bluez.md](../protocol/linux/bluez.md#adapters-and-restarts) |
 | Adapter powered off | `Powered` first, then the adapter stopped as rfkill stops it | bluetoothd removes the devices first, and `Powered` follows (BlueZ 5.87, `src/adapter.c`) |
+| Advertisement monitors | Registration, `Activate`, `DeviceFound`, `DeviceLost` and `Release` as BlueZ 5.87's source has them, read, not run. The RSSI thresholds and sampling period are not read: a device is lost `MONITOR_LOST_TIMEOUT` after its last advertisement, whatever they are. A power-off forgets found devices without `DeviceLost`, where bluetoothd reports those whose lost timer runs lost at once. A monitor whose pattern has an AD type bluetoothd does not know is taken, where bluetoothd releases it (`bt_ad_pattern_new`) | [protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising) |
+| `RSSI` through a monitor | Signaled at every advertisement, as under discovery. The app drops `RSSI` alone | Far less often with no discovery filter in force (#189): [protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising) |
+| Experimental interfaces turned on | At once (`SetExperimental`); follow it with `RestartBluez` | Read only as bluetoothd starts: [protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising) |
+| Experimental interfaces off | A stand-in `AdvertisementMonitorManager1` on each adapter refuses every call with `UnknownMethod`, where zbus would answer `UnknownInterface` for one not there ([protocol/linux/zbus.md](../protocol/linux/zbus.md#calls-to-an-interface-not-served)). It shows among the adapter's interfaces. | No monitor manager on the adapter; `RegisterMonitor` refused with `UnknownMethod`: [protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising) |
+| A monitor released (`ReleaseMonitors`) | Its registration forgotten too. The app asks again only under a new registration token, at a new root, so keeping it, as bluetoothd does, would change nothing it sees | The registration kept (BlueZ 5.87, `src/adv_monitor.c`, read, not run) |
+| No battery API (`drop_battery_api`) | Registering a provider is refused with `UnknownInterface`, as zbus answers for an interface not served ([protocol/linux/zbus.md](../protocol/linux/zbus.md#calls-to-an-interface-not-served)). The app does not tell the errors apart. | `UnknownMethod`, as libdbus answers a call nothing handles: [protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising) |
 | Battery provider read | No signal from a provider is taken until its `GetManagedObjects` is answered, so a provider that leaves the read unanswered gets no battery (#125) | bluetoothd takes `InterfacesAdded` regardless (BlueZ 5.87, `gdbus/client.c`): [protocol/linux/bluez.md](../protocol/linux/bluez.md#battery-providers) |
 | A2DP transport paths | `<device>/sep1/fd<n>`, `n` new to the device with every transport | `n` the first free from the count of all bluetoothd's transports (BlueZ 5.87, `profiles/audio/transport.c`). Nothing depends on the number. |
 | A2DP `Volume` set | Every set that succeeds brings a `PropertiesChanged` as it returns, with the volume the transport holds by then ([protocol/linux/zbus.md](../protocol/linux/zbus.md#property-setters)): one held already, or one not answered yet, brings one that changes nothing. Nothing in the app watches the transport's signals: it reads `Volume` afresh. | A set of the volume held does nothing, and any other changes `Volume` only once the pods answer: [protocol/linux/bluez.md](../protocol/linux/bluez.md#mediatransport1volume) |
@@ -157,11 +163,17 @@ app calls: no pairing, no `Device1.Connect`, no agent.
 - **Adapters** can be powered off and on, plugged in and out, and bluetoothd restarted,
   at any time (#50). `set_discovery_busy` has an adapter refuse discovery with
   `InProgress`, as after a `kill -9` of bluetoothd (#123).
+- **Experimental interfaces** are off, as in a stock bluetoothd, so the app discovers.
+  `fakepods --experimental` (`EXPERIMENTAL=1` for `make fake-world`) or `SetExperimental`
+  turns them on: every adapter offers an `AdvertisementMonitorManager1`, and the app
+  listens through a monitor. `ReleaseMonitors` releases an adapter's monitors.
+- **An adapter hears** advertisements while it is powered and a client discovers or has
+  a monitor registered there.
 - **Advertisements** are signaled as bluetoothd signals them: a new address as
   `InterfacesAdded`, each later advertisement as `PropertiesChanged` with `RSSI`, and
   `ManufacturerData` only when it changed. An address goes `TEMPORARY_TIMEOUT` after it
   went quiet, and all of an adapter's advertisers go when the last client stops
-  discovering there (#153). Every adapter that discovers hears every advertisement.
+  discovering there (#153). Every adapter that hears advertisements hears every one.
 - **Connecting** a pair signals `ServicesResolved` `SERVICES_RESOLVED` after
   `Connected`.
 - **Battery providers** are kept per adapter, as BlueZ 5.87's `src/battery.c` keeps
@@ -205,3 +217,9 @@ Where the hardware's behavior is not recorded, and the fake's is its own choice:
   PipeWire's own HFP backend is assumed to show it, not read in its source nor watched
   (#150).
 - **How long the pods take to answer a volume, and whether they round:** untried (#150).
+- **A monitor across a power cycle:** kept, and hearing again once the adapter is on
+  ([protocol/linux/bluez.md](../protocol/linux/bluez.md#open-questions)).
+- **The pods' devices when another client stops discovering while a monitor is
+  registered:** removed, as with no monitor, and announced again with `DeviceFound` at
+  the next advertisement
+  ([protocol/linux/bluez.md](../protocol/linux/bluez.md#open-questions)).

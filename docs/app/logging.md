@@ -32,7 +32,7 @@ Each stage is logged on its own:
 
 | Line | Level | What it covers |
 |---|---|---|
-| `BLE parsable:` | `debug` | Every advertisement that parses, including the ones the coordinator then drops |
+| `BLE parsable:` | `debug` | Every advertisement that parses, including the ones the coordinator then drops, and the payload read of a device an advertisement monitor reports found that no signal from bluetoothd has brought since it was last lost ([bluez.md](bluez.md#listening-for-the-pods)) |
 | `BLE parsable raw:` | `trace` | Its payload |
 | `BLE decryptable:` | `debug` | Identification: which pair, and whether by the IRK or by the key alone ([identification.md](identification.md)) |
 

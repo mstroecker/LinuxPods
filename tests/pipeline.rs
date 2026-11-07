@@ -52,7 +52,7 @@ use linuxpods::ble::decrypt::random_key;
 use linuxpods::ble::decrypt_for_device;
 use linuxpods::ble::parser::{PodSide, parse_proximity_data};
 use linuxpods::ble::rpa::{resolvable_address, resolves};
-use linuxpods::ble::scanner::{Advertisement, Scanner};
+use linuxpods::ble::scanner::{Advertisement, ScanControl, Scanner};
 use linuxpods::bluez::{BatteryProvider, ProviderConnection};
 use linuxpods::harness::bluez::{VolumeAnswer, device_path};
 use linuxpods::harness::pods::{ADDRESS_ROTATION, PRO_2_USB_C, PRO_3, Part, Pods};
@@ -97,11 +97,10 @@ const KEY_REQUEST: u8 = 0x30;
 /// never does.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long an app started once the last one's discovery has ended may take
-/// to hear a pair. The fake BlueZ took the pods' devices with that discovery,
-/// as bluetoothd does, so each pod is announced afresh at its next
-/// advertisement: up to an advertising interval after discovery starts
-/// (#153). The rest is headroom for a loaded runner. While the fake kept the
+/// How long an app started once the last one has gone may take to hear a
+/// pair: up to an advertising interval after its discovery starts or its
+/// monitor is registered, as each pod is announced afresh (#153) or reported
+/// found (#189). The rest is headroom for a loaded runner. While the fake kept the
 /// devices, it took up to half a rotation, 5 s.
 const HEARD_AFRESH: Duration = Duration::from_secs(4);
 
@@ -160,11 +159,33 @@ impl Fixture {
         Self::on_bus(bus, adapters, pairs).await
     }
 
+    /// [`Fixture::new`], with the fake bluetoothd running with its
+    /// experimental interfaces on, so that it offers advertisement monitors.
+    async fn with_monitors(pairs: &[(Address, u16, [u8; 3])]) -> Self {
+        let pairs: Vec<_> = pairs
+            .iter()
+            .map(|&(mac, product_id, levels)| (HCI0, mac, product_id, levels))
+            .collect();
+        let bus = PrivateBus::start().expect("dbus-daemon starts");
+        Self::on_bus_with(bus, &[(HCI0, true)], &pairs, true).await
+    }
+
     /// [`Fixture::with_adapters`], on `bus`.
     async fn on_bus(
         bus: PrivateBus,
         adapters: &[(&str, bool)],
         pairs: &[(&str, Address, u16, [u8; 3])],
+    ) -> Self {
+        Self::on_bus_with(bus, adapters, pairs, false).await
+    }
+
+    /// [`Fixture::on_bus`], with the fake bluetoothd's experimental
+    /// interfaces on if `experimental`.
+    async fn on_bus_with(
+        bus: PrivateBus,
+        adapters: &[(&str, bool)],
+        pairs: &[(&str, Address, u16, [u8; 3])],
+        experimental: bool,
     ) -> Self {
         init_logs();
         let sockets = tempfile::Builder::new()
@@ -175,6 +196,7 @@ impl Fixture {
         let world = World::with_adapters(bus.address(), sockets.path(), adapters)
             .await
             .unwrap();
+        world.bluez().set_experimental(experimental).await.unwrap();
         let fixture = Self {
             world,
             sockets,
@@ -408,12 +430,13 @@ impl Fixture {
         );
         let updates = coordinator.subscribe();
 
-        // As main.rs's ble_task, on the test's bus: subscribed, then
-        // discovering on every powered adapter, and following the adapters
-        // from there. Back from `scan`, discovery is on wherever it can be.
-        // Stopping the task stops it all.
-        let conn = self.bus.connect().await.unwrap();
-        let mut scanning = timeout(TIMEOUT, Scanner::with_connection(conn).scan())
+        // As main.rs's ble_task, on the test's bus: subscribed, then a
+        // monitor or discovery on every powered adapter, and following the
+        // adapters from there. Back from `scan`, each is listening wherever
+        // it can. Stopping the task stops it all.
+        let builder = zbus::connection::Builder::address(self.bus.address()).unwrap();
+        let scanner = Scanner::connect(builder).await.unwrap();
+        let mut scanning = timeout(TIMEOUT, scanner.scan(ScanControl::new()))
             .await
             .expect("timed out starting the scanner")
             .expect("the scanner starts");
@@ -725,6 +748,48 @@ async fn an_app_started_after_discovery_ended_hears_the_pods_afresh() {
         levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
     })
     .await;
+}
+
+/// Where bluetoothd offers an advertisement monitor, the app hears a pair
+/// through it, discovering nowhere (#189). An app started again once the
+/// first has gone hears both pods at once though neither payload has
+/// changed: no discovery ended, so bluetoothd kept the pods' devices, and the
+/// new app's monitor reports each found at its next advertisement with no
+/// `InterfacesAdded` - the payload read from the device. Within
+/// [`HEARD_AFRESH`], as a new address would bring one pod at most.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_app_hears_the_pods_through_a_monitor_without_discovering() {
+    assert!(HEARD_AFRESH < ADDRESS_ROTATION / 2, "one rotation at most");
+    let fixture = Fixture::with_monitors(&[(PAIR, PRO_3, PAIR_LEVELS)]).await;
+    fixture.seed_keys(&[PAIR]).await;
+    let key = fixture.enc_key(PAIR).await;
+    let bluez = fixture.world.bluez();
+    let mut app = fixture.start_app().await;
+    app.until("an exact BLE reading", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+    assert!(!bluez.is_discovering(HCI0));
+
+    drop(app);
+    eventually("the first app's monitor to go", move || async move {
+        bluez.monitor_owners(HCI0).is_empty()
+    })
+    .await;
+    let mut app = fixture.start_app().await;
+    let mut heard = HashSet::new();
+    app.handled_within(
+        HEARD_AFRESH,
+        "both pods, each from an address of its own",
+        2,
+        |a| sent_by(a, PAIR, &key) && heard.insert(a.ble_mac),
+    )
+    .await;
+    app.until_within(HEARD_AFRESH, "the exact BLE reading again", |s| {
+        levels(s, PAIR, DataSource::Ble) == Some(PAIR_LEVELS)
+    })
+    .await;
+    assert!(!bluez.is_discovering(HCI0));
 }
 
 /// An AAP link to one pair leaves a second pair's BLE reading alone: the

@@ -3,7 +3,10 @@
 //! Serves a fake BlueZ and `FakeWorld1` on the bus at `--address`, with a
 //! pair's AAP socket in `--socket-dir`, and runs until killed. The fake BlueZ
 //! has one adapter, `hci0` unless `--adapter` names another, as on a machine
-//! whose only adapter is not the first (#51).
+//! whose only adapter is not the first (#51). It runs as a stock bluetoothd
+//! does, without its experimental interfaces, so the app discovers; with
+//! `--experimental` it offers advertisement monitors, and the app listens
+//! through one (#189).
 //! `scripts/fake-world.sh` starts it on a private bus with the app beside it,
 //! and `make fake-world` builds both first. See `harness::world` for what the
 //! world does and how to change it.
@@ -37,13 +40,15 @@ use linuxpods::keystore::{self, KEYS_FILE, Keystore, PairKeys};
 
 const USAGE: &str = "\
 usage: fakepods --address ADDRESS --socket-dir DIR [--scenario NAME] [--adapter NAME]
-                [--keystore DIR] [--player-address ADDRESS]
+                [--experimental] [--keystore DIR] [--player-address ADDRESS]
 
   --address ADDRESS  the bus to serve on - a private one, never the system bus
   --socket-dir DIR   where each pair's AAP socket goes: LINUXPODS_AAP_SOCKET_DIR
   --scenario NAME    in-range (default), connected, two-pairs, flood or empty
   --adapter NAME     the fake BlueZ's one adapter, at /org/bluez/NAME: hci0 (default),
                      or another such as hci1
+  --experimental     run the fake BlueZ with its experimental interfaces on, offering
+                     advertisement monitors, as Experimental = true in main.conf does
   --keystore DIR     save the pairs' keys in DIR/keys.json for the fake world's app;
                      never the app's own data directory, nor a DIR holding keys
   --player-address ADDRESS
@@ -122,6 +127,7 @@ struct Args {
     socket_dir: PathBuf,
     scenario: Scenario,
     adapter: String,
+    experimental: bool,
     keystore: Option<PathBuf>,
     player_address: Option<String>,
 }
@@ -135,9 +141,14 @@ fn parse_args(
     let (mut address, mut socket_dir, mut keystore, mut player_address) = (None, None, None, None);
     let mut scenario = Scenario::InRange;
     let mut adapter = DEFAULT_ADAPTER.to_string();
+    let mut experimental = false;
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             return Ok(None);
+        }
+        if arg == "--experimental" {
+            experimental = true;
+            continue;
         }
         let value = args.next().ok_or_else(|| format!("{arg} takes a value"))?;
         match arg.as_str() {
@@ -171,6 +182,7 @@ fn parse_args(
         socket_dir: socket_dir.ok_or("--socket-dir is required")?,
         scenario,
         adapter,
+        experimental,
         keystore,
         player_address,
     }))
@@ -231,6 +243,8 @@ fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 async fn run(args: Args) -> Result<()> {
     let adapters = [(args.adapter.as_str(), true)];
     let world = World::with_adapters(&args.address, &args.socket_dir, &adapters).await?;
+    // Before the name is taken, as bluetoothd reads it as it starts.
+    world.bluez().set_experimental(args.experimental).await?;
     args.scenario.set_up(&world).await?;
     let macs = world.macs().await;
     if let Some(dir) = &args.keystore {
@@ -320,6 +334,7 @@ mod tests {
         assert_eq!(args.scenario, Scenario::TwoPairs);
         assert_eq!(args.socket_dir, PathBuf::from("/run/user/1000/aap"));
         assert_eq!(args.adapter, "hci0");
+        assert!(!args.experimental);
         assert_eq!(args.keystore, None);
         assert_eq!(args.player_address, None);
         assert_eq!(parse(&["--help"]), Ok(None));
@@ -327,6 +342,7 @@ mod tests {
         let args = parse(&[
             "--adapter",
             "hci1",
+            "--experimental",
             "--address",
             "unix:path=/tmp/b",
             "--socket-dir",
@@ -335,6 +351,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(args.adapter, "hci1");
+        assert!(args.experimental, "a flag, taking no value");
 
         let args = parse(&[
             "--address",

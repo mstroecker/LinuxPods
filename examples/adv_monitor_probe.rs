@@ -39,9 +39,12 @@
 //! bluetoothd offers the monitor only with its experimental interfaces on
 //! (`Experimental = true` in `/etc/bluetooth/main.conf`;
 //! [protocol/linux/bluez.md](../docs/protocol/linux/bluez.md#discovery-and-directed-advertising)).
-//! With them off, every registration should fail (read, not run), and the
-//! probe stops when no adapter takes the monitor. Quit LinuxPods first, and close
-//! GNOME Settings' Bluetooth panel: both discover. Decrypts nothing and prints no payload bytes. Prints the random
+//! With them off, every registration fails with `UnknownMethod` (read, not
+//! run), and the probe stops when no adapter takes the monitor. Close GNOME
+//! Settings' Bluetooth panel, which discovers, and quit LinuxPods wherever it
+//! discovers: on an adapter where BlueZ gives it no monitor. A run says
+//! something about the passive scan only while every adapter reads
+//! `discovering=false`. Decrypts nothing and prints no payload bytes. Prints the random
 //! address of every device in range that advertises proximity pairing data,
 //! other people's AirPods among them, or that the monitor reports found or
 //! lost, and the address of every device whose `Connected` changes or that is

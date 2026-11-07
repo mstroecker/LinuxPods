@@ -11,18 +11,19 @@
 //!
 //! - **BLE.** Every [`ADVERTISING_INTERVAL`] the advertisement of each pod
 //!   that advertises goes to the fake BlueZ, which signals it while the app
-//!   discovers - from the resolvable private address the model makes for the
+//!   discovers or has a monitor registered - from the resolvable private address the model makes for the
 //!   pod from the pair's IRK and rotates, so each pod brings a new device
 //!   object every ten seconds. Both pods advertise while one is in the case,
 //!   only the primary while both are out, and none from the closed case -
 //!   see [`Pods::advertisements`]. A pod repeats its payload until something
 //!   changes, so most of what the fake BlueZ signals is the strength alone,
-//!   as with real AirPods. Every adapter that discovers hears it, whichever
-//!   the pair is paired with, as radios in one room do, so with two adapters
-//!   each advertisement is signaled twice, from a device under each. When
-//!   the last client stops discovering, the pods' devices go, as
+//!   as with real AirPods. Every adapter that hears advertisements hears
+//!   it, whichever the pair is paired with, as radios in one room do, so with
+//!   two adapters each advertisement is signaled twice, from a device under
+//!   each. When the last client stops discovering, the pods' devices go, as
 //!   bluetoothd's do, and the next to discover hears each pod afresh at its
-//!   next advertisement - see [`FakeBluez`].
+//!   next advertisement; while they stay, a monitor registered meanwhile
+//!   reports each pod found at its next one - see [`FakeBluez`].
 //! - **AAP.** Each pair listens at `aap::client::unix_socket_path(dir, mac)`,
 //!   where the app connects in place of L2CAP. What the app sends goes to
 //!   [`Pods::receive`], and [`Pods::poll`] runs after that and after every
@@ -44,9 +45,11 @@
 //! | `AddPods(s mac, q model, s name)` | Pairs new AirPods with the world's first adapter - model by product ID, such as `0x2027` for Pro 3 - in range and disconnected, named `name`, with no alias set |
 //! | `AddPodsOn(s adapter, s mac, q model, s name)` | The same, with the adapter called `adapter` |
 //! | `AddAdapter(s name, b powered)` | Plugs in an adapter at `/org/bluez/<name>`; one plugged in before has its pairs back, disconnected |
-//! | `RemoveAdapter(s name)` | Unplugs it: its pairs disconnect, and its devices and battery providers go |
-//! | `SetPowered(s name, b powered)` | Powers it on or off; off, discovery there ends and its pairs disconnect |
-//! | `RestartBluez()` | bluetoothd restarting as after a crash, under a new unique name: `NameOwnerChanged` twice, and every client's discovery and battery providers forgotten. Nothing is announced again, as a real one would - see [`FakeBluez::restart`] |
+//! | `RemoveAdapter(s name)` | Unplugs it: its pairs disconnect, its advertisement monitors are released, and its devices and battery providers go |
+//! | `SetPowered(s name, b powered)` | Powers it on or off; off, discovery there ends and its pairs disconnect, while its advertisement monitors stay registered |
+//! | `RestartBluez()` | bluetoothd restarting as after a crash, under a new unique name: `NameOwnerChanged` twice, and every client's discovery, battery providers and advertisement monitors forgotten. Nothing is announced again, as a real one would - see [`FakeBluez::restart`] |
+//! | `SetExperimental(b on)` | Turns bluetoothd's experimental interfaces on or off: every adapter offers advertisement monitors, or no longer does, at once - follow it with `RestartBluez`, as a real bluetoothd reads the setting as it starts. Off unless `fakepods --experimental` - see [`FakeBluez::set_experimental`] |
+//! | `ReleaseMonitors(s adapter)` | Releases every advertisement monitor registered with the adapter, and forgets their registrations - a bluetoothd that releases one keeps its registration: see [`FakeBluez::release_monitors`] |
 //! | `Connect(s mac)` | Connects them to the host, which the app takes up; their services are resolved 4 s later, as bluetoothd signals - see [`FakeBluez::set_connected`] |
 //! | `Disconnect(s mac)` | Disconnects them, which takes the AAP connection along, after BlueZ's `Connected=false` |
 //! | `SetBattery(s mac, s part, y level)` | `left`, `right` or `case`; a level above 100 is unknown |
@@ -76,8 +79,8 @@
 //!
 //! Time is real: each pod rotates its address every ten seconds - far more
 //! often than real AirPods, every 4 to 8 minutes, so that tests meet rotation -
-//! and the fake BlueZ forgets an address after thirty, or as soon as nobody
-//! discovers. The model's clock starts with the world.
+//! and the fake BlueZ forgets an address after thirty, or as soon as the last
+//! client stops discovering. The model's clock starts with the world.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::Shutdown;
@@ -887,6 +890,22 @@ impl FakeWorld1 {
 
     async fn restart_bluez(&self) -> fdo::Result<()> {
         self.world.restart_bluez().await.map_err(failed)
+    }
+
+    async fn set_experimental(&self, on: bool) -> fdo::Result<()> {
+        self.world
+            .bluez()
+            .set_experimental(on)
+            .await
+            .map_err(failed)
+    }
+
+    async fn release_monitors(&self, adapter: &str) -> fdo::Result<()> {
+        if !self.world.bluez().adapters().iter().any(|a| a == adapter) {
+            return Err(fdo::Error::Failed(format!("there is no adapter {adapter}")));
+        }
+        self.world.bluez().release_monitors(adapter);
+        Ok(())
     }
 
     async fn connect(&self, mac: &str) -> fdo::Result<()> {

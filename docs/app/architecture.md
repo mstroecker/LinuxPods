@@ -26,6 +26,7 @@ goes the other way is spawned on the runtime.
 | The Preferences switch for pausing on the ears | the main context | `media::Media` | `watch`: [media-pause.md](media-pause.md) |
 | Speech levels | the coordinator | `volume::Volume` | events (`Coordinator::speech_events`): [state.md](state.md#events) |
 | Each pod's place | the coordinator | `media::Media` | events (`Coordinator::ear_events`): [state.md](state.md#events) |
+| How the adapters listen, and a discovery pause asked for | the scanner, and whoever holds the `ble::scanner::ScanControl` made in `Primary::start` | each other | `watch`es in `ScanControl`: [bluez.md](bluez.md#listening-for-the-pods) |
 
 ## The tasks
 
@@ -33,7 +34,7 @@ goes the other way is spawned on the runtime.
 
 | Task | What it does | Document |
 |---|---|---|
-| `ble_task` | Discovery on every powered adapter; each advertisement to the coordinator | [identification.md](identification.md), [bluez.md](bluez.md) |
+| `ble_task` | An advertisement monitor on every powered adapter, discovery where there is none; each advertisement to the coordinator | [identification.md](identification.md), [bluez.md](bluez.md) |
 | `attachment::run` | Which pairs are attached; a supervisor per attached pair, which keeps its AAP link up; the GNOME Settings batteries | [aap-links.md](aap-links.md), [battery.md](battery.md), [bluez.md](bluez.md) |
 | `expiry_task` | Each minute, prunes the BLE cache and saves the readings when due | [state.md](state.md#the-ble-cache), [readings.md](readings.md) |
 | `volume::Volume::run` | Lowers the pair's volume while the user speaks | [volume.md](volume.md) |
