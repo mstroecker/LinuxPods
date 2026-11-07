@@ -58,30 +58,17 @@ impl ScanHint {
             .title("Other Bluetooth Devices")
             .description(
                 "Mice and similar devices may not reconnect while LinuxPods scans for \
-                 AirPods. Pausing the scan lets them connect: AirPods nearby go unheard \
-                 meanwhile, and another app scanning, such as GNOME Settings’ Bluetooth \
-                 panel, still blocks them.",
+                 AirPods.",
             )
             .visible(false)
             .build();
 
-        let pause = gtk::Button::builder()
-            .name("scan-pause")
-            .label(format!(
-                "Pause scanning for {} s",
-                DISCOVERY_PAUSE.as_secs()
-            ))
-            .valign(gtk::Align::Center)
-            .build();
-        pause.connect_clicked(move |_| control.pause_discovery());
-        let pause_row = adw::ActionRow::builder().name("scan-pause-row").build();
-        pause_row.add_suffix(&pause);
-        group.add(&pause_row);
-
         let guide = adw::ActionRow::builder()
             .name("scan-guide")
-            .title("Let them reconnect")
-            .subtitle("How to have LinuxPods listen without scanning, in the browser")
+            .title("Turn On BlueZ’s Experimental Features")
+            .subtitle(
+                "A one-line change as root and a Bluetooth restart. Opens the guide in the browser",
+            )
             .activatable(true)
             .build();
         guide.add_suffix(&gtk::Image::from_icon_name(EXTERNAL_LINK_ICON));
@@ -90,6 +77,19 @@ impl ScanHint {
             gtk::show_uri(window.as_ref(), GUIDE, gdk::CURRENT_TIME);
         });
         group.add(&guide);
+
+        let pause = gtk::Button::builder()
+            .name("scan-pause")
+            .label(format!("Pause for {} s", DISCOVERY_PAUSE.as_secs()))
+            .valign(gtk::Align::Center)
+            .build();
+        pause.connect_clicked(move |_| control.pause_discovery());
+        let pause_row = adw::ActionRow::builder()
+            .name("scan-pause-row")
+            .subtitle("Lets other devices connect")
+            .build();
+        pause_row.add_suffix(&pause);
+        group.add(&pause_row);
 
         Self { group, pause_row }
     }
