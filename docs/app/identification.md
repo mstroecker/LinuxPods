@@ -102,12 +102,6 @@ today: what the keys give is not precision but identification. The cleartext is 
 decoded, as it is all an unidentified pair advertises: offering such a pair for pairing
 would read it (#131).
 
-The parser reads the sending pod's level from byte 4's high nibble. The one sample that
-tells the nibbles apart puts it in the low nibble
-([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#which-pod-sent-it)),
-so the cleartext levels may come out swapped. Nothing shows them today: see
-[Hardware checks](#hardware-checks).
-
 ## Keyed by the real MAC
 
 How a pair's addresses map to it, step by step:
@@ -126,6 +120,9 @@ with the pair's first AAP connection.
 
 ## Hardware checks
 
-- **Which nibble of byte 4 carries the sender's level:** wear a Pro 3 with the pods about
-  30 points apart, log `BLE parsable raw:` beside the decrypted bytes 1-2 and AAP's
-  battery, and note which nibble carries the sender's level.
+- **Byte 4's nibble order on a Pro 2 (USB-C):** its samples all have byte 4 = `0xaa`,
+  which cannot tell the halves apart. As on the Pro 3
+  ([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#the-184-run),
+  #184): wear the pods with 20 points or more between them, log `BLE parsable raw:`
+  bytes 0-8 beside AAP's levels, take the primary pod out for a moment so the other
+  sends, and note which nibble carries the sender's level.

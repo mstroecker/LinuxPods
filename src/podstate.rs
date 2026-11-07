@@ -299,9 +299,9 @@ pub struct PodState {
     pub right_in_ear: Option<bool>,
 
     /// From an advertisement like the
-    /// [connection state](PodState::connection_state), and `None` too when the
-    /// last one said no pod is in the case. One from a worn pod whose partner is
-    /// in the case can't see the lid, and keeps the one last reported.
+    /// [connection state](PodState::connection_state): `None` too when the last
+    /// one reported no lid with status bit 4 clear, and the one last reported
+    /// kept when it reported none with bit 4 set.
     pub lid_open: Option<bool>,
 
     /// Decoded with `ble::decode_connection_state`.
@@ -1486,10 +1486,10 @@ impl Coordinator {
 
         let mut inner = self.inner.write().await;
         let now = SystemTime::now();
-        // A worn pod whose partner is in the case has no lid to report, and
-        // both advertise: replaced wholesale, the lid would blink between the
-        // partner's reading and none as the two pods' advertisements came. So
-        // it keeps the lid the device last reported.
+        // An advertisement with no lid but status bit 4 set keeps the lid the
+        // device last reported. The worn pod's in the first #71 capture was one,
+        // beside its partner's in the case: replaced wholesale, the lid would
+        // blink between the partner's reading and none as the two came.
         if data.lid_open.is_none() && data.one_in_case {
             state.lid_open = inner
                 .ble
@@ -3872,7 +3872,8 @@ mod tests {
     /// With one pod worn and the other in the open case, both advertise: the
     /// one in the case reads the lid, the worn one none but status bit 4 (the
     /// first #71 capture). The lid stays on show rather than blinking with
-    /// every advertisement, until one says no pod is in the case at all.
+    /// every advertisement, until one reports no lid with status bit 4 clear,
+    /// as the advertisement of both pods worn does.
     #[tokio::test]
     async fn a_worn_pod_keeps_the_lid_its_partner_in_the_case_reported() {
         let mut inner = inner_with(vec![]);
