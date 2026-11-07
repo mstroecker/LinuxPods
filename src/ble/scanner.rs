@@ -1060,9 +1060,14 @@ impl Scanning {
             Err(e) => {
                 let failures = failures + 1;
                 let wait = bluez::backoff(failures);
+                let meanwhile = if self.paused_until.is_some() {
+                    "BLE discovery paused meanwhile"
+                } else {
+                    "with BLE discovery there meanwhile"
+                };
                 tracing::warn!(
                     "failed to register a BLE advertisement monitor on {path}: {e:#}; \
-                     trying again in {}s, with BLE discovery there meanwhile",
+                     trying again in {}s, {meanwhile}",
                     wait.as_secs()
                 );
                 Monitor::Failed {
