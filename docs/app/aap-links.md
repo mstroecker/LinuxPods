@@ -1,6 +1,6 @@
 # AAP links
 
-How LinuxPods keeps an AAP link to each connected pair: which pairs get one, the
+How Cymba keeps an AAP link to each connected pair: which pairs get one, the
 supervisor that keeps it up, how a link opens, and how it ends. The session itself is
 the pods': [protocol/aap/session.md](../protocol/aap/session.md). The kernel's part:
 [protocol/linux/l2cap.md](../protocol/linux/l2cap.md).

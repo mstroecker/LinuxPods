@@ -1,6 +1,6 @@
 # Noise control
 
-How LinuxPods sets the noise control mode, and how it takes the pods' reports of it. The
+How Cymba sets the noise control mode, and how it takes the pods' reports of it. The
 packets and what each model answers are the pods':
 [protocol/aap/noise-control.md](../protocol/aap/noise-control.md).
 

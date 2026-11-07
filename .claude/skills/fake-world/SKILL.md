@@ -1,6 +1,6 @@
 ---
 name: fake-world
-description: Run LinuxPods against fake AirPods and a fake BlueZ on private D-Bus buses, change the fake devices over D-Bus, and read, press and screenshot the app's UI through its Automation1 interface. Use when asked to run, try, test or screenshot the app without real AirPods; to reproduce a device situation such as a pair connected or in range, two pairs, a BLE flood, a re-pairing or a dropped AAP connection; or to check a UI or protocol change end to end in the real app.
+description: Run Cymba against fake AirPods and a fake BlueZ on private D-Bus buses, change the fake devices over D-Bus, and read, press and screenshot the app's UI through its Automation1 interface. Use when asked to run, try, test or screenshot the app without real AirPods; to reproduce a device situation such as a pair connected or in range, two pairs, a BLE flood, a re-pairing or a dropped AAP connection; or to check a UI or protocol change end to end in the real app.
 ---
 
 # Fake world
@@ -18,13 +18,13 @@ BlueZ signals), `src/harness/player.rs` (the fake player, FakePlayer1),
 
 ## Safety
 
-The user may be logged in with real AirPods and their own LinuxPods running.
+The user may be logged in with real AirPods and their own Cymba running.
 
 - Talk to the fake world only through `scripts/fake-world.sh world|app|player|tree`, or pass
   `--address` from its `env` file. Bare `gdbus` and `busctl` go to the real buses.
 - Run with `HEADLESS=1` unless the user asks to see the window on their desktop.
 - Stop the world when done. `stop` kills only the PIDs that `start` recorded; never
-  kill a `linuxpods` process by name, since it may be the user's.
+  kill a `cymba` process by name, since it may be the user's.
 
 ## Start
 
@@ -202,7 +202,7 @@ scripts/fake-world.sh world VolumeSets 00:00:5E:00:53:01   # 20, then up to 100 
 ```
 
 The app logs `Lowering the volume of <MAC> to 20` at the first level `01`, and `back at
-100` 1.5 s after the speech ends; `RUST_LOG=linuxpods::volume=debug` shows each step. A
+100` 1.5 s after the speech ends; `RUST_LOG=cymba::volume=debug` shows each step. A
 `SetVolume` while lowered is the user's: no fade follows, and `VolumeSets` stays at the
 one lowering. Without `SetPlaying`, or with `SetCall ... true`, speech sets nothing. A
 `HangUp` mid-speech, or quitting the app - Quit, SIGTERM or SIGINT - puts the volume back
@@ -236,7 +236,7 @@ for the battery switch (see below). `player SetStatus Stopped` while paused is t
 user's, and the pod back plays nothing; so is `player SetStatus Playing`, but only once
 `media::PAUSE_SETTLE` (2 s) has passed since the pause - before that the app takes the
 player for one still pausing, and sends it `Play`. `player` calls
-`io.github.mstroecker.LinuxPods.FakePlayer1`: `SetStatus(s)` (`Playing`, `Paused`,
+`io.github.mstroecker.Cymba.FakePlayer1`: `SetStatus(s)` (`Playing`, `Paused`,
 `Stopped`, as the user sets it in the player), `Status() → s` and `Calls() → as` (every
 MPRIS method the app called, in order - never `PlayPause`).
 
@@ -263,7 +263,7 @@ The Preferences switch `battery-notifications` turns them off and on, once Prefe
 open (see below), as `pause-on-ear` turns pausing on the ears: `app SetActive battery-notifications false` withdraws what is on show
 and sends nothing more, and `true` shows again what is low. The app saves the switch in
 the fake world's own config directory, never the user's -
-`$XDG_RUNTIME_DIR/linuxpods-harness/world/home/config/linuxpods/settings.json` - and
+`$XDG_RUNTIME_DIR/cymba-harness/world/home/config/cymba/settings.json` - and
 `stop` deletes it with the rest of the world, so every `start` begins with it on.
 
 ## Practical notes
@@ -275,13 +275,13 @@ the fake world's own config directory, never the user's -
   waits for a frame that changes nothing, so allow several seconds (`Settle 10000`).
   Opening the Preferences dialog took 2 s.
 - **Automation1 is served only when asked for.** `start` runs the app with
-  `LINUXPODS_HARNESS_AUTOMATION=1`; without it a harness build serves none, and logs
+  `CYMBA_HARNESS_AUTOMATION=1`; without it a harness build serves none, and logs
   `UI automation off`. Set it only for an app on a private session bus, never the
   user's.
 - **The first call races the app's start.** GApplication takes its name before
   `Automation1` exists, so an early call fails with `UnknownMethod`. `start` already
   retries `Settle` until it answers. An app started another way needs
-  `LINUXPODS_HARNESS_AUTOMATION=1`, or it never answers; with it, retry likewise.
+  `CYMBA_HARNESS_AUTOMATION=1`, or it never answers; with it, retry likewise.
 - **Window actions are not on D-Bus under Broadway.** GTK exports them only on Wayland
   and X11, so `win.preferences` cannot be activated. Open the menu and click the item
   by its tree path instead - the path of the button holding its label:
@@ -295,11 +295,11 @@ the fake world's own config directory, never the user's -
   ```
 
   `app.quit` does work: `gdbus call --address "$SESSION_BUS" --dest
-  io.github.mstroecker.LinuxPods --object-path /io/github/mstroecker/LinuxPods
+  io.github.mstroecker.Cymba --object-path /io/github/mstroecker/Cymba
   --method org.gtk.Actions.Activate quit '[]' '{}'`.
 - **Popovers are separate surfaces.** A screenshot of `main-window` leaves an open menu
   out; take one of the popover by its path. Screenshots go to
-  `$XDG_RUNTIME_DIR/linuxpods-harness/`.
+  `$XDG_RUNTIME_DIR/cymba-harness/`.
 - **What the fakes do, and where they depart from the hardware,** timings included:
   [`docs/development/fake-world.md`](../../../docs/development/fake-world.md). What to act
   on:
@@ -315,17 +315,17 @@ the fake world's own config directory, never the user's -
     `handshake_delay_ms`) for the hardware's waits.
   - **For AirPods 4's answers to a mode change:** `SetConversationAwareness` true, then
     `SetQuirk` `idle_level_only` true, `echo_every` 4 and `stale_report_ms` 0.
-- **Logs** are in `$XDG_RUNTIME_DIR/linuxpods-harness/world/log/`: `linuxpods.log` at
-  `RUST_LOG=linuxpods=debug`, `fakepods.log` and `broadwayd.log`. Set `RUST_LOG` before
+- **Logs** are in `$XDG_RUNTIME_DIR/cymba-harness/world/log/`: `cymba.log` at
+  `RUST_LOG=cymba=debug`, `fakepods.log` and `broadwayd.log`. Set `RUST_LOG` before
   `make` to change the level. They stay until the next start.
-- **Watching the buses:** `. "$XDG_RUNTIME_DIR/linuxpods-harness/world/env"`, then
+- **Watching the buses:** `. "$XDG_RUNTIME_DIR/cymba-harness/world/env"`, then
   `dbus-monitor --address "$SYSTEM_BUS"` or `busctl --address="$SYSTEM_BUS" tree org.bluez`.
 
 ## Stop
 
 ```sh
 make fake-world-stop
-ps -eo pid,args | awk '/target\/debug\/(linuxpods|fakepods)|gtk4-broadwayd|linuxpods-harness\/world/ && !/awk/'
+ps -eo pid,args | awk '/target\/debug\/(cymba|fakepods)|gtk4-broadwayd|cymba-harness\/world/ && !/awk/'
 ```
 
 The `ps` lists nothing once the world has stopped. (`pgrep -f` with the same pattern

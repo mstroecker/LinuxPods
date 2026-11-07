@@ -1,6 +1,6 @@
 # Architecture
 
-How LinuxPods is put together: its two threads, the channels between them, the tasks
+How Cymba is put together: its two threads, the channels between them, the tasks
 `main.rs` starts, and the coordinator they all meet at. A map: each part has a document
 of its own, linked below. The source tree, file by file, is in
 [AGENTS.md](../../AGENTS.md#architecture).
@@ -98,6 +98,7 @@ collapse onto one pair: [identification.md](identification.md). How the merge wo
 | Low battery notifications | [notifications.md](notifications.md) |
 | The window, Preferences, the tray | [ui.md](ui.md) |
 | Logs | [logging.md](logging.md) |
+| What LinuxPods left behind | [from-linuxpods.md](from-linuxpods.md) |
 
 ## Hardware checks
 

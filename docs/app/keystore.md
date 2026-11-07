@@ -1,6 +1,6 @@
 # Keystore
 
-How LinuxPods asks each pair for its keys, which keys it takes, and where it keeps them.
+How Cymba asks each pair for its keys, which keys it takes, and where it keeps them.
 The request and the key packet are the pods': [protocol/aap/keys.md](../protocol/aap/keys.md).
 What the keys are used for: [identification.md](identification.md).
 
@@ -59,7 +59,7 @@ keys landing last.
 
 ## The file
 
-`~/.local/share/linuxpods/keys.json` (the XDG data directory), mode 0600, written to a
+`~/.local/share/cymba/keys.json` (the XDG data directory), mode 0600, written to a
 temporary file and renamed over the old one. A file that does not load is set aside, not
 overwritten.
 

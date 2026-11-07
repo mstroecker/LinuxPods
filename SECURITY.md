@@ -3,12 +3,12 @@
 ## Reporting a vulnerability
 
 Please report vulnerabilities privately through
-[GitHub's private vulnerability reporting](https://github.com/mstroecker/LinuxPods/security/advisories/new),
+[GitHub's private vulnerability reporting](https://github.com/mstroecker/Cymba/security/advisories/new),
 not in a public issue.
 
 Useful details: the affected version or commit, how to reproduce the problem, and
 what an attacker could do with it. Of particular interest is anything that lets a
-nearby Bluetooth device crash LinuxPods, run code or read the stored AirPods
+nearby Bluetooth device crash Cymba, run code or read the stored AirPods
 encryption keys.
 
 ## Supported versions

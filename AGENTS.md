@@ -5,12 +5,13 @@ it as `CLAUDE.md`, a link to this file: edit `AGENTS.md`.
 
 ## Project
 
-LinuxPods manages Apple AirPods on Linux: a GTK4/libadwaita GNOME app with battery
-monitoring, a system tray and GNOME Settings integration. Rust, edition 2024, 1.92+.
+Cymba (LinuxPods up to 0.5.0) manages Apple AirPods on Linux: a GTK4/libadwaita GNOME
+app with battery monitoring, a system tray and GNOME Settings integration. Rust, edition
+2024, 1.92+.
 Dependencies and versions are in `Cargo.toml`; build targets are in the `Makefile`.
 
 **Verify the binary is fresh before testing against hardware.** Plain `cargo test` builds
-test harnesses, not `target/debug/linuxpods`, and `make test` and `make fake-world` leave
+test harnesses, not `target/debug/cymba`, and `make test` and `make fake-world` leave
 a harness build there. Run `cargo build` before testing against a pair; a stale binary
 has wasted debugging time twice.
 
@@ -25,10 +26,11 @@ src/
 ├── ble/           # Scanner, Apple Continuity parser, AES decryption, RPA resolution
 ├── bluez.rs       # Adapters, devices, connection watch; a battery provider per adapter
 ├── attachment.rs  # Which pairs get AAP, and each battery to its adapter's provider
-├── keystore.rs    # ENC_KEY and IRK per pair at ~/.local/share/linuxpods/keys.json (0600)
+├── keystore.rs    # ENC_KEY and IRK per pair at ~/.local/share/cymba/keys.json (0600)
 ├── readings.rs    # Each pair's last BLE reading across a relaunch, in readings.json beside the keys
 ├── media.rs       # The media paused when a pod leaves an ear, played again once back (MPRIS)
-├── settings.rs    # Preferences' settings at ~/.config/linuxpods/settings.json
+├── migrate.rs     # LinuxPods' data and config directories, moved to Cymba's at startup
+├── settings.rs    # Preferences' settings at ~/.config/cymba/settings.json
 ├── indicator.rs   # System tray via StatusNotifierItem (ksni)
 ├── notify.rs      # Low battery notifications: what to warn about, once per crossing
 ├── volume.rs      # The pair's volume lowered while the user speaks (MediaTransport1)
@@ -74,6 +76,10 @@ How the parts fit together: [docs/app/architecture.md](docs/app/architecture.md)
   not parse is set aside, and a level above 100 loads as unknown. A restored reading
   (`PodState::restored`) is left out of GNOME Settings by that flag, never by a freshness window
   (#62, #170). [Why](docs/app/readings.md)
+- LinuxPods' data and config directories move to Cymba's in the primary instance's startup,
+  before the coordinator and the settings read them, one rename each; anything under
+  Cymba's name but an empty directory is kept.
+  `install.sh` stops and removes a LinuxPods install. [Why](docs/app/from-linuxpods.md)
 - Readings are never saved per advertisement: only when `readings::due` says so, and once at the
   quit. [Why](docs/app/readings.md#saving)
 - The readings and keystore locks are taken before `inner`, never under it: each save holds its
@@ -325,7 +331,7 @@ notification was Conversation Awareness's speech level `09` (#150).
 - Log stages separately: `BLE parsable:` covers every advertisement that parses, including
   ones the coordinator later drops; `BLE decryptable:` reports identification. Noisy
   non-proximity Apple data goes to `trace`.
-- Bytes in logs and probe output go through `linuxpods::hex`, and a packet that may carry
+- Bytes in logs and probe output go through `cymba::hex`, and a packet that may carry
   keys or serial numbers through `aap::keys::redacted_hex`, which shows only the preamble
   of a key packet or a device information packet (`0x1D`). No log, probe or example
   prints key bytes or serial numbers: their output gets pasted into issues.
@@ -343,11 +349,12 @@ notification was Conversation Awareness's speech level `09` (#150).
   failed, so it has no retry loop to back off; `media::Media` likewise calls only for a
   pod leaving an ear or coming back.
 - A harness build must behave like a plain one unless the fake world's environment asks
-  otherwise (`LINUXPODS_AAP_SOCKET_DIR`, `LINUXPODS_HARNESS_AUTOMATION=1`, set only by
+  otherwise (`CYMBA_AAP_SOCKET_DIR`, `CYMBA_HARNESS_AUTOMATION=1`, set only by
   `scripts/fake-world.sh`): `make test` and `make fake-world` leave it at
-  `target/debug/linuxpods`, where it meets real AirPods and the user's session. Nothing in
-  the harness writes to the app's real data or config directory, and its fake media
-  player goes only on a private session bus: `fakepods` refuses `/run/user/<uid>/bus`.
+  `target/debug/cymba`, where it meets real AirPods and the user's session. Nothing in
+  the harness writes to the app's real data or config directory, or LinuxPods' ones, and
+  its fake media player goes only on a private session bus: `fakepods` refuses
+  `/run/user/<uid>/bus`.
 
 **UI.** [Why](docs/app/ui.md)
 - Widget updates arrive only from the snapshot stream, and the scanning hint's from the scanner's
@@ -420,7 +427,7 @@ A `Co-Authored-By:` trailer is fine.
 - [`zbus.md`](docs/protocol/linux/zbus.md) - queues, the object server's dispatch, senders, order across subscriptions
 - [`desktop.md`](docs/protocol/linux/desktop.md) - PipeWire, MPRIS, a press on a pod, UPower
 
-[`docs/app/`](docs/app/) - what LinuxPods does, and why:
+[`docs/app/`](docs/app/) - what Cymba does, and why:
 - [`architecture.md`](docs/app/architecture.md) - threads, channels, tasks, the coordinator; a map of the rest
 - [`state.md`](docs/app/state.md) - the merge per pair, snapshots, events, the BLE cache and its clock, the lid
 - [`identification.md`](docs/app/identification.md) - which advertisements count: IRK, then ENC_KEY, the suffix
@@ -440,11 +447,12 @@ A `Co-Authored-By:` trailer is fine.
 - [`notifications.md`](docs/app/notifications.md) - low battery notifications
 - [`ui.md`](docs/app/ui.md) - updates from snapshots, controls, the scanning hint, settings, resources, the tray
 - [`logging.md`](docs/app/logging.md) - log stages, what is never logged
+- [`from-linuxpods.md`](docs/app/from-linuxpods.md) - the LinuxPods directories moved at startup, a LinuxPods install removed
 
-[`docs/development/`](docs/development/) - working on LinuxPods:
+[`docs/development/`](docs/development/) - working on Cymba:
 - [`releasing.md`](docs/development/releasing.md) - release steps, what a release contains, verifying one
 - [`fake-world.md`](docs/development/fake-world.md) - what the fakes do, and where they depart from the hardware
 - [`probes.md`](docs/development/probes.md) - every probe in `examples/`: what it does, prints and never prints
 
-[`docs/user/`](docs/user/) - for people using LinuxPods:
+[`docs/user/`](docs/user/) - for people using Cymba:
 - [`other-devices.md`](docs/user/other-devices.md) - other Bluetooth devices not reconnecting while the app scans, the fix, the pause

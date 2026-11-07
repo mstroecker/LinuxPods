@@ -12,9 +12,9 @@ as [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md) cou
 
 - **The pair must be connected** to this machine, for every probe that takes a MAC.
   The probe opens AAP to it, as the app does.
-- **Quit LinuxPods first** for `irk_probe`, `rename_probe` and
+- **Quit Cymba first** for `irk_probe`, `rename_probe` and
   `conversation_awareness --duck`, so the probe's AAP session is the only one, or the
-  only thing lowering the volume, and for `adv_monitor_probe` wherever LinuxPods
+  only thing lowering the volume, and for `adv_monitor_probe` wherever Cymba
   discovers - an adapter where BlueZ gives it no monitor - so that nothing discovers. The other probes say nothing either way.
 - **bluetoothd with its experimental interfaces on** (`Experimental = true` in
   `main.conf`) for `adv_monitor_probe`: the monitor interface is one of them
@@ -150,7 +150,7 @@ When a decryption does not match:
   ([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#decryption-validation)).
 
 To watch live advertisements decrypt in the app itself, run it with
-`RUST_LOG=linuxpods=debug`: [app/logging.md](../app/logging.md#ble-advertisements).
+`RUST_LOG=cymba=debug`: [app/logging.md](../app/logging.md#ble-advertisements).
 
 ## `apple_sniff`
 
@@ -158,7 +158,7 @@ Logs every Apple manufacturer-data advertisement, proximity pairing or not. It r
 scanner without the window or the battery provider, so it can run beside the app.
 
 ```bash
-RUST_LOG=linuxpods=trace cargo run --example apple_sniff
+RUST_LOG=cymba=trace cargo run --example apple_sniff
 ```
 
 It logs each proximity pairing advertisement's address and model, and at `trace` the

@@ -1,6 +1,6 @@
 # Logging
 
-What LinuxPods logs of the packets and advertisements it reads, and what it never logs.
+What Cymba logs of the packets and advertisements it reads, and what it never logs.
 Logs and probe output get pasted into issues, so what they must never show matters as
 much as what they show.
 
@@ -8,7 +8,7 @@ much as what they show.
 
 No log, probe or example prints key bytes or serial numbers.
 
-- **Bytes go through `linuxpods::hex`:** two lowercase digits each, a space between.
+- **Bytes go through `cymba::hex`:** two lowercase digits each, a space between.
 - **A packet that may carry keys or serial numbers goes through
   `aap::keys::redacted_hex`,** which shows only its preamble, and a note:
 

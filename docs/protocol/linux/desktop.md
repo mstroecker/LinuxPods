@@ -2,13 +2,15 @@
 
 What the desktop around BlueZ does that a client has to know: PipeWire following the
 transport's volume, MPRIS, the path a press on a pod takes to a player, and UPower's
-warning level for a Bluetooth battery. Checked on hardware where a run below says so;
-MPRIS is from its specification, UPower also from its source, and the key path is only
-as understood, not traced.
+warning level for a Bluetooth battery, and how GApplication keeps an app to one
+instance. Checked on hardware where a run below says so; MPRIS is from its
+specification, UPower also from its source, GApplication from its documentation, and the
+key path is only as understood, not traced.
 
 The app acts on these in `volume`, `media` and `notify`:
 [app/volume.md](../../app/volume.md), [app/media-pause.md](../../app/media-pause.md),
-[app/notifications.md](../../app/notifications.md).
+[app/notifications.md](../../app/notifications.md). On GApplication's, at its startup:
+[app/from-linuxpods.md](../../app/from-linuxpods.md#when).
 
 ## The volume
 
@@ -62,6 +64,18 @@ below), and true of every battery that bluetoothd reports as `Battery1`:
 - **With `WarningLevel` none, `gsd-power` sends nothing** (#126).
 - **UPower's default thresholds** are 20% (low) and 5% (critical): `PercentageLow` and
   `PercentageCritical` in UPower 1.91.5's `etc/UPower.conf` (#126).
+
+## GApplication
+
+From GLib 2.90.1's GApplication documentation (`gio/gapplication.c`), not a run here:
+
+- **One instance per application ID, per session.** The ID is claimed as a well-known
+  name on the user's session bus. A second launch with the same ID finds it taken: it
+  sends its activation or command line to the primary instance, and `run` returns.
+- **`startup` is emitted on the primary instance only,** right after it registers. A
+  second launch never emits it.
+- **Two IDs are two applications.** Nothing in GApplication keeps an app under one ID
+  from running beside the same program under another.
 
 ## Runs
 

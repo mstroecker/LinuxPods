@@ -47,7 +47,7 @@ The Firmware row below Name is no command: [firmware.md](firmware.md#what-the-ap
 
 ## The scanning hint
 
-**Preferences says while LinuxPods listens by discovery** (#189). While a powered adapter
+**Preferences says while Cymba listens by discovery** (#189). While a powered adapter
 has no advertisement monitor (`ScanState::fallback`), a group at the top of Preferences
 says that mice and similar devices may not reconnect while the app scans. Why they do
 not: [bluez.md](bluez.md#listening-for-the-pods). Hidden, it takes no space.
@@ -105,7 +105,7 @@ action's state:
 
 Both are on by default, also for a file from before the setting.
 
-**Kept in `~/.config/linuxpods/settings.json`,** a file rather than GSettings: a GSettings
+**Kept in `~/.config/cymba/settings.json`,** a file rather than GSettings: a GSettings
 schema has to be compiled and installed wherever the app runs, and GIO aborts the process
 when it is missing, as it is for a plain `cargo run`.
 

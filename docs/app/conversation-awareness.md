@@ -1,6 +1,6 @@
 # Conversation Awareness
 
-How LinuxPods records the Conversation Awareness setting, and what it does with the speech
+How Cymba records the Conversation Awareness setting, and what it does with the speech
 levels. The setting and the levels are the pods':
 [protocol/aap/conversation-awareness.md](../protocol/aap/conversation-awareness.md).
 What the levels lower: [volume.md](volume.md).

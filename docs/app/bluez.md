@@ -1,6 +1,6 @@
 # BlueZ and D-Bus
 
-How LinuxPods works with bluetoothd over D-Bus: finding the adapters and following them,
+How Cymba works with bluetoothd over D-Bus: finding the adapters and following them,
 listening for the pods - an advertisement monitor, or discovery - the battery providers,
 the subscriptions that advertisements reach, and which signals and calls it believes. The code is in `bluez`, `ble::scanner` and `attachment`. What
 bluetoothd and zbus do, with their sources:
@@ -164,7 +164,7 @@ How GNOME Settings shows a pair's battery: [battery.md](battery.md#gnome-setting
   name and registered with that adapter's `BatteryProviderManager1`. bluetoothd keys
   providers on the root alone
   ([protocol/linux/bluez.md](../protocol/linux/bluez.md#battery-providers)), so two
-  LinuxPods on one bus would otherwise share one.
+  Cymba on one bus would otherwise share one.
 - **A pair's battery goes to the provider its `Device1.Adapter` names:** bluetoothd ignores
   a battery whose device is on another adapter (#51).
 - **`AlreadyExists` counts as registered.** The root is named after this connection's
@@ -297,7 +297,7 @@ and again after a connection failed.
 The advertisement monitor in place of discovery ran in a probe only
 ([protocol/linux/bluez.md](../protocol/linux/bluez.md#runs)); the scanner's choice has run
 against the fake BlueZ only. To try it on a pair, run with
-`RUST_LOG=linuxpods::ble=debug`, with `Experimental = true` in `/etc/bluetooth/main.conf`
+`RUST_LOG=cymba::ble=debug`, with `Experimental = true` in `/etc/bluetooth/main.conf`
 and without:
 
 - The monitor registered, no discovery (`bluetoothctl show`: `Discovering: no`), and the
@@ -318,13 +318,13 @@ and without:
 - A BLE spam flood of proximity pairing data, a new address each, while listening
   through a monitor: the pair's readings keep up, and a lid opening shows promptly. Not
   run.
-- A pod lost and found again: with `RUST_LOG=linuxpods::ble=trace` and the monitor
+- A pod lost and found again: with `RUST_LOG=cymba::ble=trace` and the monitor
   registered, take an idle pair in the open case out of range until `BLE advertisement
   monitor lost <path>` is logged, and bring it back within about 25 s, before bluetoothd
   removes the device. At the next `DeviceFound`, `BLE parsable:` from the read, with no
   payload change.
 - `systemctl restart bluetooth` with the monitor registered, under
-  `RUST_LOG=linuxpods::ble=debug`: whether a `Release` comes before `NameOwnerChanged` -
+  `RUST_LOG=cymba::ble=debug`: whether a `Release` comes before `NameOwnerChanged` -
   the release warning, then a discovery start that fails or is stopped, or none, as the
   adapter was seen powered off first - and that the
   monitor is registered again under the new bluetoothd, with `Discovering` false at the
