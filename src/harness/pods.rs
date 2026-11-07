@@ -1081,16 +1081,14 @@ impl Pods {
     ///
     /// Each pod advertises as itself, as in the #71 captures: it calls itself
     /// primary - status bit 5 set by the left pod and clear from the right,
-    /// its battery first in the encrypted portion - and its status bit 6 says
-    /// whether it is in the case. So each pod's advertisement decodes to the
-    /// same left and right as the other's. The fake puts the sender's level
-    /// in byte 4's high nibble, where the parser reads it: which nibble is the
-    /// sender's on the pods is open (`docs/app/identification.md`, Hardware
-    /// checks). The primary pod AAP reports decides only which pod advertises
-    /// when one does - see [`Pods::advertisements`] - and, with both pods in
-    /// the case, which one sets bit 6. In capture 2 only one pod set it then,
-    /// the left before the pods were taken out and the right after they were
-    /// put back: the fake simplifies that to the primary.
+    /// its battery in byte 4's low nibble and first in the encrypted portion -
+    /// and its status bit 6 says whether it is in the case. So each pod's
+    /// advertisement decodes to the same left and right as the other's. The
+    /// primary pod AAP reports decides only which pod advertises when one
+    /// does - see [`Pods::advertisements`] - and, with both pods in the case,
+    /// which one sets bit 6. In capture 2 only one pod set it then, the left
+    /// before the pods were taken out and the right after they were put back:
+    /// the fake simplifies that to the primary.
     ///
     /// The cleartext gives the batteries in 10% steps. The encrypted portion,
     /// under the pair's ENC_KEY, gives them exact, with the real address's
