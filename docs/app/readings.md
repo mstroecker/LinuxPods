@@ -46,7 +46,9 @@ battery for it until it connected again.
 
 ## Saving
 
-**Never per advertisement:** a pair in range is heard several times a second.
+**Never per advertisement:** each pod brings one with every payload change and every new
+address, an advertisement flood brings many more
+([bluez.md](bluez.md#listening-for-the-pods)), and a save is a file write.
 
 - **Each minute,** `expiry_task` calls `Coordinator::save_readings`, which writes only
   when `readings::due` says so: a pair has come or gone, a level, a charging flag or the

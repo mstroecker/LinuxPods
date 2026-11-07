@@ -1296,7 +1296,7 @@ impl Coordinator {
     /// saved: `refresh` is [`readings::HEARD_REFRESH`] on the expiry clock,
     /// so a pair in range costs a write every so often rather than each
     /// minute, and `Duration::ZERO` as the app quits. Never called per
-    /// advertisement: a pair in range is heard several times a second.
+    /// advertisement: see `docs/app/readings.md#saving`.
     ///
     /// `inner` is held only to copy the readings out, never across the
     /// write. The write runs on the blocking pool and owns the lock while
@@ -1488,8 +1488,8 @@ impl Coordinator {
         let now = SystemTime::now();
         // A worn pod whose partner is in the case has no lid to report, and
         // both advertise: replaced wholesale, the lid would blink between the
-        // partner's reading and none several times a second. So it keeps the
-        // lid the device last reported.
+        // partner's reading and none as the two pods' advertisements came. So
+        // it keeps the lid the device last reported.
         if data.lid_open.is_none() && data.one_in_case {
             state.lid_open = inner
                 .ble

@@ -10,9 +10,11 @@ places: [media-pause.md](media-pause.md).
 Why the advertisement's in-ear is no match for the ear report:
 [protocol/aap/ear.md](../protocol/aap/ear.md#why-aap-and-not-the-advertisement).
 
-Why so few advertisements reach the app while a pair is connected: most likely the
-scanner's discovery filter, which sets only `Transport`, leaves BlueZ to drop duplicates,
-so what reaches the app is the payload's changes - a guess, not checked. What bluetoothd
+Why so few advertisements reach the app while a pair is connected: where the scanner
+discovers, most likely its discovery filter, which sets only `Transport`, leaves BlueZ to
+drop duplicates, so what reaches the app is the payload's changes - a guess, not checked.
+Through an advertisement monitor there is no discovery filter: see
+[Hardware checks](#hardware-checks). What bluetoothd
 does around discovery: [protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery).
 
 So in-ear comes from the link while it is up:
@@ -71,6 +73,10 @@ that followed; none waited out `ROLE_SWITCH_HOLD`.
 
 ## Hardware checks
 
-None open for the window's in-ear: the report held back at a role switch ran on a Pro 2
-(USB-C), in session 3 above. The open questions about the
-packets are in [protocol/aap/ear.md](../protocol/aap/ear.md#open-questions).
+The report held back at a role switch ran on a Pro 2 (USB-C), in session 3 above. The
+open questions about the packets are in
+[protocol/aap/ear.md](../protocol/aap/ear.md#open-questions).
+
+- How many advertisements reach the app from a connected pair while it listens through
+  an advertisement monitor rather than discovery
+  ([bluez.md](bluez.md#listening-for-the-pods)): not counted.

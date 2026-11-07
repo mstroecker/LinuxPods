@@ -26,12 +26,13 @@ run-trace:
 # the real bluetoothd and session (scripts/fake-world.sh). SCENARIO is in-range,
 # connected, two-pairs, flood or empty; HEADLESS=1 shows the app on Broadway,
 # in a browser, instead of the desktop; ADAPTER=hci1 puts the fake BlueZ's one
-# adapter at /org/bluez/hci1. Change the world and drive the UI with
+# adapter at /org/bluez/hci1; EXPERIMENTAL=1 has it offer advertisement
+# monitors, as bluetoothd with Experimental = true. Change the world and drive the UI with
 # scripts/fake-world.sh world|app|tree - see .claude/skills/fake-world/SKILL.md.
 SCENARIO ?= in-range
 fake-world:
 	cargo build --features harness
-	HEADLESS=$(HEADLESS) ADAPTER=$(ADAPTER) scripts/fake-world.sh start $(SCENARIO)
+	HEADLESS=$(HEADLESS) ADAPTER=$(ADAPTER) EXPERIMENTAL=$(EXPERIMENTAL) scripts/fake-world.sh start $(SCENARIO)
 
 fake-world-stop:
 	scripts/fake-world.sh stop

@@ -120,10 +120,11 @@ How the parts fit together: [docs/app/architecture.md](docs/app/architecture.md)
 - A draining task never calls BlueZ.
   [Why](docs/app/bluez.md#subscriptions-that-advertisements-reach)
 - A zbus connection that serves objects is built with one served already (`serve_at`), never plain:
-  `bluez::connection`, `harness::connect_serving` (#125).
+  `bluez::connection`, `Scanner::connect`, `harness::connect_serving` (#125).
   [Why](docs/app/bluez.md#connections-that-serve-objects)
-- A BlueZ signal counts only from the unique name the state was read from, and `NameOwnerChanged`
-  only from `org.freedesktop.DBus` (#50). [Why](docs/app/bluez.md#which-signals-count)
+- A BlueZ signal, or a call to a monitor, counts only from the unique name the state was read from,
+  and `NameOwnerChanged` only from `org.freedesktop.DBus` (#50).
+  [Why](docs/app/bluez.md#which-signals-count)
 - A `Connected` change is only a hint: act only if `Device1.Connected` agrees, no answer reading as
   disconnected; `attach` reads it once more, last (#132).
   [Why](docs/app/bluez.md#connected-is-a-hint)
@@ -132,8 +133,24 @@ How the parts fit together: [docs/app/architecture.md](docs/app/architecture.md)
   [Why](docs/app/bluez.md#never-starting-bluetoothd)
 - Signals whose order matters come from one match rule, one stream.
   [Why](docs/app/bluez.md#signals-in-order)
-- Adapters are found, never assumed (`bluez::watch_adapters`, #50, #51); discovery runs on every
-  powered one, subscribed first (#153). [Why](docs/app/bluez.md#adapters)
+- An interface whose calls must be handled in the order they came is `#[interface(spawn = false)]`,
+  and its methods never await: they only push into a queue (`ProximityMonitor`).
+  [Why](docs/protocol/linux/zbus.md#the-object-servers-dispatch)
+- Adapters are found, never assumed (`bluez::watch_adapters`, #50, #51).
+  [Why](docs/app/bluez.md#adapters)
+- Every powered adapter gets an advertisement monitor first and no discovery; discovery, subscribed
+  first, only where `RegisterMonitor` is refused with `UnknownMethod` or the monitor is released;
+  another failure is retried on the backoff, discovering meanwhile (#153, #189).
+  [Why](docs/app/bluez.md#listening-for-the-pods)
+- A monitor root per registration, named after the adapter and its registration token; a `Release`
+  counts only for the monitor that stands. The scanner's calls for an adapter go only to the unique
+  name its adapters were read from. [Why](docs/app/bluez.md#listening-for-the-pods)
+- A `DeviceFound` for a device no signal from bluetoothd has brought since it was last lost
+  (`HeardDevices`) is read from its properties by the scanner's reader; the drain only records
+  what it heard, and from whom, never calls. A `DeviceLost` forgets the device as heard, and takes
+  back a find waiting before it. `ScanControl` carries the state and the discovery pause across
+  scanner restarts.
+  [Why](docs/app/bluez.md#listening-for-the-pods)
 - Consumers start again when the `AdapterSet` token changes, never on a single signal;
   `AlreadyExists` counts as registered (#50). [Why](docs/app/bluez.md#adapters)
 - A provider root per adapter per connection, named after the unique name; a pair's battery goes to
@@ -407,7 +424,7 @@ A `Co-Authored-By:` trailer is fine.
 - [`readings.md`](docs/app/readings.md) - the last readings across a relaunch (#170)
 - [`aap-links.md`](docs/app/aap-links.md) - which pairs get AAP, the supervisor, opening and ending a link
 - [`commands.md`](docs/app/commands.md) - the one path for commands, their order, what the caller hears
-- [`bluez.md`](docs/app/bluez.md) - adapters, discovery, providers, subscriptions, which signals count
+- [`bluez.md`](docs/app/bluez.md) - adapters, the monitor and discovery, providers, subscriptions, which signals count
 - [`battery.md`](docs/app/battery.md) - unknown levels, where a level goes, GNOME Settings
 - [`in-ear.md`](docs/app/in-ear.md) - in-ear from AAP, the role switch held back
 - [`noise-control.md`](docs/app/noise-control.md) - `0x34` only for Off, the mode recorded, stale reports held off

@@ -7,8 +7,10 @@
 //! - the ObjectManager at `/`, which `bluez` lists adapters and devices from
 //! - each adapter at `/org/bluez/<name>`, named as [`FakeBluez::add_adapter`]
 //!   names it - `hci0`, `hci1` and on: `Adapter1`, whose discovery is per
-//!   client and needs the adapter powered, and a `BatteryProviderManager1` of
-//!   its own
+//!   client and needs the adapter powered, a `BatteryProviderManager1` of
+//!   its own, and an `AdvertisementMonitorManager1` while bluetoothd runs
+//!   with its experimental interfaces - see
+//!   [Advertisement monitors](#advertisement-monitors)
 //! - a `Device1` for each paired pair, under the adapter it is paired with, at
 //!   its real address: `Address`, `Adapter`, `Name`, `Alias`, `Connected`,
 //!   `ServicesResolved`, `Paired` and `UUIDs`, the AirPods service among them
@@ -34,8 +36,8 @@
 //!   `Powered`. Off, it does what bluetoothd's `adapter_stop` does: every
 //!   client's discovery there ends, with `Discovering` signaled; the devices
 //!   it only heard advertising go, as when discovery ends (see
-//!   [Advertisements](#advertisements)); and its connected devices
-//!   disconnect. Its paired devices and the providers registered with it
+//!   [Advertisements](#advertisements)), and its monitors forget them; and
+//!   its connected devices disconnect. Its monitors stay registered. Its paired devices and the providers registered with it
 //!   stay, as they do in bluetoothd. Nothing connects to a device on an
 //!   adapter that is off.
 //!
@@ -58,8 +60,8 @@
 //!   kept, as bluetoothd keeps them on disk: plugged in again, it has its
 //!   paired devices back, disconnected.
 //! - [`FakeBluez::restart`] is bluetoothd restarting without powering its
-//!   adapters off, as after a crash: it forgets every client's discovery and
-//!   providers, and the devices it only heard advertising, lets go of
+//!   adapters off, as after a crash: it forgets every client's discovery,
+//!   providers and monitors, and the devices it only heard advertising, lets go of
 //!   `org.bluez`, and takes it again on a connection of its own - a new
 //!   unique name, as a new bluetoothd has - so `NameOwnerChanged` says so
 //!   twice. The adapters and paired devices are back as they were,
@@ -67,7 +69,8 @@
 //!   its two halves, for a test to do something in between; on a bus that
 //!   activates `org.bluez` ([`super::PrivateBus::activating`]), a call made
 //!   in between waits for the new one, as under systemd. A `systemctl
-//!   restart` powers the adapters off first, as `set_powered` does.
+//!   restart` powers the adapters off first, as `set_powered` does, and
+//!   releases every monitor, as `release_monitors` does.
 //!
 //!   It is a crash, and a narrow one: only `NameOwnerChanged` tells, and
 //!   nothing is announced again. A real bluetoothd also announces every
@@ -116,12 +119,51 @@
 //!   then hears an address only once its payload changes, or a new one
 //!   comes.
 //!
-//! An adapter hears advertisements only while some client has discovery on
-//! there, as it hears them only while it scans. Every adapter that does hears
+//! An adapter hears advertisements only while it is powered and some client
+//! has discovery on there or a monitor registered, as it hears them only
+//! while it scans. Every adapter that does hears
 //! every advertisement, as two radios in one room both would, and each makes
 //! a device of its own of the address. A pair's paired device stays on the
 //! adapter it is paired with: its advertisements come from a random address
 //! no adapter resolves to it.
+//!
+//! # Advertisement monitors
+//!
+//! Kept as BlueZ 5.87's `src/adv_monitor.c` keeps them - read, not run
+//! against a bluetoothd here; what was run:
+//! [protocol/linux/bluez.md](../../docs/protocol/linux/bluez.md#discovery-and-directed-advertising).
+//!
+//! - **Off unless asked for**, as bluetoothd's experimental interfaces are:
+//!   [`FakeBluez::set_experimental`]. Off, a registration is refused with
+//!   `UnknownMethod`, as bluetoothd's is, by a stand-in that, unlike
+//!   bluetoothd, shows among the adapter's interfaces: [`NoMonitorManager`].
+//! - **An app is kept by owner and root, per adapter** (`app_match`). The
+//!   same twice is refused with `AlreadyExists`. The app's objects are read
+//!   from its root before the registration is answered, as bluetoothd
+//!   answers once its client is ready (`app_ready_cb`): each
+//!   `org.bluez.AdvertisementMonitor1` of type `or_patterns` whose patterns
+//!   fit an advertisement is activated (`Activate`), any other released
+//!   (`Release`). A later change to its properties is not taken, as in
+//!   bluetoothd.
+//! - **Found and lost.** An advertisement whose manufacturer data a monitor's
+//!   pattern matches is reported to it once, `DeviceFound` after the
+//!   device's own signals, as bluetoothd sends them
+//!   ([protocol/linux/bluez.md](../../docs/protocol/linux/bluez.md#discovery-and-directed-advertising)), and `DeviceLost` [`MONITOR_LOST_TIMEOUT`] after
+//!   the device's last advertisement, which [`FakeBluez::prune`] checks. A
+//!   device removed is forgotten without `DeviceLost`, as bluetoothd forgets
+//!   it (`btd_adv_monitor_device_remove`); heard again, it is found again.
+//! - **Released** - `Release` on every monitor of the app - when the app
+//!   unregisters, and when the adapter is unplugged; and by
+//!   [`FakeBluez::release_monitors`]. Forgotten without a word when the
+//!   client leaves the bus, when bluetoothd restarts, and when the
+//!   experimental interfaces are turned off.
+//! - **What the fake leaves out:** the RSSI thresholds and the sampling
+//!   period, which it does not read; the check that a pattern's AD type is
+//!   one bluetoothd knows (`bt_ad_pattern_new` in `src/shared/ad.c`); a
+//!   power-off's `DeviceLost` for found devices whose lost timer runs, which
+//!   it forgets silently; and the `RSSI` signals bluetoothd sends
+//!   less often with no discovery filter in force: every advertisement
+//!   signals its `RSSI` here, as under discovery.
 //!
 //! # Batteries
 //!
@@ -139,7 +181,8 @@
 //! appears. It is ignored, with a warning, if that is no paired device on the
 //! provider's adapter - one on another adapter, an advertiser, or nothing at
 //! all - or if another provider got there first. A client that leaves the bus
-//! takes its providers' batteries along, and its discovery stops.
+//! takes its providers' batteries along, its discovery stops, and its
+//! advertisement monitors go.
 //!
 //! # Audio
 //!
@@ -233,6 +276,17 @@ const RSSI: i16 = -60;
 const DEVICE_INTERFACE: &str = "org.bluez.Device1";
 
 const PROVIDER_INTERFACE: &str = "org.bluez.BatteryProvider1";
+
+const MONITOR_INTERFACE: &str = "org.bluez.AdvertisementMonitor1";
+
+/// How long after a device's last advertisement a monitor reports it lost:
+/// the 5 s low RSSI timeout bluetoothd fills in for a monitor that sets
+/// `RSSISamplingPeriod` and no thresholds (BlueZ 5.87, `src/adv_monitor.c`).
+pub const MONITOR_LOST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Manufacturer specific data, in the Core spec's assigned numbers: the only
+/// AD type a fake advertisement carries.
+const AD_MANUFACTURER_DATA: u8 = 0xFF;
 
 /// Where bluetoothd puts the adapter it calls `name`: `/org/bluez/hci0`.
 pub fn adapter_path(name: &str) -> String {
@@ -379,6 +433,18 @@ struct State {
     busy: HashMap<String, usize>,
     /// Registered providers, with the task reading each.
     providers: HashMap<Provider, AbortHandle>,
+    /// Whether bluetoothd runs with its experimental interfaces, and so
+    /// offers advertisement monitors - see [`FakeBluez::set_experimental`].
+    experimental: bool,
+    /// Registered advertisement monitor apps, with the valid monitors under
+    /// each.
+    monitor_apps: HashMap<MonitorApp, Vec<FakeMonitor>>,
+    /// How many monitor registrations each adapter is still to refuse - see
+    /// [`FakeBluez::refuse_monitors`].
+    monitor_refusals: HashMap<String, usize>,
+    /// The calls to monitors waiting to go out, in order - see
+    /// [`State::call_monitors`].
+    monitor_calls: Option<tokio::sync::mpsc::UnboundedSender<MonitorCall>>,
     /// The battery each device has from a provider, by device path.
     batteries: HashMap<OwnedObjectPath, Battery>,
     /// Every battery a manager ignored, once, in the order it did: its
@@ -464,6 +530,50 @@ struct Provider {
     root: OwnedObjectPath,
 }
 
+/// An advertisement monitor app: the adapter whose manager took it, who
+/// registered it, and its root path. bluetoothd keeps apps by owner and path
+/// (`app_match` in BlueZ 5.87's `src/adv_monitor.c`).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MonitorApp {
+    adapter: String,
+    owner: OwnedUniqueName,
+    root: OwnedObjectPath,
+}
+
+/// One `or_patterns` monitor under an app's root.
+struct FakeMonitor {
+    object: OwnedObjectPath,
+    /// Start position, AD type, content.
+    patterns: Vec<(u8, u8, Vec<u8>)>,
+    /// The devices it has reported found and not lost, by address, with when
+    /// each was last heard.
+    found: HashMap<Address, Instant>,
+}
+
+impl FakeMonitor {
+    /// Whether an advertisement whose Apple entry is `apple_data` matches:
+    /// some pattern's content where it says, in the manufacturer data, which
+    /// starts with the company ID, little-endian.
+    fn matches(&self, apple_data: &[u8]) -> bool {
+        let mut ad = APPLE_COMPANY_ID.to_le_bytes().to_vec();
+        ad.extend_from_slice(apple_data);
+        self.patterns.iter().any(|(start, ad_type, content)| {
+            let start = usize::from(*start);
+            *ad_type == AD_MANUFACTURER_DATA
+                && ad.get(start..start + content.len()) == Some(content.as_slice())
+        })
+    }
+}
+
+/// A call the fake makes to a monitor: the method, and the device it names,
+/// if any.
+struct MonitorCall {
+    owner: OwnedUniqueName,
+    object: OwnedObjectPath,
+    method: &'static str,
+    device: Option<OwnedObjectPath>,
+}
+
 struct Battery {
     address: Address,
     provider: Provider,
@@ -532,15 +642,78 @@ impl State {
     /// Forgets the devices the adapters `adapter` picks only heard
     /// advertising, returning their paths.
     fn forget_advertisers(&mut self, adapter: impl Fn(&str) -> bool) -> Vec<OwnedObjectPath> {
-        let heard: Vec<OwnedObjectPath> = self
+        let heard: Vec<(String, Address)> = self
             .advertisers
             .keys()
             .filter(|(heard_by, _)| adapter(heard_by))
-            .map(|(heard_by, address)| device_path(heard_by, *address))
+            .cloned()
             .collect();
         self.advertisers
             .retain(|(heard_by, _), _| !adapter(heard_by));
         heard
+            .into_iter()
+            .map(|(heard_by, address)| {
+                self.forget_found(&heard_by, address);
+                device_path(&heard_by, address)
+            })
+            .collect()
+    }
+
+    /// Forgets that the monitors on the adapter called `adapter` found the
+    /// device at `address`, as bluetoothd does when it removes the device
+    /// (`btd_adv_monitor_device_remove` in BlueZ 5.87's `src/adapter.c`):
+    /// no `DeviceLost`.
+    fn forget_found(&mut self, adapter: &str, address: Address) {
+        for (app, monitors) in &mut self.monitor_apps {
+            if app.adapter == adapter {
+                for monitor in monitors {
+                    monitor.found.remove(&address);
+                }
+            }
+        }
+    }
+
+    /// Forgets the monitor apps `app` picks, returning a `Release` for each
+    /// of their monitors, for the caller to make or not.
+    fn forget_monitors(&mut self, app: impl Fn(&MonitorApp) -> bool) -> Vec<MonitorCall> {
+        let gone: Vec<MonitorApp> = self
+            .monitor_apps
+            .keys()
+            .filter(|a| app(a))
+            .cloned()
+            .collect();
+        let mut releases = Vec::new();
+        for app in gone {
+            for monitor in self.monitor_apps.remove(&app).unwrap_or_default() {
+                releases.push(MonitorCall {
+                    owner: app.owner.clone(),
+                    object: monitor.object,
+                    method: "Release",
+                    device: None,
+                });
+            }
+        }
+        releases
+    }
+
+    /// Makes `calls` to monitors: queued for [`send_monitor_calls`], which
+    /// sends them one after another, waiting for no answer. Queued under the
+    /// state's lock, where each call is decided, so they go out in the order
+    /// the fake decided them, as bluetoothd sends them on its one connection.
+    fn call_monitors(&self, calls: Vec<MonitorCall>) {
+        if let Some(queue) = &self.monitor_calls {
+            for call in calls {
+                let _ = queue.send(call);
+            }
+        }
+    }
+
+    /// Whether the adapter called `adapter` hears advertisements: powered,
+    /// with a client discovering or a monitor registered there.
+    fn hears(&self, adapter: &str) -> bool {
+        self.powered.contains(adapter)
+            && (self.is_discovering(adapter)
+                || self.monitor_apps.keys().any(|app| app.adapter == adapter))
     }
 
     /// Forgets the providers `provider` picks, and their batteries, returning
@@ -579,9 +752,16 @@ impl FakeBluez {
     /// can be put in place before the app can find any of it.
     pub async fn serve(bus: &str) -> Result<Self> {
         let conn = connect_serving(bus).await?;
+        let conn_now = Arc::new(Mutex::new(conn.clone()));
+        let (monitor_calls, queued) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(send_monitor_calls(conn_now.clone(), queued));
+        let state = State {
+            monitor_calls: Some(monitor_calls),
+            ..State::default()
+        };
         let bluez = Self {
-            conn: Arc::new(Mutex::new(conn.clone())),
-            state: Arc::default(),
+            conn: conn_now,
+            state: Arc::new(Mutex::new(state)),
             exports: Arc::default(),
             carrying: Arc::default(),
             hearing: Arc::default(),
@@ -594,8 +774,8 @@ impl FakeBluez {
     /// `/`, which [`connect_serving`] serves from the start: a watch on
     /// clients leaving the bus.
     async fn serve_on(&self, conn: &Connection) -> Result<()> {
-        // bluetoothd forgets a client's discovery and providers when it
-        // leaves the bus.
+        // bluetoothd forgets a client's discovery, providers and monitors
+        // when it leaves the bus.
         let dbus = zbus::fdo::DBusProxy::new(conn).await?;
         let mut owners = dbus.receive_name_owner_changed().await?;
         let watcher = self.clone();
@@ -630,6 +810,7 @@ impl FakeBluez {
             };
             server.at(&path, manager).await?;
         }
+        self.export_monitor_manager(conn, name).await?;
         let adapter = Adapter1 {
             bluez: self.clone(),
             name: name.to_string(),
@@ -641,8 +822,10 @@ impl FakeBluez {
 
     /// Takes the battery API away from the adapter called `name`, as a BlueZ
     /// built or run without it has none: no `BatteryProviderManager1`, so
-    /// registering a provider fails as the method is unknown. Before the
-    /// app starts, as such a BlueZ never had one.
+    /// registering a provider is refused - `UnknownInterface` from zbus, where
+    /// bluetoothd's libdbus would answer `UnknownMethod`
+    /// ([protocol/linux/zbus.md](../../docs/protocol/linux/zbus.md#calls-to-an-interface-not-served)).
+    /// Before the app starts, as such a BlueZ never had one.
     pub async fn drop_battery_api(&self, name: &str) -> Result<()> {
         anyhow::ensure!(self.state().has_adapter(name), "there is no adapter {name}");
         self.state().no_battery_api.insert(name.to_string());
@@ -698,9 +881,10 @@ impl FakeBluez {
         Ok(())
     }
 
-    /// Unplugs the adapter called `name`: it stops as when it powers off, and
-    /// its devices, its providers and their batteries go with it, then the
-    /// adapter itself, each with `InterfacesRemoved`. Its pairings are kept
+    /// Unplugs the adapter called `name`: it stops as when it powers off, its
+    /// advertisement monitors are released, and its devices, its providers
+    /// and their batteries go with it, then the adapter itself, each with
+    /// `InterfacesRemoved`. Its pairings are kept
     /// for when it is plugged in again.
     pub async fn remove_adapter(&self, name: &str) -> Result<()> {
         anyhow::ensure!(self.state().has_adapter(name), "there is no adapter {name}");
@@ -710,6 +894,11 @@ impl FakeBluez {
             state.adapters.retain(|a| a != name);
             state.powered.remove(name);
             let batteries = state.forget_providers(|p| p.adapter == name);
+            // Its manager goes, and releases every monitor registered with
+            // it (`manager_destroy` and `monitor_release` in BlueZ 5.87's
+            // `src/adv_monitor.c`).
+            let releases = state.forget_monitors(|app| app.adapter == name);
+            state.call_monitors(releases);
             (batteries, state.paired_with(name))
         };
         for device in batteries {
@@ -724,8 +913,13 @@ impl FakeBluez {
         }
         let path = adapter_object(name);
         server.remove::<Adapter1, _>(&path).await?;
-        // Not there when its BlueZ has no battery API.
+        // Not there when its BlueZ has no battery API, nor experimental
+        // interfaces.
         let _ = server.remove::<BatteryProviderManager1, _>(&path).await;
+        let _ = server
+            .remove::<AdvertisementMonitorManager1, _>(&path)
+            .await;
+        let _ = server.remove::<NoMonitorManager, _>(&path).await;
         Ok(())
     }
 
@@ -766,7 +960,8 @@ impl FakeBluez {
     /// What bluetoothd's `adapter_stop` does to an adapter's clients: their
     /// discovery there ends, the devices it only heard advertising go as at
     /// the end of a discovery - see [`FakeBluez::remove_advertisers`] - and
-    /// its connected devices disconnect, each signaled.
+    /// its connected devices disconnect, each signaled. Its monitors stay
+    /// registered.
     async fn stop_adapter(&self, name: &str) {
         let hearing = self.hearing.lock().await;
         let (ended, heard, paired) = {
@@ -797,8 +992,8 @@ impl FakeBluez {
     }
 
     /// bluetoothd going, as it does when it crashes: every client's
-    /// discovery and providers, and the devices only heard advertising, are
-    /// forgotten, and `org.bluez` let go of. Until [`FakeBluez::start`], a
+    /// discovery, providers and advertisement monitors, and the devices only
+    /// heard advertising, are forgotten, and `org.bluez` let go of. Until [`FakeBluez::start`], a
     /// call to `org.bluez` finds no one - or, on a bus that activates it,
     /// waits for the new one.
     pub async fn stop(&self) -> Result<()> {
@@ -806,6 +1001,7 @@ impl FakeBluez {
         let (heard, batteries, transports) = {
             let mut state = self.state();
             state.end_discovery(|_| true);
+            state.forget_monitors(|_| true);
             let heard = state.forget_advertisers(|_| true);
             let transports: Vec<OwnedObjectPath> = state
                 .audio
@@ -837,7 +1033,8 @@ impl FakeBluez {
 
     /// The new bluetoothd, on a new connection to the bus at `bus`, which
     /// has a unique name of its own: the adapters and paired devices as the
-    /// old one left them, connections and all, none discovering. All of it is
+    /// old one left them, connections and all, none discovering and no monitor
+    /// registered. All of it is
     /// in place before the name is taken, so nothing is announced to whoever
     /// listens to `org.bluez`.
     pub async fn start(&self, bus: &str) -> Result<()> {
@@ -1431,6 +1628,192 @@ impl FakeBluez {
             .unwrap_or_default()
     }
 
+    /// Runs bluetoothd with its experimental interfaces on or off, as
+    /// `Experimental` in its main.conf does - off unless set, as there: every
+    /// adapter gets an `AdvertisementMonitorManager1`, or loses it with the
+    /// monitors registered there, unreleased. Without one, a registration is
+    /// refused with `UnknownMethod` - see [`NoMonitorManager`].
+    ///
+    /// It applies at once. A real bluetoothd reads the setting as it starts:
+    /// set it before [`FakeBluez::publish`], or follow it with
+    /// [`FakeBluez::restart`], as a user who turns it on restarts bluetoothd.
+    pub async fn set_experimental(&self, on: bool) -> Result<()> {
+        let adapters = {
+            let mut state = self.state();
+            if state.experimental == on {
+                return Ok(());
+            }
+            state.experimental = on;
+            if !on {
+                state.forget_monitors(|_| true);
+            }
+            state.adapters.clone()
+        };
+        let conn = self.conn();
+        let server = conn.object_server();
+        for name in adapters {
+            let path = adapter_object(&name);
+            let _ = server
+                .remove::<AdvertisementMonitorManager1, _>(&path)
+                .await;
+            let _ = server.remove::<NoMonitorManager, _>(&path).await;
+            self.export_monitor_manager(&conn, &name).await?;
+        }
+        Ok(())
+    }
+
+    /// Serves the monitor manager of the adapter called `name` on `conn` as
+    /// the experimental interfaces have it: the manager while they are on,
+    /// [`NoMonitorManager`] in its place while they are off.
+    async fn export_monitor_manager(&self, conn: &Connection, name: &str) -> Result<()> {
+        let path = adapter_object(name);
+        let server = conn.object_server();
+        if self.state().experimental {
+            let monitors = AdvertisementMonitorManager1 {
+                bluez: self.clone(),
+                adapter: name.to_string(),
+            };
+            server.at(&path, monitors).await?;
+        } else {
+            server.at(&path, NoMonitorManager).await?;
+        }
+        Ok(())
+    }
+
+    /// Has the adapter called `adapter` refuse the next `count` monitor
+    /// registrations with `org.bluez.Error.Failed`, as bluetoothd refuses one
+    /// it cannot set up (`register_monitor` in BlueZ 5.87's
+    /// `src/adv_monitor.c`).
+    pub fn refuse_monitors(&self, adapter: &str, count: usize) {
+        self.state()
+            .monitor_refusals
+            .insert(adapter.to_string(), count);
+    }
+
+    /// The roots of the monitor apps registered with the adapter called
+    /// `adapter`.
+    pub fn monitor_roots(&self, adapter: &str) -> Vec<OwnedObjectPath> {
+        self.state()
+            .monitor_apps
+            .keys()
+            .filter(|app| app.adapter == adapter)
+            .map(|app| app.root.clone())
+            .collect()
+    }
+
+    /// The unique names that have a monitor app registered with the adapter
+    /// called `adapter`, once per app.
+    pub fn monitor_owners(&self, adapter: &str) -> Vec<OwnedUniqueName> {
+        self.state()
+            .monitor_apps
+            .keys()
+            .filter(|app| app.adapter == adapter)
+            .map(|app| app.owner.clone())
+            .collect()
+    }
+
+    /// Releases every monitor registered with the adapter called `adapter`
+    /// and forgets their apps. bluetoothd releases a monitor the kernel
+    /// removes, and one whose properties it cannot take (`monitor_release` in
+    /// BlueZ 5.87's `src/adv_monitor.c`), and keeps the app registered; the
+    /// fake forgets it, so that a client registers anew - a choice of its
+    /// own, listed in `docs/development/fake-world.md`.
+    pub fn release_monitors(&self, adapter: &str) {
+        let mut state = self.state();
+        let releases = state.forget_monitors(|app| app.adapter == adapter);
+        state.call_monitors(releases);
+    }
+
+    /// Registers the monitor app at `app`'s root, as bluetoothd does: its
+    /// objects read from there, each `org.bluez.AdvertisementMonitor1` of
+    /// type `or_patterns` with patterns that fit an advertisement taken and
+    /// activated, any other released. Answered once read, as bluetoothd
+    /// answers once its client is ready (`app_ready_cb`).
+    async fn register_monitor(&self, app: MonitorApp) -> Result<(), BluezError> {
+        let exists = || BluezError::AlreadyExists("Already Exists".into());
+        if self.state().monitor_apps.contains_key(&app) {
+            return Err(exists());
+        }
+        if let Some(left) = self.state().monitor_refusals.get_mut(&app.adapter)
+            && *left > 0
+        {
+            *left -= 1;
+            return Err(BluezError::Failed(
+                "Failed to create Adv Monitor app".into(),
+            ));
+        }
+        let objects = async {
+            zbus::fdo::ObjectManagerProxy::builder(&self.conn())
+                .destination(app.owner.as_ref())?
+                .path(app.root.as_ref())?
+                .build()
+                .await?
+                .get_managed_objects()
+                .await
+                .map_err(zbus::Error::from)
+        }
+        .await
+        .map_err(|e| BluezError::Failed(format!("failed to read the monitors: {e}")))?;
+        let mut taken = Vec::new();
+        let mut calls = Vec::new();
+        for (object, interfaces) in objects {
+            let Some((_, props)) = interfaces
+                .iter()
+                .find(|(name, _)| name.as_str() == MONITOR_INTERFACE)
+            else {
+                continue;
+            };
+            let call = |method| MonitorCall {
+                owner: app.owner.clone(),
+                object: object.clone(),
+                method,
+                device: None,
+            };
+            match monitor_patterns(props) {
+                Some(patterns) => {
+                    calls.push(call("Activate"));
+                    taken.push(FakeMonitor {
+                        object: object.clone(),
+                        patterns,
+                        found: HashMap::new(),
+                    });
+                }
+                None => calls.push(call("Release")),
+            }
+        }
+        {
+            let mut state = self.state();
+            if state.monitor_apps.contains_key(&app) {
+                return Err(exists());
+            }
+            state.monitor_apps.insert(app, taken);
+            state.call_monitors(calls);
+        }
+        Ok(())
+    }
+
+    /// Forgets the monitor app at `app`, releasing its monitors, as
+    /// bluetoothd does (`unregister_monitor`, `app_destroy`).
+    fn unregister_monitor(&self, app: MonitorApp) -> Result<(), BluezError> {
+        let mut state = self.state();
+        if !state.monitor_apps.contains_key(&app) {
+            return Err(BluezError::DoesNotExist("Does Not Exist".into()));
+        }
+        let releases = state.forget_monitors(|a| *a == app);
+        state.call_monitors(releases);
+        Ok(())
+    }
+
+    /// The unique names that have discovery on at the adapter called
+    /// `adapter`.
+    pub fn discovering_clients(&self, adapter: &str) -> HashSet<OwnedUniqueName> {
+        self.state()
+            .discovering
+            .get(adapter)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Whether any client has discovery on at the adapter called `adapter`.
     pub fn is_discovering(&self, adapter: &str) -> bool {
         self.state().is_discovering(adapter)
@@ -1463,7 +1846,8 @@ impl FakeBluez {
     }
 
     /// An advertisement from `address`, `apple_data` the value of its Apple
-    /// entry in `ManufacturerData`, heard by every adapter that discovers.
+    /// entry in `ManufacturerData`, heard by every adapter that hears
+    /// advertisements - see [`State::hears`].
     /// Signaled as the module docs describe: returns whether any adapter
     /// heard it.
     pub async fn advertise(&self, address: Address, apple_data: &[u8]) -> Result<bool> {
@@ -1473,7 +1857,7 @@ impl FakeBluez {
             let discovering: Vec<String> = state
                 .adapters
                 .iter()
-                .filter(|adapter| state.is_discovering(adapter))
+                .filter(|adapter| state.hears(adapter))
                 .cloned()
                 .collect();
             if discovering.is_empty() {
@@ -1495,9 +1879,32 @@ impl FakeBluez {
                 })
                 .collect()
         };
-        for (adapter, heard_before) in hearing {
-            self.heard(&adapter, address, apple_data, heard_before)
+        for (adapter, heard_before) in &hearing {
+            self.heard(adapter, address, apple_data, *heard_before)
                 .await?;
+        }
+        // After the device's signals: its monitors' `DeviceFound`, for those
+        // that match it and have not found it yet.
+        {
+            let mut state = self.state();
+            let now = Instant::now();
+            let mut found = Vec::new();
+            for (app, monitors) in &mut state.monitor_apps {
+                if !hearing.iter().any(|(adapter, _)| *adapter == app.adapter) {
+                    continue;
+                }
+                for monitor in monitors.iter_mut().filter(|m| m.matches(apple_data)) {
+                    if monitor.found.insert(address, now).is_none() {
+                        found.push(MonitorCall {
+                            owner: app.owner.clone(),
+                            object: monitor.object.clone(),
+                            method: "DeviceFound",
+                            device: Some(device_path(&app.adapter, address)),
+                        });
+                    }
+                }
+            }
+            state.call_monitors(found);
         }
         Ok(true)
     }
@@ -1576,9 +1983,31 @@ impl FakeBluez {
                 .collect();
             for heard_by in &stale {
                 state.advertisers.remove(heard_by);
+                state.forget_found(&heard_by.0, heard_by.1);
             }
             stale
         };
+        {
+            let mut state = self.state();
+            let mut lost = Vec::new();
+            for (app, monitors) in &mut state.monitor_apps {
+                for monitor in monitors {
+                    monitor.found.retain(|address, heard| {
+                        let quiet = now.saturating_duration_since(*heard) >= MONITOR_LOST_TIMEOUT;
+                        if quiet {
+                            lost.push(MonitorCall {
+                                owner: app.owner.clone(),
+                                object: monitor.object.clone(),
+                                method: "DeviceLost",
+                                device: Some(device_path(&app.adapter, *address)),
+                            });
+                        }
+                        !quiet
+                    });
+                }
+            }
+            state.call_monitors(lost);
+        }
         let conn = self.conn();
         let server = conn.object_server();
         for (adapter, address) in stale {
@@ -1709,7 +2138,9 @@ impl FakeBluez {
 
     /// A connection left the bus: its discovery stops on every adapter - the
     /// last client's ending discovery there, as
-    /// [`FakeBluez::discovery_ended`] has it - and its providers go.
+    /// [`FakeBluez::discovery_ended`] has it - and its providers go, and its
+    /// advertisement monitors, unreleased, as bluetoothd forgets them
+    /// (`app_disconnect_cb` in BlueZ 5.87's `src/adv_monitor.c`).
     async fn client_gone(&self, name: OwnedUniqueName) {
         let (stopped, devices) = {
             let mut state = self.state();
@@ -1719,6 +2150,7 @@ impl FakeBluez {
                     stopped.push(adapter.clone());
                 }
             }
+            state.forget_monitors(|app| app.owner == name);
             (stopped, state.forget_providers(|p| p.owner == name))
         };
         for adapter in stopped {
@@ -2132,6 +2564,137 @@ impl BatteryProviderManager1 {
     }
 }
 
+/// Sends each call to a monitor `queued` holds, one after another, on the
+/// connection the fake serves on then - a new one after a restart - flagged
+/// as wanting no reply, as bluetoothd flags a call it makes with no callback
+/// (`g_dbus_proxy_method_call` in BlueZ 5.87's `gdbus/client.c`,
+/// `g_dbus_send_message` in `gdbus/object.c`). Ends when the queue does.
+async fn send_monitor_calls(
+    conn: Arc<Mutex<Connection>>,
+    mut queued: tokio::sync::mpsc::UnboundedReceiver<MonitorCall>,
+) {
+    while let Some(call) = queued.recv().await {
+        let conn = conn.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let message = || {
+            let builder = zbus::Message::method_call(call.object.as_ref(), call.method)?
+                .destination(call.owner.as_ref())?
+                .interface(MONITOR_INTERFACE)?
+                .with_flags(zbus::message::Flags::NoReplyExpected)?;
+            match &call.device {
+                Some(device) => builder.build(&(device,)),
+                None => builder.build(&()),
+            }
+        };
+        let sent = match message() {
+            Ok(message) => conn.send(&message).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = sent {
+            tracing::debug!(
+                "fake BlueZ: {} on monitor {} failed: {e}",
+                call.method,
+                call.object
+            );
+        }
+    }
+}
+
+/// The patterns of an `org.bluez.AdvertisementMonitor1` whose properties are
+/// `props`, if it is one bluetoothd takes: of type `or_patterns`, with at
+/// least one pattern, each of which fits in an advertisement's 31 bytes.
+fn monitor_patterns(props: &HashMap<String, OwnedValue>) -> Option<Vec<(u8, u8, Vec<u8>)>> {
+    let monitor_type = <&str>::try_from(&**props.get("Type")?).ok()?;
+    if monitor_type != "or_patterns" {
+        return None;
+    }
+    let patterns = <Vec<(u8, u8, Vec<u8>)>>::try_from(props.get("Patterns")?.clone()).ok()?;
+    let fits = |(start, _, content): &(u8, u8, Vec<u8>)| {
+        !content.is_empty() && usize::from(*start) + content.len() <= 31
+    };
+    (!patterns.is_empty() && patterns.iter().all(fits)).then_some(patterns)
+}
+
+/// What answers for the monitor manager while bluetoothd runs without its
+/// experimental interfaces: every call refused as `UnknownMethod`, as libdbus
+/// refuses a call that bluetoothd leaves unhandled
+/// ([protocol/linux/bluez.md](../../docs/protocol/linux/bluez.md#discovery-and-directed-advertising)).
+/// zbus answers otherwise for an interface not served at all
+/// ([protocol/linux/zbus.md](../../docs/protocol/linux/zbus.md#calls-to-an-interface-not-served)),
+/// so this one is served, and shows in the adapter's interfaces where
+/// bluetoothd lists none.
+struct NoMonitorManager;
+
+#[interface(name = "org.bluez.AdvertisementMonitorManager1")]
+impl NoMonitorManager {
+    fn register_monitor(&self, application: OwnedObjectPath) -> zbus::fdo::Result<()> {
+        let _ = application;
+        Err(unknown_method("RegisterMonitor"))
+    }
+
+    fn unregister_monitor(&self, application: OwnedObjectPath) -> zbus::fdo::Result<()> {
+        let _ = application;
+        Err(unknown_method("UnregisterMonitor"))
+    }
+}
+
+/// libdbus's answer to a call nothing handles on an object that is there
+/// (`dbus_connection_dispatch` in libdbus 1.16.2's `dbus/dbus-connection.c`).
+fn unknown_method(method: &str) -> zbus::fdo::Error {
+    zbus::fdo::Error::UnknownMethod(format!(
+        "Method \"{method}\" with signature \"o\" on interface \
+         \"org.bluez.AdvertisementMonitorManager1\" doesn't exist"
+    ))
+}
+
+/// One adapter's monitor manager, there while bluetoothd runs with its
+/// experimental interfaces - see [`FakeBluez::set_experimental`].
+struct AdvertisementMonitorManager1 {
+    bluez: FakeBluez,
+    adapter: String,
+}
+
+impl AdvertisementMonitorManager1 {
+    fn app(&self, root: OwnedObjectPath, header: &Header<'_>) -> Result<MonitorApp, BluezError> {
+        Ok(MonitorApp {
+            adapter: self.adapter.clone(),
+            owner: sender(header)?,
+            root,
+        })
+    }
+}
+
+#[interface(name = "org.bluez.AdvertisementMonitorManager1")]
+impl AdvertisementMonitorManager1 {
+    async fn register_monitor(
+        &self,
+        application: OwnedObjectPath,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(), BluezError> {
+        self.bluez
+            .register_monitor(self.app(application, &header)?)
+            .await
+    }
+
+    fn unregister_monitor(
+        &self,
+        application: OwnedObjectPath,
+        #[zbus(header)] header: Header<'_>,
+    ) -> Result<(), BluezError> {
+        self.bluez
+            .unregister_monitor(self.app(application, &header)?)
+    }
+
+    #[zbus(property)]
+    fn supported_monitor_types(&self) -> Vec<String> {
+        vec!["or_patterns".into()]
+    }
+
+    #[zbus(property)]
+    fn supported_features(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// A paired device's names, as its pairing keeps them.
 struct Names {
     name: String,
@@ -2403,7 +2966,7 @@ mod tests {
 
     use super::*;
     use crate::ble::parser::PodSide;
-    use crate::ble::scanner::Scanner;
+    use crate::ble::scanner::{ScanControl, Scanner, monitor_object};
     use crate::bluez::{self, BatteryAction, BatteryProvider, Devices};
     use crate::harness::PrivateBus;
     use crate::harness::pods::{PRO_3, Part, Pods};
@@ -2430,6 +2993,14 @@ mod tests {
         bluez.add_device(ADAPTER, PAIR, ALIAS).await.unwrap();
         bluez.publish().await.unwrap();
         (bus, bluez)
+    }
+
+    /// A scanner on its own connection to `bus`, as the app has one: able to
+    /// serve advertisement monitors.
+    async fn scanner(bus: &PrivateBus) -> Scanner {
+        Scanner::connect(zbus::connection::Builder::address(bus.address()).unwrap())
+            .await
+            .unwrap()
     }
 
     /// Waits until `done`, which the fake gets to by itself.
@@ -2673,6 +3244,362 @@ mod tests {
         assert!(bluez.advertisers_on("hci2").is_empty(), "heard while off");
     }
 
+    /// Where BlueZ offers an advertisement monitor, the scanner registers one
+    /// and starts no discovery, and hears the pods through it; the state says
+    /// no adapter falls back to discovery.
+    #[tokio::test]
+    async fn the_scanner_listens_through_a_monitor_where_bluez_offers_one() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        let control = ScanControl::new();
+        let mut scanning = scanner(&bus).await.scan(control.clone()).await.unwrap();
+        assert_eq!(bluez.monitor_owners(ADAPTER).len(), 1);
+        assert!(!bluez.is_discovering(ADAPTER));
+        assert!(!control.state().borrow().fallback);
+
+        let pods = Pods::new(PRO_3, PAIR);
+        let ad = pods.advertisement(PodSide::Right, Duration::ZERO);
+        assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, ad.address);
+        assert_eq!(advert.data.product_id, PRO_3);
+        assert!(!bluez.is_discovering(ADAPTER));
+    }
+
+    /// Where BlueZ offers no monitor - its experimental interfaces off - the
+    /// scanner discovers, and the state says so.
+    #[tokio::test]
+    async fn the_scanner_discovers_where_bluez_offers_no_monitor() {
+        let (bus, bluez) = served().await;
+        let control = ScanControl::new();
+        let _scanning = scanner(&bus).await.scan(control.clone()).await.unwrap();
+        assert!(bluez.monitor_owners(ADAPTER).is_empty());
+        assert!(bluez.is_discovering(ADAPTER));
+        assert!(control.state().borrow().fallback);
+    }
+
+    /// A monitor BlueZ releases leaves the adapter to discovery.
+    #[tokio::test]
+    async fn a_released_monitor_falls_back_to_discovery() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        let control = ScanControl::new();
+        let mut scanning = scanner(&bus).await.scan(control.clone()).await.unwrap();
+        assert!(!bluez.is_discovering(ADAPTER));
+        let scanning = tokio::spawn(async move { while scanning.next().await.is_some() {} });
+
+        bluez.release_monitors(ADAPTER);
+        eventually(|| bluez.is_discovering(ADAPTER)).await;
+        eventually(|| control.state().borrow().fallback).await;
+        scanning.abort();
+    }
+
+    /// A bluetoothd restarted with its experimental interfaces on is offered
+    /// a monitor, and the scanner's discovery is not started again: decided
+    /// anew with the adapters, without the scanner starting over.
+    #[tokio::test]
+    async fn the_scanner_takes_a_monitor_once_bluez_restarts_offering_one() {
+        let (bus, bluez) = served().await;
+        let control = ScanControl::new();
+        let mut scanning = scanner(&bus).await.scan(control.clone()).await.unwrap();
+        assert!(bluez.is_discovering(ADAPTER));
+        let scanning = tokio::spawn(async move { while scanning.next().await.is_some() {} });
+
+        bluez.set_experimental(true).await.unwrap();
+        bluez.restart(bus.address()).await.unwrap();
+        eventually(|| !bluez.monitor_owners(ADAPTER).is_empty()).await;
+        eventually(|| !control.state().borrow().fallback).await;
+        assert!(!bluez.is_discovering(ADAPTER));
+        scanning.abort();
+    }
+
+    /// A pause stops the scanner's discovery, and the state says until when;
+    /// once it is over, discovery runs again and the state says so.
+    #[tokio::test]
+    async fn a_pause_stops_discovery_until_it_is_over() {
+        const PAUSE: Duration = Duration::from_secs(1);
+        let (bus, bluez) = served().await;
+        let control = ScanControl::new();
+        let mut scanning = scanner(&bus).await.scan(control.clone()).await.unwrap();
+        assert!(bluez.is_discovering(ADAPTER));
+        let scanning = tokio::spawn(async move { while scanning.next().await.is_some() {} });
+
+        control.pause_discovery_for(PAUSE);
+        eventually(|| !bluez.is_discovering(ADAPTER)).await;
+        let state = *control.state().borrow();
+        assert!(state.fallback, "still the adapter's way to listen");
+        assert!(state.paused_until.is_some());
+
+        eventually(|| bluez.is_discovering(ADAPTER)).await;
+        eventually(|| control.state().borrow().paused_until.is_none()).await;
+        scanning.abort();
+    }
+
+    /// A pod BlueZ held already when the monitor was registered - another
+    /// client discovering - is reported found with no InterfacesAdded, and
+    /// its payload changes no more: the scanner reads it from the device.
+    #[tokio::test]
+    async fn a_device_found_with_no_interfaces_added_is_read() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        let other = bus.connect().await.unwrap();
+        proxy(&other, &adapter_path(ADAPTER), "org.bluez.Adapter1")
+            .await
+            .call_method("StartDiscovery", &())
+            .await
+            .unwrap();
+        let pods = Pods::new(PRO_3, PAIR);
+        let ad = pods.advertisement(PodSide::Right, Duration::ZERO);
+        assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
+
+        let mut scanning = scanner(&bus).await.scan(ScanControl::new()).await.unwrap();
+        assert_eq!(bluez.monitor_owners(ADAPTER).len(), 1);
+        // The same payload again: `RSSI` alone is signaled.
+        assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, ad.address);
+        assert_eq!(advert.data.raw_data, ad.data[2..]);
+    }
+
+    /// A monitor call that does not come from bluetoothd counts for nothing:
+    /// a `Release` from another connection leaves the scanner off the
+    /// discovery fallback, its own connection not discovering. The device
+    /// found after it -
+    /// held by bluetoothd under another client's discovery, so read from
+    /// BlueZ once the release has been taken - shows that the release was
+    /// taken first.
+    #[tokio::test]
+    async fn a_monitor_call_from_another_than_bluez_counts_for_nothing() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        let other = bus.connect().await.unwrap();
+        proxy(&other, &adapter_path(ADAPTER), "org.bluez.Adapter1")
+            .await
+            .call_method("StartDiscovery", &())
+            .await
+            .unwrap();
+        let held = Pods::new(PRO_3, PAIR).advertisement(PodSide::Right, Duration::ZERO);
+        assert!(bluez.advertise(held.address, &held.data).await.unwrap());
+
+        let control = ScanControl::new();
+        let mut scanning = scanner(&bus).await.scan(control.clone()).await.unwrap();
+        let owner = bluez.monitor_owners(ADAPTER).remove(0);
+        let root = bluez.monitor_roots(ADAPTER).remove(0);
+        let forger = bus.connect().await.unwrap();
+        forger
+            .call_method(
+                Some(owner.as_ref()),
+                monitor_object(root.as_str()).as_str(),
+                Some(MONITOR_INTERFACE),
+                "Release",
+                &(),
+            )
+            .await
+            .unwrap();
+
+        // The same payload again: found, and read.
+        assert!(bluez.advertise(held.address, &held.data).await.unwrap());
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, held.address);
+        assert!(!bluez.discovering_clients(ADAPTER).contains(&owner));
+        assert!(!control.state().borrow().fallback);
+    }
+
+    /// A monitor replaced - its adapter unplugged and plugged in again - is
+    /// registered anew at another root, and the old root is no longer served:
+    /// a `Release` sent to it from bluetoothd's own connection is refused.
+    /// The new monitor listens and hears the pods, and nothing discovers.
+    #[tokio::test]
+    async fn a_replaced_monitor_is_registered_anew_at_another_root() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        let control = ScanControl::new();
+        let mut scanning = scanner(&bus).await.scan(control.clone()).await.unwrap();
+        let (heard, mut adverts) = tokio::sync::mpsc::unbounded_channel();
+        let scanning = tokio::spawn(async move {
+            while let Some(advert) = scanning.next().await {
+                let _ = heard.send(advert);
+            }
+        });
+        let owner = bluez.monitor_owners(ADAPTER).remove(0);
+        let old = bluez.monitor_roots(ADAPTER).remove(0);
+
+        bluez.remove_adapter(ADAPTER).await.unwrap();
+        bluez.add_adapter(ADAPTER, true).await.unwrap();
+        eventually(|| matches!(bluez.monitor_roots(ADAPTER)[..], [ref new] if *new != old)).await;
+        let late = bluez
+            .connection()
+            .call_method(
+                Some(owner.as_ref()),
+                monitor_object(old.as_str()).as_str(),
+                Some(MONITOR_INTERFACE),
+                "Release",
+                &(),
+            )
+            .await;
+        assert!(late.is_err(), "the old root is still served");
+
+        let pods = Pods::new(PRO_3, PAIR);
+        let ad = pods.advertisement(PodSide::Right, Duration::ZERO);
+        assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
+        let advert = timeout(TIMEOUT, adverts.recv()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, ad.address);
+        eventually(|| !bluez.is_discovering(ADAPTER) && !control.state().borrow().fallback).await;
+        scanning.abort();
+    }
+
+    /// A registration refused with an error other than `UnknownMethod` or
+    /// `AlreadyExists` leaves the adapter discovering meanwhile, and is asked
+    /// for again after the backoff: once taken, the scanner's discovery
+    /// stops.
+    #[tokio::test]
+    async fn a_failed_registration_discovers_until_the_monitor_is_taken() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        bluez.refuse_monitors(ADAPTER, 1);
+        let control = ScanControl::new();
+        let mut scanning = scanner(&bus).await.scan(control.clone()).await.unwrap();
+        assert!(bluez.monitor_owners(ADAPTER).is_empty());
+        assert!(bluez.is_discovering(ADAPTER));
+        assert!(control.state().borrow().fallback);
+        let scanning = tokio::spawn(async move { while scanning.next().await.is_some() {} });
+
+        // After `bluez::backoff(1)`, a second.
+        eventually(|| bluez.monitor_owners(ADAPTER).len() == 1).await;
+        eventually(|| !bluez.is_discovering(ADAPTER) && !control.state().borrow().fallback).await;
+        scanning.abort();
+    }
+
+    /// A device the monitor reports found whose payload a signal brought
+    /// already is not read from BlueZ; one that came with no signal - held
+    /// by bluetoothd under another client's discovery - is. The `GetAll`
+    /// calls on the bus are counted per device. The found device read comes
+    /// after the other in the fake's order, so once its advertisement is
+    /// taken, a read of the other would have been made. The new device's
+    /// `InterfacesAdded` comes before its `DeviceFound`, as bluetoothd sends
+    /// them.
+    #[tokio::test]
+    async fn a_device_found_already_heard_is_not_read() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        let other = bus.connect().await.unwrap();
+        proxy(&other, &adapter_path(ADAPTER), "org.bluez.Adapter1")
+            .await
+            .call_method("StartDiscovery", &())
+            .await
+            .unwrap();
+        let held = Pods::new(PRO_3, PAIR).advertisement(PodSide::Right, Duration::ZERO);
+        assert!(bluez.advertise(held.address, &held.data).await.unwrap());
+
+        let watcher = bus.connect().await.unwrap();
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::MethodCall)
+            .interface("org.freedesktop.DBus.Properties")
+            .unwrap()
+            .member("GetAll")
+            .unwrap()
+            .build();
+        zbus::fdo::MonitoringProxy::new(&watcher)
+            .await
+            .unwrap()
+            .become_monitor(&[rule], 0)
+            .await
+            .unwrap();
+        let mut reads = MessageStream::from(&watcher);
+
+        let mut scanning = scanner(&bus).await.scan(ScanControl::new()).await.unwrap();
+        let new = Pods::new(PRO_3, OTHER).advertisement(PodSide::Left, Duration::ZERO);
+        assert!(bluez.advertise(new.address, &new.data).await.unwrap());
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, new.address, "announced with its device");
+        // The same payload again: found, and read.
+        assert!(bluez.advertise(held.address, &held.data).await.unwrap());
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, held.address);
+
+        let held_path = device_path(ADAPTER, held.address);
+        let mut read = Vec::new();
+        while !read.contains(&held_path.to_string()) {
+            let msg = timeout(TIMEOUT, reads.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let Some(path) = msg.header().path() {
+                read.push(path.to_string());
+            }
+        }
+        assert_eq!(read, [held_path.to_string()], "read once, and nothing else");
+    }
+
+    /// A device the monitor reports lost and then found again, its payload
+    /// unchanged since a signal brought it, is read from BlueZ once found
+    /// again: the reading comes back though no signal carries it.
+    #[tokio::test]
+    async fn a_device_lost_and_found_again_is_read() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        let mut scanning = scanner(&bus).await.scan(ScanControl::new()).await.unwrap();
+        let ad = Pods::new(PRO_3, PAIR).advertisement(PodSide::Right, Duration::ZERO);
+        assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, ad.address, "announced with its device");
+
+        // Lost, the device kept; then the same payload again.
+        bluez.prune(Instant::now() + MONITOR_LOST_TIMEOUT).await;
+        assert!(bluez.advertisers_on(ADAPTER).contains(&ad.address));
+        assert!(bluez.advertise(ad.address, &ad.data).await.unwrap());
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, ad.address);
+        assert_eq!(advert.data.raw_data, ad.data[2..]);
+    }
+
+    /// A forged signal carrying a held pod's payload, sent to the scanner
+    /// from another connection, does not count as heard: the pod's
+    /// `DeviceFound` is still read from BlueZ, and the reading it gives is
+    /// bluetoothd's payload, after the forged one.
+    #[tokio::test]
+    async fn a_forged_signal_does_not_spare_a_found_device_its_read() {
+        let (bus, bluez) = served().await;
+        bluez.set_experimental(true).await.unwrap();
+        let other = bus.connect().await.unwrap();
+        proxy(&other, &adapter_path(ADAPTER), "org.bluez.Adapter1")
+            .await
+            .call_method("StartDiscovery", &())
+            .await
+            .unwrap();
+        let held = Pods::new(PRO_3, PAIR).advertisement(PodSide::Right, Duration::ZERO);
+        assert!(bluez.advertise(held.address, &held.data).await.unwrap());
+
+        let mut scanning = scanner(&bus).await.scan(ScanControl::new()).await.unwrap();
+        let scanner_name = bluez.monitor_owners(ADAPTER).remove(0);
+        let mut forged = Pods::new(PRO_3, PAIR);
+        forged.set_battery(Part::Left, Some(10));
+        let forged = forged.advertisement(PodSide::Right, Duration::ZERO);
+        let path = device_path(ADAPTER, held.address);
+        let mfg = HashMap::from([(APPLE_COMPANY_ID, Value::from(forged.data.clone()))]);
+        let changed = HashMap::from([("ManufacturerData", Value::from(mfg))]);
+        let forger = bus.connect().await.unwrap();
+        forger
+            .emit_signal(
+                Some(scanner_name.as_ref()),
+                path.as_str(),
+                "org.freedesktop.DBus.Properties",
+                "PropertiesChanged",
+                &(DEVICE_INTERFACE, changed, Vec::<&str>::new()),
+            )
+            .await
+            .unwrap();
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.data.raw_data, forged.data[2..], "the forged payload");
+
+        // The same payload again: found, and read.
+        assert!(bluez.advertise(held.address, &held.data).await.unwrap());
+        let advert = timeout(TIMEOUT, scanning.next()).await.unwrap().unwrap();
+        assert_eq!(advert.ble_mac, held.address);
+        assert_eq!(advert.data.raw_data, held.data[2..], "bluetoothd's payload");
+    }
+
     /// A busy adapter refuses a discovery start with `InProgress`, as
     /// bluetoothd does when the kernel refuses its own (#123), and does not
     /// take the caller on: a stop is refused as there is nothing to stop, and
@@ -2714,10 +3641,7 @@ mod tests {
     async fn the_scanner_asks_again_for_discovery_refused_as_busy() {
         let (bus, bluez) = served().await;
         bluez.set_discovery_busy(ADAPTER, true);
-        let mut scanning = Scanner::with_connection(bus.connect().await.unwrap())
-            .scan()
-            .await
-            .unwrap();
+        let mut scanning = scanner(&bus).await.scan(ScanControl::new()).await.unwrap();
         assert_eq!(
             bluez.busy_refusals(ADAPTER),
             2,
@@ -2743,7 +3667,10 @@ mod tests {
             .await
             .unwrap();
 
-        let _scanning = Scanner::with_connection(conn).scan().await.unwrap();
+        let _scanning = Scanner::with_connection(conn)
+            .scan(ScanControl::new())
+            .await
+            .unwrap();
         assert!(bluez.is_discovering(ADAPTER));
     }
 
@@ -3020,7 +3947,7 @@ mod tests {
         let conn = bus.connect().await.unwrap();
         let scanner = Scanner::with_connection(conn.clone());
         scanner
-            .start_discovery_on(&adapter_path(SECOND))
+            .start_discovery_on(BLUEZ_SERVICE, &adapter_path(SECOND))
             .await
             .unwrap();
 
@@ -3041,7 +3968,7 @@ mod tests {
         assert_eq!(heard(ADAPTER, RANDOM).await, None, "the first not scanning");
 
         scanner
-            .start_discovery_on(&adapter_path(ADAPTER))
+            .start_discovery_on(BLUEZ_SERVICE, &adapter_path(ADAPTER))
             .await
             .unwrap();
         assert!(bluez.advertise(RANDOM, &[0x07]).await.unwrap());
@@ -3601,9 +4528,15 @@ mod tests {
                     .map(|i| i.to_string()),
             );
         }
+        // The monitor manager's stand-in too, with the experimental
+        // interfaces off - see `NoMonitorManager`.
         assert_eq!(
             announced,
-            ["org.bluez.BatteryProviderManager1", "org.bluez.Adapter1"]
+            [
+                "org.bluez.BatteryProviderManager1",
+                "org.bluez.AdvertisementMonitorManager1",
+                "org.bluez.Adapter1"
+            ]
         );
         let address = proxy(&conn, &second, "org.bluez.Adapter1")
             .await
@@ -3786,8 +4719,8 @@ mod tests {
         assert_eq!(bus.activations(), 0);
     }
 
-    /// Without the battery API there is no manager: registering fails as the
-    /// method is unknown, and the adapter is there all the same.
+    /// Without the battery API there is no manager: registering is refused,
+    /// and the adapter is there all the same.
     #[tokio::test]
     async fn an_adapter_can_lack_the_battery_api() {
         let (bus, bluez) = served().await;

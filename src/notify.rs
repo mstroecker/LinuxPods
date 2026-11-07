@@ -28,10 +28,9 @@ pub const CRITICAL: u8 = 5;
 /// (`docs/app/notifications.md#what-is-warned-about`).
 pub const REARM_ABOVE: u8 = 25;
 
-/// How old a BLE reading may be and still warn: a pair in range is heard
-/// many times a minute, so a minute without a word means it has gone. A
-/// reading over AAP is always fresh - see [`fresh`] and
-/// `docs/app/notifications.md#what-is-warned-about`.
+/// How old a BLE reading may be and still warn. An older one may be from a
+/// pair still in range, and is not warned about. A reading over AAP is always
+/// fresh - see [`fresh`] and `docs/app/notifications.md#what-is-warned-about`.
 pub const FRESH: Duration = Duration::from_secs(60);
 
 /// How low a part's battery is.
@@ -331,8 +330,8 @@ mod tests {
         assert_eq!(Band::of(0), Band::Critical);
     }
 
-    /// Advertisements come several times a second: the same low reading,
-    /// and one a little lower, must not warn again.
+    /// A crossing into the low band warns once: the same low reading again,
+    /// and lower ones within the band, warn no more.
     #[test]
     fn a_crossing_warns_once() {
         let mut alerts = Alerts::default();

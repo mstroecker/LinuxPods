@@ -98,8 +98,11 @@ experimental interfaces on: `Experimental = true` in `main.conf`, or `-E`. The d
 is off ("Defaults to false", `src/main.conf`). With them off, `src/adapter.c` creates no
 monitor manager at all; `src/adv_monitor.c` flags its members experimental besides, and
 `gdbus/object.c` hides what is so flagged. The battery provider manager, by contrast, is
-created whatever the setting (`src/adapter.c`). Read, not run with them off: every run
-here had them on.
+created whatever the setting (`src/adapter.c`). bluetoothd reads the setting only as it
+starts: `main()` loads and parses `main.conf` once and sets gdbus's experimental flag
+once, and its signal handler takes SIGINT and SIGTERM, to shut down, and SIGUSR2, to
+toggle debug logging, with no reload (`src/main.c`). So turning them on takes a
+bluetoothd restart. Read, not run with them off: every run here had them on.
 
 Settings of the monitor and of the manager (BlueZ 5.87; read, not seen in a capture):
 
@@ -119,10 +122,13 @@ Settings of the monitor and of the manager (BlueZ 5.87; read, not seen in a capt
   (`doc/org.bluez.AdvertisementMonitorManager.rst`): the patterns go to a controller
   that can match them. The Intel AX211 offers it (2026-11-06, #189).
 
-**With the experimental interfaces off, `RegisterMonitor` is refused as unknown.** gdbus
-leaves a call to a hidden member unhandled (`generic_message` in BlueZ 5.87's
-`gdbus/object.c`), and no manager is there to take it. Which error libdbus answers with -
-`UnknownMethod`, or `UnknownInterface` - is a guess, not read nor run.
+**With the experimental interfaces off, `RegisterMonitor` is refused with
+`org.freedesktop.DBus.Error.UnknownMethod`.** No monitor manager is registered on the
+adapter's object (`src/adapter.c`, BlueZ 5.87), and gdbus leaves a call to an interface
+the object lacks, or to a member hidden as experimental, unhandled (`generic_message` in
+`gdbus/object.c`). libdbus answers an unhandled method call on an object that is there
+with `UnknownMethod`, "Method ... doesn't exist" (`dbus_connection_dispatch` in libdbus
+1.16.2's `dbus/dbus-connection.c`). Read, not run against a bluetoothd with them off.
 
 How bluetoothd keeps a monitor (BlueZ 5.87, `src/adv_monitor.c` and `src/adapter.c`;
 read, not run):
@@ -133,6 +139,7 @@ read, not run):
 | `Release` | Called on a monitor whose properties it cannot take, on each monitor of an app that unregisters, on one the kernel removes, and on every monitor of an adapter that goes (`monitor_release`, `manager_destroy`). Not on those of a client that left the bus (`app_disconnect_cb`). |
 | The adapter powering off | The registrations stay; a device whose lost timer runs is reported lost at once (`btd_adv_monitor_power_down`). |
 | A device removed | Dropped from every monitor's found devices, with no `DeviceLost` (`btd_adapter_remove_device`, `btd_adv_monitor_device_remove`). Heard again, it is a new device to the monitor. |
+| A new address a monitor matches | `InterfacesAdded`, the payload among its properties, before `DeviceFound`. `btd_adapter_device_found` makes the device and sets its manufacturer data, then notifies the monitors (`src/adapter.c`); `DeviceFound` goes out through `g_dbus_send_message`, which first sends every pending signal, the `InterfacesAdded` among them, "to guarantee message order" (`g_dbus_flush`, `gdbus/object.c`). |
 
 **Through a monitor, the pods' payload arrives and the mouse reconnects** (Pro 3, Intel
 AX211, 2026-11-06, #189, [Runs](#runs)). With nobody discovering:
@@ -167,17 +174,27 @@ What is still open: [Open questions](#open-questions).
 
 ## Adapters and restarts
 
-What a client holds on BlueZ - its discovery, its battery providers - is BlueZ's to end:
+What a client holds on BlueZ - its discovery, its battery providers, its advertisement
+monitors - is BlueZ's to end:
 
 | Event | What ends | How a client hears of it |
 |---|---|---|
 | An adapter powers off (GNOME's switch, `rfkill`) | Every client's discovery on it (`adapter_stop` in BlueZ 5.87's `src/adapter.c`, #50; seen 2026-10-26) | `Adapter1.Powered` |
-| An adapter goes | Its battery providers (f968d20, #50; not tried on hardware) | `InterfacesRemoved` |
-| bluetoothd restarts | Every client's discovery and every battery provider (#50; seen 2026-10-26) | Only `NameOwnerChanged` for `org.bluez` |
+| An adapter goes | Its battery providers (f968d20, #50; not tried on hardware), and its monitors ([above](#discovery-and-directed-advertising); read, not run) | `InterfacesRemoved`, and `Release` on each monitor |
+| bluetoothd restarts | Every client's discovery and every battery provider (#50; seen 2026-10-26), and every monitor registration, which bluetoothd keeps in memory alone: `src/adv_monitor.c` stores and restores none (BlueZ 5.87; read, not run) | After a crash, only `NameOwnerChanged` for `org.bluez`. A graceful stop also first powers the adapters off, then removes them, releasing every monitor: see below |
 
-- **A restart says nothing else.** The match rules live in the bus daemon and survive
+- **A crash says nothing else.** The match rules live in the bus daemon and survive
   it, so signals keep arriving from the new bluetoothd and nothing in them looks wrong
   (#50).
+- **A graceful stop releases the monitors before bluetoothd leaves the bus** (BlueZ
+  5.87; read, not run). On SIGTERM, `adapter_shutdown` powers each powered adapter off;
+  once the main loop ends, `adapter_cleanup` removes every adapter, and `adapter_remove`
+  destroys its monitor manager, which calls `Release` on each active monitor
+  (`btd_adv_monitor_manager_destroy`, `monitor_release` in `src/adv_monitor.c`), all
+  before `disconnect_dbus` (`src/main.c`, `src/adapter.c`). Those calls are sent
+  without a reply awaited, and `disconnect_dbus` drops the connection without a flush
+  in that function: whether they reach the client is one of the
+  [open questions](#open-questions).
 - **A restart can show as two owner changes.** Under systemd's bus activation, a read
   after the first can already be answered by the new bluetoothd (f968d20, #50).
 - **`systemctl restart bluetooth` powers the adapter off**, and the pairs' connections
@@ -360,7 +377,8 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
   registration fails with the experimental interfaces off; the third needs `btmon`
   beside it for the RSSI values:
   - Which distributions run bluetoothd with its experimental interfaces on, which the
-    monitor needs? And does a registration fail as read, with them off? Not run.
+    monitor needs? And does a registration fail with `UnknownMethod`, as read, with them
+    off? Not run.
   - When another client stops discovering, bluetoothd removes the pods' devices
     ([Discovery](#discovery)). Does a monitor registered meanwhile report them found
     again at once? Run D did not stop the other client.
@@ -374,3 +392,6 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
   - Does a monitor hear again once its adapter has powered off and on? bluetoothd keeps
     it registered ([above](#discovery-and-directed-advertising)); whether the kernel
     scans for it again was not read, and has not run.
+  - On a graceful stop, do the `Release` calls reach a client before bluetoothd's name
+    leaves the bus ([Adapters and restarts](#adapters-and-restarts))? Read up to
+    `disconnect_dbus`, not further; not run.

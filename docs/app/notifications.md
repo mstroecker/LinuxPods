@@ -29,7 +29,7 @@ counts as below it, as in UPower.
 
 So a reading flipping across a threshold sends nothing. Armed again as soon as it was
 above `LOW`, a part read at 20% and 21% by turns would be warned about, withdrawn and
-warned about again several times a second. Its readings come from more than one source,
+warned about again at every turn. Its readings come from more than one source,
 which can lag each other by a step: both pods advertise, and AAP and the BLE reading it
 falls back to can differ. `REARM_ABOVE` is `LOW` and five points, which clears that step
 many times over, while a part really charged - more than a few minutes in the case - is
@@ -40,9 +40,14 @@ past it at once; and charging arms it anyway.
 it has gone, and across a relaunch ([state.md](state.md#the-ble-cache)), and that says
 nothing about the battery now.
 
-`FRESH` is a minute. A pair in range is heard many times a minute
-([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#update-frequency)),
-even across a discovery restart, so a minute without a word means it has gone. The window
+`FRESH` is a minute. A BLE reading comes only when a pod's payload changes or a new
+address is heard, or a monitor reports found a pod no signal from bluetoothd has brought since it was
+last lost
+([bluez.md](bluez.md#listening-for-the-pods)), and an idle pair can keep one payload for
+minutes
+([protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md#update-frequency)):
+a reading older than `FRESH` may be from a pair still in range, and is not warned about.
+The window
 draws the same line: under `ui::RECENT` is "Last seen just now". A reading is judged by its age when a snapshot comes in, so a
 cached one that comes along with another pair's update, or with the expiry clock's, warns
 about nothing.

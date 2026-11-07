@@ -103,7 +103,7 @@ struct Primary {
 
 impl Primary {
     /// Starts the background workers. Between them they reach well outside the
-    /// process - BLE discovery, the BlueZ battery provider, an AAP link to every
+    /// process - BLE scanning, the BlueZ battery provider, an AAP link to every
     /// connected pair, the tray icon, the low battery notifications - so there
     /// must only ever be one set.
     fn start(
@@ -114,7 +114,10 @@ impl Primary {
     ) -> Self {
         let (window_tx, window_rx) = async_channel::unbounded::<WindowCommand>();
 
-        runtime.spawn(ble_task(coordinator.clone()));
+        // For the rest of the app to read the scanning by, kept across its
+        // restarts; nothing reads it yet (#189).
+        let scan_control = ble::scanner::ScanControl::new();
+        runtime.spawn(ble_task(coordinator.clone(), scan_control));
         runtime.spawn(attachment::run(coordinator.clone()));
         runtime.spawn(expiry_task(coordinator.clone()));
         // On the system bus, where BlueZ is, connected once a level asks for
@@ -326,13 +329,14 @@ fn main() -> glib::ExitCode {
 }
 
 /// Feeds BLE advertisements from every powered adapter into the coordinator,
-/// for as long as the app runs: discovery follows the adapters as they change
-/// (see `Scanning`), and when the system bus cannot be reached, or BlueZ's
-/// signals on it end, scanning starts over, waiting longer each time.
-async fn ble_task(coordinator: Arc<Coordinator>) {
+/// for as long as the app runs: a monitor or discovery on each follows the
+/// adapters as they change (see `Scanning`), and when the system bus cannot be
+/// reached, or BlueZ's signals on it end, scanning starts over, waiting longer
+/// each time. `control` carries across those restarts.
+async fn ble_task(coordinator: Arc<Coordinator>, control: ble::scanner::ScanControl) {
     let mut backoff = Backoff::default();
     loop {
-        let wait = match scan().await {
+        let wait = match scan(control.clone()).await {
             Ok(mut scanning) => {
                 let began = std::time::Instant::now();
                 while let Some(advert) = scanning.next().await {
@@ -354,8 +358,8 @@ async fn ble_task(coordinator: Arc<Coordinator>) {
 }
 
 /// Scanning on the system bus, where BlueZ is.
-async fn scan() -> anyhow::Result<ble::scanner::Scanning> {
-    ble::scanner::Scanner::new().await?.scan().await
+async fn scan(control: ble::scanner::ScanControl) -> anyhow::Result<ble::scanner::Scanning> {
+    ble::scanner::Scanner::new().await?.scan(control).await
 }
 
 /// Asks the main context to quit at the first SIGTERM or SIGINT, which from

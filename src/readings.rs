@@ -20,8 +20,8 @@
 //! [`podstate::BLE_CACHE_TTL`] ago and not after now (see [`podstate::age`]) -
 //! and hands the whole map to
 //! [`Store::save`]. It saves no more often than its expiry clock ticks, and
-//! only when [`due`] says so, never per advertisement: a pair in range is
-//! heard several times a second.
+//! only when [`due`] says so, never per advertisement - see
+//! `docs/app/readings.md#saving`.
 //!
 //! A file that does not parse is set aside and the app starts with no
 //! readings, which costs only what it would have shown until the pairs are

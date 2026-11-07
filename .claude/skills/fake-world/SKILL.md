@@ -61,6 +61,15 @@ at `/org/bluez/hci1` instead, as on a machine whose only adapter is not the firs
 make fake-world SCENARIO=connected ADAPTER=hci1 HEADLESS=1
 ```
 
+The fake BlueZ runs as a stock bluetoothd does, without its experimental interfaces,
+so the app discovers. `EXPERIMENTAL=1` turns them on, and the app listens through an
+advertisement monitor instead (#189); `SetExperimental` and then `RestartBluez` switch
+at runtime, and `ReleaseMonitors` releases an adapter's monitors:
+
+```sh
+make fake-world EXPERIMENTAL=1 HEADLESS=1
+```
+
 `fakepods` starts with one adapter; plug in more, power them off and on, unplug them and
 restart the fake BlueZ at runtime with the adapter methods below (#50). The pipeline
 tests can also start with several, or one that is off (`World::with_adapters`).
@@ -118,9 +127,11 @@ scripts/fake-world.sh world RestartBluez
 |---|---|
 | `SetPowered(s adapter, b powered)` | off: discovery there ends, the devices it only heard advertising go, its pairs disconnect (AAP with them) and cannot connect until it is on; providers stay. On again, the pairs stay disconnected until `Connect` |
 | `AddAdapter(s adapter, b powered)` | plugs one in at `/org/bluez/<adapter>`; one plugged in before is the same controller, its pairs back, disconnected |
-| `RemoveAdapter(s adapter)` | unplugs it: stopped as when off, then its devices, its battery providers and their batteries go |
+| `RemoveAdapter(s adapter)` | unplugs it: stopped as when off, its advertisement monitors released, then its devices, its battery providers and their batteries go |
 | `AddPodsOn(s adapter, s mac, q model, s name)` | `AddPods`, with that adapter |
-| `RestartBluez()` | bluetoothd restarting without powering off, as after a crash: it comes back under a new unique name, `org.bluez` changes hands twice, and every client's discovery and battery providers are forgotten; adapters and connections stay. For a `systemctl restart`, which powers off first: `SetPowered` false, `RestartBluez`, `SetPowered` true |
+| `RestartBluez()` | bluetoothd restarting without powering off, as after a crash: it comes back under a new unique name, `org.bluez` changes hands twice, and every client's discovery, battery providers and advertisement monitors are forgotten; adapters and connections stay. For a `systemctl restart`, which powers off first and releases every monitor: `SetPowered` false, `ReleaseMonitors` on each adapter, `RestartBluez`, `SetPowered` true |
+| `SetExperimental(b on)` | bluetoothd's experimental interfaces on or off: every adapter offers advertisement monitors, or no longer does. Follow it with `RestartBluez`, as the user would restart bluetoothd |
+| `ReleaseMonitors(s adapter)` | releases the advertisement monitors registered with the adapter: the app discovers there instead |
 
 `RestartBluez` is a crash, and a narrow one: only `NameOwnerChanged` tells, and nothing is
 announced again. A real bluetoothd also announces every object again with
@@ -130,7 +141,11 @@ proves the `NameOwnerChanged` path only.
 
 The app should log, by adapter, `BLE discovery started` (or `restarted`) once the adapter
 is powered again, and `battery provider registered with` after `AddAdapter` or
-`RestartBluez` - not after `SetPowered`, which keeps providers. `Batteries` shows the
+`RestartBluez` - not after `SetPowered`, which keeps providers. With `EXPERIMENTAL=1` it
+logs `BLE advertisement monitor registered on` the adapter after `AddAdapter` or
+`RestartBluez` instead of a discovery start, and no registration after `SetPowered`, which
+keeps the monitor: a power-off logs only `not scanning on` the adapter. The adapter's
+`Discovering` stays false. `Batteries` shows the
 connected pair again after a `RestartBluez` without reconnecting.
 
 ## Drive the UI
@@ -281,8 +296,10 @@ the fake world's own config directory, never the user's -
   - **A BLE change shows at the pod's next advertisement,** one a second. A pod's
     address rotates every 10 s, far faster than on hardware, on purpose.
   - **An app started while another client discovers** hears a pod only once its payload
-    or address changes, up to about 10 s; started with nothing else discovering, it
-    hears each pod at its next advertisement.
+    or address changes, up to about 10 s - unless `EXPERIMENTAL=1`, where the monitor
+    reports each pod found at its next advertisement and the scanner reads the payload
+    from the device; started with nothing else discovering, it hears each pod at its next
+    advertisement.
   - **The noise mode comes only with the startup dump,** a moment after the battery:
     Noise Control is sensitive before any mode is selected. Set `dump_delay_ms` (and
     `handshake_delay_ms`) for the hardware's waits.

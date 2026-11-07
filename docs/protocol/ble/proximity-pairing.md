@@ -395,7 +395,7 @@ Which levels LinuxPods shows: [app/identification.md](../../app/identification.m
 | Longest unchanged stretch | 163 s, pods worn, connected to this host or to nothing, on both models | Pro 3 and Pro 2 (USB-C), 987ffe3 |
 | Idle pair | Same payload for minutes: over 40 s of scanning and across 2 minutes before it, in the open case, not connected to this host | Pro 3, 2026-11-02, #153 |
 | Closed lid | The pods stop advertising about 4 s after the lid closes | Pro 3, 2026-10-25 and 2026-11-01, #71 |
-| Discovery | When bluetoothd reports the pods' advertisements: [linux/bluez.md](../linux/bluez.md#discovery) | |
+| Discovery, or a monitor | When bluetoothd reports the pods' advertisements: [linux/bluez.md](../linux/bluez.md#discovery), and through an advertisement monitor [linux/bluez.md](../linux/bluez.md#discovery-and-directed-advertising) | |
 
 The payload gaps of 25 and 30 s are most likely what was once recorded here as a
 refresh every 20-30 s (a guess). On 2026-11-02, in each app run, each pod's payload

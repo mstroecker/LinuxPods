@@ -354,9 +354,12 @@ async fn managed_objects(conn: &Connection) -> Result<ManagedObjects> {
 ///
 /// What a client starts on an adapter lasts only as long as BlueZ keeps it.
 /// bluetoothd ends every client's discovery on an adapter as it powers off;
-/// an adapter that goes takes the battery providers registered with it along;
-/// and a new bluetoothd - a restart - knows of neither, for any adapter,
-/// saying so only by the name changing hands. So the set holds, for each
+/// an adapter that goes takes the battery providers and advertisement
+/// monitors registered with it along; and a new bluetoothd - a restart -
+/// knows of none of it, for any adapter, after a crash saying so only by the
+/// name changing hands
+/// ([protocol/linux/bluez.md](../../docs/protocol/linux/bluez.md#adapters-and-restarts)).
+/// So the set holds, for each
 /// adapter there is, two tokens: what a client started there under a token
 /// stands while the adapter has that token still. A new one is a sign to
 /// start again.
@@ -374,7 +377,8 @@ pub struct AdapterSet {
 /// One adapter in an [`AdapterSet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdapterState {
-    /// What was registered with the adapter - a battery provider - stands
+    /// What was registered with the adapter - a battery provider, an
+    /// advertisement monitor - stands
     /// while this is unchanged. It changes when an adapter is new at the
     /// path, or bluetoothd is.
     pub registration: u64,
@@ -1028,8 +1032,8 @@ impl Devices {
     ///
     /// The stream may be read at the caller's pace, with calls to BlueZ on the
     /// same connection in between: a task of its own drains the signals as they
-    /// arrive, as the rule takes in every advertisement after an address's
-    /// first while the app scans
+    /// arrive, as the rule takes in the advertisements bluetoothd signals after
+    /// an address's first while the app scans
     /// (#90, `docs/app/bluez.md#subscriptions-that-advertisements-reach`). The
     /// task ends with the connection, or when the stream is dropped.
     pub async fn watch_connections(&self) -> Result<impl Stream<Item = ConnectionEvent> + use<>> {
@@ -1075,9 +1079,11 @@ impl Devices {
     }
 }
 
-/// What [`drain`] holds for its reader, kept as the subscription needs it:
-/// [`Pending`] for the connection watch, the latest advertisement from each
-/// address for the scanner, [`AdapterChanges`] for the adapter watch. Each
+/// What [`coalesce`] holds for its reader, and [`drain`] through it, kept as
+/// its items need it: [`Pending`] for the connection watch, the latest
+/// advertisement from each address for the scanner, the monitor calls for the
+/// scanner's advertisement monitors, [`AdapterChanges`] for the adapter
+/// watch. Each
 /// `pop` gives out an `Out`: one item, or all of them in one. Neither `push`
 /// nor `pop` may panic halfway - see [`lock`].
 pub(crate) trait Queue: Default + Send + 'static {

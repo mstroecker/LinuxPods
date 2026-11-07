@@ -1,8 +1,10 @@
 # zbus
 
 What zbus 5 does that a D-Bus client built on it has to know: its message queues, when
-its object server starts answering, which ObjectManager signals for an object, what a
-match rule's sender checks, and order across subscriptions. Most turned up as bugs in the pipeline tests against the fake BlueZ, the
+its object server starts answering and in what order it runs calls, what it answers for
+an interface not served, which
+ObjectManager signals for an object, what a match rule's sender checks, and order across
+subscriptions. Most turned up as bugs in the pipeline tests against the fake BlueZ, the
 senders in review (#50, #132); each was then read in zbus 5.19.0's source. None needed
 hardware.
 
@@ -43,6 +45,17 @@ Seen in the pipeline tests under load (#125): the fake BlueZ's `GetManagedObject
 new battery provider's root - the call bluetoothd makes as it takes a registration - went
 unanswered in 5 of 120 runs on a connection built plain, and never on one built
 serving. What bluetoothd does while it waits: [bluez.md](bluez.md#battery-providers).
+
+- **Each call to an interface runs in a task of its own,** unless the interface is
+  declared with `spawn = false` (`#[interface(spawn = false)]`, default `true`:
+  zbus_macros 5.19.0's `src/iface.rs`). So two calls that came in order can run, and
+  finish, in either order (`ObjectServer::dispatch_method_call_try` in zbus 5.19.0's
+  `src/object_server/mod.rs`).
+- **With `spawn = false`, a call runs in the dispatch task itself,** awaited before the
+  next message is taken, so calls run in the order they came; every other call on the
+  connection waits meanwhile (`start_object_server` in `src/connection/mod.rs`).
+
+Read in the source, not tested on its own.
 
 ## Which ObjectManager signals
 
@@ -96,6 +109,15 @@ How bluetoothd's restarts show: [bluez.md](bluez.md#adapters-and-restarts).
 Seen in the pipeline tests (4ec4144, #49): the fake BlueZ read a provider's
 `InterfacesAdded`, `InterfacesRemoved` and `PropertiesChanged` from a stream each. A
 battery withdrawn and offered again within a moment was taken the other way round.
+
+## Calls to an interface not served
+
+**An interface not served at the path is answered with
+`org.freedesktop.DBus.Error.UnknownInterface`,** and a path with nothing served with
+`UnknownObject` (`ObjectServer::dispatch_method_call_try` in zbus 5.19.0's
+`src/object_server/mod.rs`, reached from `dispatch_call`). A method the served interface
+lacks is `UnknownMethod` (`dispatch_call_to_iface`, the same file). Read in the source,
+not tested on its own.
 
 ## Property setters
 

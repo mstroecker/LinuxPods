@@ -16,7 +16,9 @@
 # HEADLESS=1 puts the app on its own Broadway display, to watch in a browser,
 # instead of the desktop. ADAPTER=hci1 puts the fake BlueZ's one adapter at
 # /org/bluez/hci1 in place of hci0, as on a machine whose only adapter is not
-# the first. `make fake-world` builds the binaries first; this runs them as
+# the first. EXPERIMENTAL=1 runs the fake BlueZ with its experimental
+# interfaces on, so the app listens through an advertisement monitor rather
+# than discovery. `make fake-world` builds the binaries first; this runs them as
 # they are, from ${CARGO_TARGET_DIR:-target}/debug.
 #
 # Everything lives in $XDG_RUNTIME_DIR/linuxpods-harness/world: the buses'
@@ -112,6 +114,8 @@ free_display() {
 start() {
     scenario=${1:-in-range}
     adapter=${ADAPTER:-hci0}
+    experimental=
+    [ "${EXPERIMENTAL:-}" != 1 ] || experimental=--experimental
     for b in fakepods linuxpods; do
         [ -x "$bin/$b" ] || die "$bin/$b is missing: build with cargo build --features harness, or run make fake-world"
     done
@@ -138,11 +142,12 @@ start() {
     # ones by default - and plain logs, as they go to files.
     common="DBUS_SYSTEM_BUS_ADDRESS=$SYSTEM_BUS DBUS_SESSION_BUS_ADDRESS=$SESSION_BUS NO_COLOR=1"
 
-    # shellcheck disable=SC2086 # $common is a list of assignments
+    # shellcheck disable=SC2086 # $common is a list of assignments, $experimental empty or one flag
     spawn fakepods "$run/log/fakepods.log" env $common \
         RUST_LOG="${RUST_LOG:-linuxpods=debug,fakepods=debug}" \
         "$bin/fakepods" --address "$SYSTEM_BUS" --socket-dir "$run/aap" \
-        --scenario "$scenario" --adapter "$adapter" --keystore "$run/home/data/linuxpods" \
+        --scenario "$scenario" --adapter "$adapter" $experimental \
+        --keystore "$run/home/data/linuxpods" \
         --player-address "$SESSION_BUS"
     fakepods=$(tail -n 1 "$pids" | cut -d' ' -f1)
     i=0

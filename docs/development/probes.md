@@ -14,8 +14,8 @@ as [protocol/ble/proximity-pairing.md](../protocol/ble/proximity-pairing.md) cou
   The probe opens AAP to it, as the app does.
 - **Quit LinuxPods first** for `irk_probe`, `rename_probe` and
   `conversation_awareness --duck`, so the probe's AAP session is the only one, or the
-  only thing lowering the volume, and for `adv_monitor_probe`, so that nothing
-  discovers. The other probes say nothing either way.
+  only thing lowering the volume, and for `adv_monitor_probe` wherever LinuxPods
+  discovers - an adapter where BlueZ gives it no monitor - so that nothing discovers. The other probes say nothing either way.
 - **bluetoothd with its experimental interfaces on** (`Experimental = true` in
   `main.conf`) for `adv_monitor_probe`: the monitor interface is one of them
   ([protocol/linux/bluez.md](../protocol/linux/bluez.md#discovery-and-directed-advertising)).
@@ -268,7 +268,7 @@ payload BlueZ signals, each such device's removal, and every device's `Connected
 change. `RSSI` signals are counted. A typed line is printed as a timestamped marker; `q`
 or ctrl-c unregisters the monitor and prints a summary per address.
 
-- **`--discover`** also starts discovery, as the app does, with the monitor still
+- **`--discover`** also starts discovery, as the app does where it gets no monitor, with the monitor still
   registered: the same output with the active scan on, to compare the two.
 - **Close GNOME Settings' Bluetooth panel** as well: it discovers too. A run says
   something about the passive scan only while every adapter reads `discovering=false`.
