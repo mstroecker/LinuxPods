@@ -31,6 +31,14 @@ runs on: `Device Found` events came until 7 s after the kill (#123, run below). 
 graceful `systemctl restart bluetooth` does not leave it: bluetoothd stops discovery as
 it shuts down (#123).
 
+**Discovery runs in cycles.** On a controller that searches BR/EDR and LE at once
+(`HCI_QUIRK_SIMULTANEOUS_DISCOVERY`, set for Intel), each discovery ends after 10.24 s
+(`DISCOV_LE_TIMEOUT`, kernel `hci_sync.c`). bluetoothd starts the next at once when a
+discovery filter is in force, else 5 s later (`IDLE_DISCOV_TIMEOUT`,
+`discovering_callback` in BlueZ's `src/adapter.c`). GNOME Settings' Bluetooth panel sets
+only `Discoverable` and starts discovery once (gnome-bluetooth 47.2,
+`lib/bluetooth-client.c`). Read, not run.
+
 **When the last client stops discovering, bluetoothd removes the pods' devices**, as it
 does every temporary device that is not connectable and not connected
 (`discovery_cleanup` in BlueZ 5.87's `src/adapter.c`, #153). The pods' advertisements
@@ -327,6 +335,11 @@ start). Run D, twice:
   device's proximity pairing payload in its properties, and no `InterfacesAdded`.
   Signals carrying `RSSI`, 3 to 4 times a second.
 
+**LinuxPods through a monitor beside GNOME Settings' discovery: Intel AX211, kernel
+7.2.11, BlueZ 5.87, GNOME Settings 51.1, 2026-11-07, 2040e28 (#189).** With the
+Bluetooth panel open, the pair's readings still came, but about every 10 s, against
+promptly with it closed. Seen in the app, not timed.
+
 **Discovery start: Pro 3 in the open case, not connected, 2026-11-02, ce9ed40 (#153).**
 
 - With nothing else discovering, the app restarted several times. Each time the battery
@@ -389,6 +402,11 @@ reproduced twice.** Times as in #123's capture; the kill came about 2.2 s in.
     address still connect then? Not run: the runs here had privacy off.
   - Only the Intel AX211, with the patterns in the controller, has run. Does an adapter
     without `controller-patterns` behave the same?
+  - Under GNOME Settings' discovery the readings came about every 10 s
+    ([Runs](#runs)), close to the discovery cycle ([Discovery](#discovery)). Does the
+    controller report the pods only once per discovery? The kernel turns its duplicate
+    filter off while a monitor is registered (`hci_active_scan_sync`). `btmon` beside it
+    would show; not run.
   - Does a monitor hear again once its adapter has powered off and on? bluetoothd keeps
     it registered ([above](#discovery-and-directed-advertising)); whether the kernel
     scans for it again was not read, and has not run.
