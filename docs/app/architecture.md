@@ -26,7 +26,8 @@ goes the other way is spawned on the runtime.
 | The Preferences switch for pausing on the ears | the main context | `media::Media` | `watch`: [media-pause.md](media-pause.md) |
 | Speech levels | the coordinator | `volume::Volume` | events (`Coordinator::speech_events`): [state.md](state.md#events) |
 | Each pod's place | the coordinator | `media::Media` | events (`Coordinator::ear_events`): [state.md](state.md#events) |
-| How the adapters listen, and a discovery pause asked for | the scanner, and whoever holds the `ble::scanner::ScanControl` made in `Primary::start` | each other | `watch`es in `ScanControl`: [bluez.md](bluez.md#listening-for-the-pods) |
+| How the adapters listen | the scanner | the Preferences scanning hint, on the main context | `watch` (`ble::scanner::ScanControl::state`, the `ScanControl` made in `Primary::start`): [ui.md](ui.md#the-scanning-hint) |
+| A discovery pause asked for | the hint's button, on the main context | the scanner | `watch` in `ScanControl`: [bluez.md](bluez.md#listening-for-the-pods) |
 
 ## The tasks
 
@@ -45,7 +46,7 @@ goes the other way is spawned on the runtime.
 `main()` spawns `quit_on_signals` on every launch, outside that set: it turns SIGTERM and
 SIGINT into a quit, as the menu's.
 
-The window's render loop runs on the main context: [ui.md](ui.md#updates-come-from-snapshots).
+The window's render loops run on the main context: [ui.md](ui.md#updates-come-from-snapshots).
 
 At the quit, `main.rs` puts back a lowered volume, for `volume::RESTORE_LIMIT` at most
 ([volume.md](volume.md)), and saves the readings once more, without a bound

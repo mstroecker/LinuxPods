@@ -222,7 +222,9 @@ them with its encryption key status, turns low battery notifications off and on,
 pausing the media when a pod is taken out. Both switches are kept across restarts, in
 `~/.config/linuxpods/settings.json`. Low battery
 notifications need the launcher entry that `make install` writes: GNOME Shell shows none
-for an app it has no desktop entry for.
+for an app it has no desktop entry for. While LinuxPods scans in a way that can keep
+other Bluetooth devices from reconnecting, Preferences says so at the top: see
+[Troubleshooting](#troubleshooting).
 
 Setup is connecting the AirPods to this machine once. On every connection LinuxPods asks
 them for their keys - the IRK and the encryption key - and writes them to
@@ -234,6 +236,14 @@ ever change, asking again on each connection picks up the new ones: reconnecting
 AirPods is all it takes. Once heard, a pair's last reading stays on show for a day, with
 how long ago it was heard - a pair in its closed case says nothing - and across restarts
 too, kept in `~/.local/share/linuxpods/readings.json` beside the keys.
+
+## Troubleshooting
+
+**A Bluetooth mouse or keyboard does not reconnect while LinuxPods runs.** On a stock
+BlueZ, LinuxPods scans in a way that can keep some of them from reconnecting, and
+Preferences then says so, with a button that pauses the scan. The fix is a line in
+`/etc/bluetooth/main.conf`: see
+[`docs/user/other-devices.md`](docs/user/other-devices.md).
 
 ## How it works
 
@@ -255,7 +265,8 @@ Coordinator (state per device, keyed by real MAC)
 
 The design is in [`docs/app/architecture.md`](docs/app/architecture.md).
 [`docs/README.md`](docs/README.md) maps the rest of the documentation: what the AirPods
-and Linux do, in `docs/protocol/`, and what LinuxPods does about it, in `docs/app/`.
+and Linux do, in `docs/protocol/`, what LinuxPods does about it, in `docs/app/`, and what
+users need to know, in `docs/user/`.
 
 ## Development
 

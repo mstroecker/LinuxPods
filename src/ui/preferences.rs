@@ -1,4 +1,5 @@
-//! The Preferences dialog, and the Development group the update loop fills.
+//! The Preferences dialog, with the scanning hint the scanner's state shows,
+//! and the Development group the update loop fills.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -6,13 +7,22 @@ use std::collections::HashMap;
 use adw::prelude::*;
 use bluer::Address;
 
+use super::scanning::ScanHint;
 use super::{RECENT, last_seen_text, shown_age, unavailable_row};
+use crate::ble::scanner::ScanControl;
 use crate::podstate::{PodState, Snapshot};
 
-/// The Preferences dialog, and its Development group for the update loop to
-/// fill.
-pub(super) fn create_preferences_dialog() -> (adw::PreferencesDialog, DeviceRows) {
+/// The Preferences dialog, its scanning hint, whose button asks `scan` for a
+/// pause, and its Development group for the update loop to fill.
+pub(super) fn create_preferences_dialog(
+    scan: ScanControl,
+) -> (adw::PreferencesDialog, ScanHint, DeviceRows) {
     let page = adw::PreferencesPage::new();
+
+    // On top, as it says why another device may not connect; hidden unless
+    // the scanner discovers.
+    let hint = ScanHint::new(scan);
+    page.add(hint.group());
 
     // Auto-connect does not exist yet: the app always connects.
     let settings_group = adw::PreferencesGroup::builder().title("General").build();
@@ -37,7 +47,7 @@ pub(super) fn create_preferences_dialog() -> (adw::PreferencesDialog, DeviceRows
         rows: RefCell::default(),
         shown: RefCell::default(),
     };
-    (dialog, devices)
+    (dialog, hint, devices)
 }
 
 /// The switch for low battery notifications, bound to the application action

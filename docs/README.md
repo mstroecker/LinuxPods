@@ -2,7 +2,8 @@
 
 Two kinds of document live here, and they are kept apart: what the AirPods and the
 Linux Bluetooth stack do, in `protocol/`, and what LinuxPods does about it, in `app/`.
-`development/` holds what is needed to work on LinuxPods rather than to understand it.
+`development/` holds what is needed to work on LinuxPods rather than to understand it,
+and `user/` what someone using it needs.
 
 ## Which side a fact goes on
 
@@ -51,6 +52,20 @@ and how to try it on a pair.
 
 Releases, the fake world and where it departs from the hardware, and the probes in
 `examples/` that the protocol runs were made with.
+
+## `user/`
+
+For people who use LinuxPods, not those who change it: a problem they may meet, how to
+tell it is theirs, and what to do. The app links some of these on GitHub, so a file
+here keeps its name.
+
+- **Plain words, and no names from our code** - no types, constants, functions or log
+  lines. What the user sees in the app is named as the app shows it.
+- **The steps are written out; the reason is linked.** A fact about the AirPods or the
+  Linux stack is linked to the `protocol/` or `app/` section that has it, with its
+  source, not restated: that link is where rule 2 is met.
+- **No Open questions or Hardware checks.** What is not known yet stays in the document
+  linked.
 
 ## Rules for every document
 
@@ -141,7 +156,7 @@ four files after their document called them guesses.
 ## Where else
 
 - `README.md` at the root says what the app does, for users: features, installing,
-  usage. It links here for how.
+  usage. It links here for how, and to `user/` for a problem a user may meet.
 - `AGENTS.md` holds the rules for working in this repository: one line per invariant,
   with a link to the `app/` or `protocol/` document that says why, or to the rule here
   it follows.

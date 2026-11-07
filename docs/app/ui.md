@@ -6,9 +6,10 @@ document; this one covers what holds for all of them.
 
 ## Updates come from snapshots
 
-**Widgets change only from the snapshot stream** ([state.md](state.md#snapshots)). The
-window's render loop runs on the main context, the only place a widget may be touched
-([architecture.md](architecture.md#two-threads)).
+**Widgets change only from the snapshot stream** ([state.md](state.md#snapshots)), and
+the scanning hint from the scanner's ([The scanning hint](#the-scanning-hint)). The
+window's render loops, one per stream, run on the main context, the only place a widget
+may be touched ([architecture.md](architecture.md#two-threads)). Each:
 
 - **One pass per `RENDER_INTERVAL` at most.** tokio's cooperative budget does not reach
   glib's executor: under a stream of updates `changed()` would stay ready, and the loop
@@ -16,8 +17,12 @@ window's render loop runs on the main context, the only place a widget may be to
   whatever is newest.
 - **The borrow is cloned out** before anything is awaited: it is a read lock every
   broadcast waits for.
-- **A clock redraws** the window every 30 seconds, so a BLE reading's age moves on with no
-  snapshot. Under `RECENT` it reads "Last seen just now".
+- **Draws the current value at once:** `Coordinator::subscribe` and `ScanControl::state`
+  hand out receivers marked changed, so a window built after the value was set still
+  draws it.
+
+A clock redraws the window every 30 seconds, so a BLE reading's age moves on with no
+snapshot. Under `RECENT` it reads "Last seen just now".
 
 **The one exception is a command that fails** ([commands.md](commands.md#what-the-caller-hears)).
 Its result comes back to the main context and goes up as a toast: an event, never a
@@ -39,6 +44,48 @@ they are insensitive unless the pair shown is on AAP. BLE is receive-only.
 snapshot again, which puts the switch back.
 
 The Firmware row below Name is no command: [firmware.md](firmware.md#what-the-app-does-with-it).
+
+## The scanning hint
+
+**Preferences says while LinuxPods listens by discovery** (#189). While a powered adapter
+has no advertisement monitor (`ScanState::fallback`), a group at the top of Preferences
+says that mice and similar devices may not reconnect while the app scans. Why they do
+not: [bluez.md](bluez.md#listening-for-the-pods). Hidden, it takes no space.
+
+| Row | Does |
+|---|---|
+| The pause row | Its button calls `ScanControl::pause_discovery`: the app's discovery stops for `DISCOVERY_PAUSE`. Its title reads "Scanning", or "Paused until" and the local time the pause ends, from `ScanState::paused_until`. Pressed again while paused, the pause runs that long from then. |
+| The guide row | Opens the user document [other-devices.md](../user/other-devices.md) on GitHub's `main`, in the browser |
+
+The group's description says that AirPods nearby go unheard while paused, and that
+another client's discovery, such as GNOME Settings' Bluetooth panel, still blocks
+([bluez.md](bluez.md#listening-for-the-pods)).
+
+**A second stream, not part of the snapshot.** The scanner's state is no pair's state,
+and the window alone reads it. Carried in the snapshot, every change would wake the tray,
+attachment and the notifier for nothing, and the coordinator would hold state it does
+not merge. So the window follows `ScanControl::state` as it follows the snapshots, with
+the same loop, and the harness's `Settle` waits for both.
+
+**The pause shows only once the scanner reports it.** The button changes nothing on
+screen: the scanner stops its discovery and sends the new state, which draws the pause,
+as a command's result comes back with the snapshot.
+
+**The time the pause ends, not a countdown.** A countdown would redraw every second from a
+clock, outside either stream. The end is drawn once; when it comes, the scanner sends a
+new state, and the row reads "Scanning" again. A pause whose end has passed before that
+state arrives already reads "Scanning".
+
+**Not damped.** During a graceful bluetoothd restart, `fallback` can be true for a moment:
+a `Release` can come before the adapter watch hears the adapters power off
+([bluez.md](bluez.md#hardware-checks)). The hint would then show for that moment. It is
+not held back, as:
+
+- the scanner does fall back to discovery then, though its starts fail, so the hint says
+  what is so;
+- a delay before showing would hold the hint back wherever it is true too, by a length
+  no run has measured;
+- Preferences is seldom open while bluetoothd restarts: a guess.
 
 ## Drop-downs
 
@@ -99,4 +146,4 @@ icon, and cannot read resources inside the binary.
 ## Hardware checks
 
 None open: the UI has no hardware of its own. The features' checks are in their
-documents.
+documents, the scanning hint's in [bluez.md](bluez.md#hardware-checks).

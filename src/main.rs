@@ -2,9 +2,11 @@
 //!
 //! GTK owns the main thread; a multi-threaded tokio runtime carries the BLE, AAP
 //! and D-Bus work, and the two meet over channels: snapshots come to the UI on a
-//! watch channel, commands go to the AirPods on their link's queue - see
+//! watch channel, and the scanner's state on another, for the scanning hint,
+//! whose pause goes back to the scanner on a third - see `ScanControl`;
+//! commands go to the AirPods on their link's queue - see
 //! `Coordinator::command` - the switch for pausing on the ears to the media
-//! task on another, and the tray's window commands, the low battery
+//! task on another watch, and the tray's window commands, the low battery
 //! notifications and a quit asked for by SIGTERM or SIGINT to the GTK main
 //! context on async channels.
 
@@ -99,6 +101,9 @@ struct Primary {
     /// Puts back the volumes lowered while the user speaks, as the app
     /// quits.
     volume: volume::VolumeControl,
+    /// How the scanner listens, and the pause it takes, for the window's
+    /// scanning hint.
+    scan_control: ble::scanner::ScanControl,
 }
 
 impl Primary {
@@ -114,10 +119,10 @@ impl Primary {
     ) -> Self {
         let (window_tx, window_rx) = async_channel::unbounded::<WindowCommand>();
 
-        // For the rest of the app to read the scanning by, kept across its
-        // restarts; nothing reads it yet (#189).
+        // Kept across the scanner's restarts, for the window's scanning hint
+        // to read and pause it by (#189).
         let scan_control = ble::scanner::ScanControl::new();
-        runtime.spawn(ble_task(coordinator.clone(), scan_control));
+        runtime.spawn(ble_task(coordinator.clone(), scan_control.clone()));
         runtime.spawn(attachment::run(coordinator.clone()));
         runtime.spawn(expiry_task(coordinator.clone()));
         // On the system bus, where BlueZ is, connected once a level asks for
@@ -158,6 +163,7 @@ impl Primary {
             window_rx,
             window: RefCell::default(),
             volume,
+            scan_control,
         }
     }
 
@@ -168,7 +174,7 @@ impl Primary {
             return win.clone();
         }
 
-        let win = ui::activate(app, self.coordinator.clone());
+        let win = ui::activate(app, self.coordinator.clone(), self.scan_control.clone());
         *self.window.borrow_mut() = Some(win.clone());
 
         // Tray commands arrive here, on the main context, where touching the

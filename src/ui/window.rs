@@ -1,5 +1,6 @@
 //! The main window: header bar, primary menu and About dialog, and the update
-//! loop that draws the coordinator's snapshots into them.
+//! loops that draw the coordinator's snapshots and the scanner's state into
+//! them.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -9,12 +10,14 @@ use std::time::Duration;
 use adw::prelude::*;
 use bluer::Address;
 use gtk::{gio, glib};
+use tokio::sync::watch;
 
 use super::control::{
     ControlView, choose_device, create_control_view, noise_mode_from_target, render_device,
     sync_device_list,
 };
 use super::preferences::{DeviceRows, create_preferences_dialog};
+use crate::ble::scanner::ScanControl;
 use crate::podstate::{Command, ConnectionLost, Coordinator, Snapshot};
 
 /// Shortest gap between two renders. Readings change over minutes, while a
@@ -23,10 +26,16 @@ const RENDER_INTERVAL: Duration = Duration::from_millis(100);
 
 const WEBSITE: &str = "https://github.com/mstroecker/LinuxPods";
 
-/// Builds the window and wires it to the coordinator. The caller presents it,
-/// so that `--minimized` can leave it built but hidden.
-pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::ApplicationWindow {
+/// Builds the window and wires it to the coordinator, and Preferences' scanning
+/// hint to `scan`. The caller presents it, so that `--minimized` can leave it
+/// built but hidden.
+pub fn activate(
+    app: &adw::Application,
+    coordinator: Arc<Coordinator>,
+    scan: ScanControl,
+) -> adw::ApplicationWindow {
     let updates = Rc::new(RefCell::new(coordinator.subscribe()));
+    let scan_updates = Rc::new(RefCell::new(scan.state()));
     let win = adw::ApplicationWindow::new(app);
     win.set_widget_name("main-window");
     win.set_title(Some("LinuxPods"));
@@ -40,7 +49,7 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
     win.set_hide_on_close(true);
 
     let control = create_control_view();
-    let (prefs, devices) = create_preferences_dialog();
+    let (prefs, scan_hint, devices) = create_preferences_dialog(scan);
     let toasts = setup_ui(&win, &control);
 
     // The primary menu's entries. Preferences is built once and kept, since the
@@ -205,32 +214,42 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
         ),
     );
 
-    // Updates arrive over a watch channel consumed on the main context. GTK types
+    // Updates arrive over watch channels consumed on the main context. GTK types
     // are !Send, so this is the only legal way in - enforced at compile time.
-    //
-    // The loop waits on a clone of the receiver, which starts out having seen
-    // what the receiver has seen. The receiver itself is then never borrowed
-    // across an await, so whether a snapshot is waiting can be asked of it at
-    // any time - as the harness's Settle does.
+    // The scanner's state is a second stream, for the scanning hint alone.
     #[cfg(feature = "harness")]
     super::automation::watch_render_loop({
-        let updates = Rc::downgrade(&updates);
-        move || {
-            updates
-                .upgrade()
-                .is_some_and(|updates| updates.borrow().has_changed().unwrap_or(false))
-        }
+        let snapshots = Rc::downgrade(&updates);
+        let scanning = Rc::downgrade(&scan_updates);
+        move || waiting(&snapshots) || waiting(&scanning)
     });
+    follow(updates, move |snapshot| ui.apply(snapshot));
+    follow(scan_updates, move |state| scan_hint.show(state));
+
+    win
+}
+
+/// Draws each value `updates` brings with `apply`, on the main context, for as
+/// long as its sender lasts.
+///
+/// The loop waits on a clone of the receiver, which starts out having seen
+/// what the receiver has seen. The receiver itself is then never borrowed
+/// across an await, so whether a value is waiting can be asked of it at any
+/// time - as the harness's Settle does.
+fn follow<T: Clone + 'static>(
+    updates: Rc<RefCell<watch::Receiver<T>>>,
+    apply: impl Fn(T) + 'static,
+) {
     glib::spawn_future_local(async move {
         loop {
             let mut next = updates.borrow().clone();
             if next.changed().await.is_err() {
                 break;
             }
-            // Cloned out: the borrow is a read lock every broadcast waits for, so it
+            // Cloned out: the borrow is a read lock every send waits for, so it
             // must not live across an await.
-            let snapshot = updates.borrow_mut().borrow_and_update().clone();
-            ui.apply(snapshot);
+            let value = updates.borrow_mut().borrow_and_update().clone();
+            apply(value);
 
             // tokio's cooperative budget does not reach the GTK main context, so
             // under a stream of updates `changed()` would stay ready and this loop
@@ -239,8 +258,15 @@ pub fn activate(app: &adw::Application, coordinator: Arc<Coordinator>) -> adw::A
             glib::timeout_future(RENDER_INTERVAL).await;
         }
     });
+}
 
-    win
+/// Whether a value is waiting for the loop that follows `updates`: false once
+/// the window that held it is gone.
+#[cfg(feature = "harness")]
+fn waiting<T>(updates: &std::rc::Weak<RefCell<watch::Receiver<T>>>) -> bool {
+    updates
+        .upgrade()
+        .is_some_and(|updates| updates.borrow().has_changed().unwrap_or(false))
 }
 
 /// The widgets that change once the window is built, and the state that the
@@ -427,6 +453,30 @@ fn command_failed(command: &Command, error: &anyhow::Error) -> String {
 mod tests {
     use super::*;
     use crate::aap::NoiseMode;
+
+    /// A value sent on either stream is waiting until its loop has taken it
+    /// in, and nothing is once the window holding the receiver is gone.
+    #[cfg(feature = "harness")]
+    #[test]
+    fn a_value_waits_on_either_stream() {
+        let (snapshots_tx, snapshots_rx) = watch::channel(0_u32);
+        let (scanning_tx, scanning_rx) = watch::channel(false);
+        let snapshots = Rc::new(RefCell::new(snapshots_rx));
+        let scanning = Rc::new(RefCell::new(scanning_rx));
+        let (weak_snapshots, weak_scanning) = (Rc::downgrade(&snapshots), Rc::downgrade(&scanning));
+        let any = || waiting(&weak_snapshots) || waiting(&weak_scanning);
+        assert!(!any());
+
+        scanning_tx.send_replace(true);
+        assert!(any());
+        scanning.borrow_mut().borrow_and_update();
+        assert!(!any());
+
+        snapshots_tx.send_replace(1);
+        assert!(any());
+        drop(snapshots);
+        assert!(!any());
+    }
 
     #[test]
     fn a_lost_connection_is_not_a_failed_command() {
