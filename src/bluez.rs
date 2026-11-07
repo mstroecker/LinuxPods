@@ -407,6 +407,12 @@ impl AdapterSet {
         self.owner.is_some()
     }
 
+    /// The unique name of the bluetoothd the adapters were read from, `None`
+    /// while none answered: the only sender whose signals and calls count.
+    pub fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
     /// The set as read from the bluetoothd at `owner`: `adapters`, each new
     /// unless that is the bluetoothd this set was read from and the adapter
     /// was here all along. `changes` are what each sender signaled since
@@ -1090,38 +1096,77 @@ where
     Q: Queue,
     S: Stream<Item = Q::Item> + Send + 'static,
 {
-    let pending = Arc::new(Mutex::new(Q::default()));
-    // Rung after every push. It holds one ring at most, so the task never
-    // waits on the reader: a ring waiting already means the reader will look.
-    let (bell, mut rung) = mpsc::channel(1);
-    let queue = pending.clone();
+    let (pusher, pending) = coalesce::<Q>();
     tokio::spawn(async move {
         tokio::pin!(events);
         loop {
             tokio::select! {
-                () = bell.closed() => return,
+                () = pusher.closed() => return,
                 event = events.next() => match event {
-                    Some(event) => {
-                        lock(&queue).push(event);
-                        let _ = bell.try_send(());
-                    }
+                    Some(event) => pusher.push(event),
                     None => return,
                 },
             }
         }
     });
-    futures_util::stream::poll_fn(move |cx| {
+    pending
+}
+
+/// Where items go into a `Q` from outside a stream - from an object's method
+/// that a D-Bus peer calls, say - for the stream [`coalesce`] returned with it
+/// to take out. A push never waits for that stream's reader. Clones push into
+/// the same `Q`.
+pub(crate) struct Pusher<Q> {
+    pending: Arc<Mutex<Q>>,
+    /// Rung after every push. It holds one ring at most, so a push never
+    /// waits on the reader: a ring waiting already means the reader will look.
+    bell: mpsc::Sender<()>,
+}
+
+impl<Q> Clone for Pusher<Q> {
+    fn clone(&self) -> Self {
+        Self {
+            pending: self.pending.clone(),
+            bell: self.bell.clone(),
+        }
+    }
+}
+
+impl<Q: Queue> Pusher<Q> {
+    pub(crate) fn push(&self, item: Q::Item) {
+        lock(&self.pending).push(item);
+        let _ = self.bell.try_send(());
+    }
+
+    /// Returns once the stream is dropped.
+    async fn closed(&self) {
+        self.bell.closed().await;
+    }
+}
+
+/// A `Q`, with the [`Pusher`] that fills it and the stream that empties it,
+/// at its reader's pace. The stream ends once every pusher is dropped and
+/// nothing is pending.
+pub(crate) fn coalesce<Q: Queue>() -> (Pusher<Q>, impl Stream<Item = Q::Out> + use<Q>) {
+    let pending = Arc::new(Mutex::new(Q::default()));
+    let (bell, mut rung) = mpsc::channel(1);
+    let pusher = Pusher {
+        pending: pending.clone(),
+        bell,
+    };
+    let stream = futures_util::stream::poll_fn(move |cx| {
         loop {
             if let Some(event) = lock(&pending).pop() {
                 return Poll::Ready(Some(event));
             }
-            // Every push rings after it, so with the task gone and no ring
-            // left, nothing more is coming.
+            // Every push rings after it, so with every pusher gone and no
+            // ring left, nothing more is coming.
             if ready!(rung.poll_recv(cx)).is_none() {
                 return Poll::Ready(None);
             }
         }
-    })
+    });
+    (pusher, stream)
 }
 
 /// The connection events waiting for the watch's reader: every `Connected`
